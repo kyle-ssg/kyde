@@ -12,6 +12,7 @@ pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
 mod ui;
 pub(crate) use ui::*;
 mod branch;
+mod browse;
 mod commit;
 mod diff_view;
 mod file_ops;
@@ -24,6 +25,9 @@ mod onboarding;
 mod projects_view;
 mod push;
 mod rollback;
+mod tabs;
+#[cfg(feature = "terminal")]
+mod terminal_panel;
 pub(crate) use app::{
     CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
     STATUS_REFRESH_DEBOUNCE,
