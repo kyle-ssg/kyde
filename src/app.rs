@@ -6,7 +6,7 @@ use super::*;
 
 /// Rows of context kept above the target line when auto-scrolling to a diff hunk or a
 /// search hit, so it lands a few rows below the viewport top instead of pinned to it.
-const SCROLL_CONTEXT_ROWS: usize = 3;
+pub(crate) const SCROLL_CONTEXT_ROWS: usize = 3;
 /// Debounce before the editable diff pane saves + re-diffs after a keystroke (the save +
 /// `git status` + re-diff all shell out, so bursts of typing are coalesced).
 const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
@@ -14,12 +14,12 @@ const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis
 const STATUS_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 /// Debounce before a Find-in-Files keystroke fires the background `git grep` (coalesces
 /// bursts of typing — a full-repo grep is far too expensive to run per keystroke).
-const CONTENT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
 /// Minimum query length before Find-in-Files runs. 1-char queries match almost every line
 /// in the repo (tens of MB of hits), so we wait until the query is specific enough.
-const CONTENT_MIN_QUERY: usize = 2;
+pub(crate) const CONTENT_MIN_QUERY: usize = 2;
 /// Max fuzzy-finder results rendered at once.
-const FINDER_RESULT_CAP: usize = 50;
+pub(crate) const FINDER_RESULT_CAP: usize = 50;
 
 /// Recursively list files under `root` (repo-relative, sorted) for the Browse tree when the
 /// folder is NOT a git repo — `git ls-files` can't drive it then, so we walk the filesystem
@@ -1558,7 +1558,7 @@ impl Kyde {
     /// `cx.open_window` never runs inside this `Kyde` update — the new window's first render
     /// calls back into `Kyde` (`kyde.update`), which would panic re-entrantly otherwise. See
     /// the memory note on gpui phase/re-entrancy gotchas.
-    fn open_modal_window(
+    pub(crate) fn open_modal_window(
         &mut self,
         kind: ModalKind,
         title: impl Into<SharedString>,
@@ -1922,7 +1922,7 @@ impl Kyde {
     /// "Select Opened File in Tree" (IntelliJ-style): switch to Browse, expand
     /// every ancestor of the active file, select its row, and scroll it into
     /// view. Falls back to the highlighted row if no file is open.
-    fn reveal_in_tree(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_in_tree(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self
             .open_path
             .clone()
@@ -2426,160 +2426,8 @@ impl Kyde {
         self.refresh();
     }
 
-    // ── finder ────────────────────────────────────────────────────
-    /// Debounced, background Find-in-Files. `git grep` on a large repo is far too expensive
-    /// to run synchronously per keystroke (a 1-char query took ~20s / 29MB on a 2.7k-file
-    /// repo and froze the UI). So: enforce a minimum query length, debounce keystroke bursts,
-    /// run the grep off the UI thread, and apply results only if no newer keystroke
-    /// superseded this one (generation check, like the diff-edit autosave).
-    fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
-        let q = self.finder_query.read(cx).text().trim().to_string();
-        self.finder_gen = self.finder_gen.wrapping_add(1);
-        let gen = self.finder_gen;
-        self.finder_selected = 0;
-        // Too short → clear immediately, never grep (matches almost every line in the repo).
-        if q.len() < CONTENT_MIN_QUERY {
-            self.content_results = Vec::new();
-            cx.notify();
-            return;
-        }
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(CONTENT_SEARCH_DEBOUNCE)
-                .await;
-            // Superseded by a newer keystroke during the debounce window? Skip the grep.
-            if this.update(cx, |this, _| this.finder_gen).unwrap_or(gen) != gen {
-                return;
-            }
-            let hits = cx
-                .background_executor()
-                .spawn(async move {
-                    Repo::discover(&root)
-                        .map(|r| r.grep(&q))
-                        .unwrap_or_default()
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                // Apply only if still the latest search and the finder's still in Content mode.
-                if this.finder_gen == gen
-                    && this.finder_open
-                    && this.finder_mode == FinderMode::Content
-                {
-                    this.content_results = hits
-                        .into_iter()
-                        .map(|(path, line, text)| ContentHit { path, line, text })
-                        .collect();
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
 
-    fn recompute_finder(&mut self, cx: &Context<Self>) {
-        let q = self.finder_query.read(cx).text().to_string();
-        let matcher = SkimMatcherV2::default();
-        self.finder_selected = 0;
-        match self.finder_mode {
-            FinderMode::Files => {
-                let mut scored: Vec<(i64, &PathBuf)> = self
-                    .all_files
-                    .iter()
-                    .filter_map(|p| {
-                        let s = p.to_string_lossy();
-                        if q.is_empty() {
-                            Some((0, p))
-                        } else {
-                            matcher.fuzzy_match(&s, &q).map(|sc| (sc, p))
-                        }
-                    })
-                    .collect();
-                scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.finder_results = scored
-                    .into_iter()
-                    .take(FINDER_RESULT_CAP)
-                    .map(|(_, p)| p.clone())
-                    .collect();
-            }
-            FinderMode::Actions => {
-                // "Reveal in Finder/Terminal" only make sense with an active/selected file.
-                let have_file = self.open_path.is_some() || self.selected_path.is_some();
-                let mut scored: Vec<(i64, usize)> = PALETTE
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (_, a, _))| {
-                        have_file
-                            || !matches!(
-                                a,
-                                PaletteAction::RevealInFinder | PaletteAction::RevealInTerminal
-                            )
-                    })
-                    .filter_map(|(i, (label, _, _))| {
-                        if q.is_empty() {
-                            Some((0, i))
-                        } else {
-                            matcher.fuzzy_match(label, &q).map(|sc| (sc, i))
-                        }
-                    })
-                    .collect();
-                scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.action_results = scored.into_iter().map(|(_, i)| i).collect();
-            }
-            FinderMode::Content => {
-                // Literal (non-fuzzy) full-text search via `git grep`. Empty query → no hits.
-                self.content_results = if q.is_empty() {
-                    Vec::new()
-                } else {
-                    self.repo()
-                        .map(|r| r.grep(&q))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|(path, line, text)| ContentHit { path, line, text })
-                        .collect()
-                };
-            }
-            FinderMode::Scratch => {
-                let mut scored: Vec<(i64, usize)> = scratch::LANGS
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, (label, _))| {
-                        if q.is_empty() {
-                            Some((0, i))
-                        } else {
-                            matcher.fuzzy_match(label, &q).map(|sc| (sc, i))
-                        }
-                    })
-                    .collect();
-                scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.action_results = scored.into_iter().map(|(_, i)| i).collect();
-            }
-        }
-    }
 
-    fn open_finder(&mut self, mode: FinderMode, window: &mut Window, cx: &mut Context<Self>) {
-        self.finder_mode = mode;
-        self.finder_open = true;
-        let placeholder = match mode {
-            FinderMode::Files => "Type to search files…",
-            FinderMode::Content => "Type to search file contents…",
-            FinderMode::Actions => "Type to search actions…",
-            FinderMode::Scratch => "Pick a language…",
-        };
-        self.finder_query.update(cx, |e, cx| {
-            e.placeholder = placeholder.into();
-            e.set_content(String::new(), Lang::PlainText, cx)
-        });
-        self.recompute_finder(cx);
-        let handle = self.finder_query.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        // First open: the input element isn't in the tree yet, so also focus next frame.
-        window.defer(cx, move |window, _cx| window.focus(&handle));
-        cx.notify();
-    }
 
     // ── in-editor find / replace ──────────────────────────────────
     pub(crate) fn act_toggle_fps(
@@ -2672,218 +2520,8 @@ impl Kyde {
         }
     }
 
-    pub(crate) fn act_find(&mut self, _: &FindInFile, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_find(false, window, cx);
-    }
-    pub(crate) fn act_replace(
-        &mut self,
-        _: &ReplaceInFile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_find(true, window, cx);
-    }
-    /// The editor the find/replace bar currently acts on.
-    fn find_ed(&self) -> Entity<CodeEditor> {
-        match self.find_target {
-            crate::FindTarget::File => self.file_editor.clone(),
-            crate::FindTarget::DiffLeft => self.diff_left.clone(),
-            crate::FindTarget::DiffRight => self.diff_right.clone(),
-        }
-    }
-    pub(crate) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Works in the Browse editor (with a file open) and the Show-Diff view's panes.
-        let target = if self.diff_view_open {
-            // Default to the working (right) pane; the base (left) pane is read-only.
-            if self.diff_left.read(cx).focus_handle.is_focused(window) {
-                crate::FindTarget::DiffLeft
-            } else {
-                crate::FindTarget::DiffRight
-            }
-        } else if self.mode == Mode::Browse && self.open_path.is_some() {
-            crate::FindTarget::File
-        } else {
-            return;
-        };
-        self.find_target = target;
-        self.find_open = true;
-        // Replace needs an editable target — the diff base pane / committed diffs are read-only,
-        // so ⌘R there opens find only.
-        self.find_replace = replace && !self.find_ed().read(cx).read_only;
-        self.recompute_find(cx);
-        let handle = self.find_query.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        window.defer(cx, move |window, _cx| window.focus(&handle));
-        cx.notify();
-    }
-    pub(crate) fn close_find(
-        &mut self,
-        _: &CloseFind,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.find_open = false;
-        self.find_matches.clear();
-        let ed = self.find_ed();
-        // Only the file editor's `word_bg` is owned by find — the diff panes use `word_bg` for
-        // word-level diff highlighting, so don't clobber it there.
-        if self.find_target == crate::FindTarget::File {
-            ed.update(cx, |e, _| e.word_bg.clear());
-        }
-        let handle = ed.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        cx.notify();
-    }
-    /// Recompute match ranges for the current query (ASCII case-insensitive) and repaint
-    /// the highlights + select the current match.
-    fn recompute_find(&mut self, cx: &mut Context<Self>) {
-        let q = self.find_query.read(cx).text().to_string();
-        let content = self.find_ed().read(cx).text().to_string();
-        self.find_matches.clear();
-        if !q.is_empty() && q.len() <= content.len() {
-            // `to_ascii_lowercase` preserves byte length, so positions map 1:1 to `content`.
-            let hay = content.to_ascii_lowercase();
-            let needle = q.to_ascii_lowercase();
-            let mut from = 0usize;
-            while let Some(pos) = hay[from..].find(&needle) {
-                let s = from + pos;
-                self.find_matches.push(s..s + needle.len());
-                from = s + needle.len();
-            }
-        }
-        if self.find_idx >= self.find_matches.len() {
-            self.find_idx = 0;
-        }
-        self.apply_find_highlight(cx);
-    }
-    /// Paint match highlights on the editor (via its `word_bg`) and select the current one.
-    fn apply_find_highlight(&mut self, cx: &mut Context<Self>) {
-        let ed = self.find_ed();
-        let content = ed.read(cx).text().to_string();
-        let mut map: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>> =
-            std::collections::HashMap::new();
-        for r in &self.find_matches {
-            let line = content[..r.start].bytes().filter(|&b| b == b'\n').count();
-            let line_start = content[..r.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let line_end = content[line_start..]
-                .find('\n')
-                .map(|i| line_start + i)
-                .unwrap_or(content.len());
-            let s = r.start - line_start;
-            let e = (r.end.min(line_end)) - line_start;
-            map.entry(line).or_default().push(s..e);
-        }
-        // The diff panes already use `word_bg` for word-level diff highlighting, so only paint
-        // the amber match highlight on the file editor; in the diff the selection marks the
-        // match (and find_next/prev navigate).
-        if self.find_target == crate::FindTarget::File {
-            ed.update(cx, |e, _| {
-                e.word_bg = map;
-                e.word_bg_color = gpui::rgba(0x6E5A1EFF); // amber search highlight
-            });
-        }
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            ed.update(cx, |e, cx| e.select_range(r, cx));
-        }
-        cx.notify();
-    }
-    pub(crate) fn find_next(&mut self, _: &FindNext, _w: &mut Window, cx: &mut Context<Self>) {
-        if self.find_matches.is_empty() {
-            return;
-        }
-        self.find_idx = (self.find_idx + 1) % self.find_matches.len();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
-        }
-        cx.notify();
-    }
-    pub(crate) fn find_prev(&mut self, _: &FindPrev, _w: &mut Window, cx: &mut Context<Self>) {
-        if self.find_matches.is_empty() {
-            return;
-        }
-        self.find_idx = (self.find_idx + self.find_matches.len() - 1) % self.find_matches.len();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
-        }
-        cx.notify();
-    }
-    pub(crate) fn replace_one(&mut self, _: &ReplaceOne, _w: &mut Window, cx: &mut Context<Self>) {
-        let rep = self.replace_query.read(cx).text().to_string();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.find_ed()
-                .update(cx, |e, cx| e.replace_range_text(r, &rep, cx));
-            // The edit fires autosave + Changed; re-scan against the new content.
-            self.recompute_find(cx);
-        }
-    }
-    pub(crate) fn replace_all(&mut self, _: &ReplaceAll, _w: &mut Window, cx: &mut Context<Self>) {
-        let rep = self.replace_query.read(cx).text().to_string();
-        // Replace right-to-left so earlier ranges stay valid.
-        let ranges: Vec<_> = self.find_matches.clone();
-        self.find_ed().update(cx, |e, cx| {
-            for r in ranges.into_iter().rev() {
-                e.replace_range_text(r, &rep, cx);
-            }
-        });
-        self.recompute_find(cx);
-    }
 
-    pub(crate) fn act_go_to_file(
-        &mut self,
-        _: &GoToFile,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_finder(FinderMode::Files, window, cx);
-    }
-    pub(crate) fn act_find_in_files(
-        &mut self,
-        _: &FindInFiles,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_finder(FinderMode::Content, window, cx);
-    }
-    pub(crate) fn act_actions(&mut self, _: &Actions, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_finder(FinderMode::Actions, window, cx);
-    }
 
-    /// Open `rel` in the editor, switch to Browse, select the 1-based `line`, and scroll
-    /// it near the top — used by the Find-in-Files results to jump straight to a match.
-    pub(crate) fn open_file_at_line(
-        &mut self,
-        rel: PathBuf,
-        line: u32,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_file(rel, cx);
-        self.mode = Mode::Browse;
-        let line0 = line.saturating_sub(1) as usize;
-        self.file_editor.update(cx, |e, cx| {
-            // Compute the line's byte range first (immutable borrow), then select it.
-            let range = {
-                let text = e.text();
-                let start: usize = text
-                    .split_inclusive('\n')
-                    .take(line0)
-                    .map(|l| l.len())
-                    .sum();
-                let len = text[start..].find('\n').unwrap_or(text.len() - start);
-                start..start + len
-            };
-            e.select_range(range, cx);
-        });
-        // Scroll so the target line sits a few rows below the top (negative offset = down).
-        let lh = editor::line_height_px();
-        let y = -(line0.saturating_sub(SCROLL_CONTEXT_ROWS) as f32) * lh;
-        let sh = self.file_scroll.clone();
-        window.defer(cx, move |_w, _cx| {
-            sh.set_offset(gpui::point(gpui::px(0.0), gpui::px(y)))
-        });
-        window.focus(&self.focus_handle);
-        cx.notify();
-    }
     pub(crate) fn act_new_scratch(
         &mut self,
         _: &NewScratch,
@@ -2909,65 +2547,6 @@ impl Kyde {
         cx.notify();
     }
 
-    pub(crate) fn run_palette(
-        &mut self,
-        a: PaletteAction,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.finder_open = false;
-        match a {
-            PaletteAction::GoToFile => self.open_finder(FinderMode::Files, window, cx),
-            PaletteAction::FindInFiles => self.open_finder(FinderMode::Content, window, cx),
-            PaletteAction::NewScratch => self.open_finder(FinderMode::Scratch, window, cx),
-            PaletteAction::CommitView => self.enter_commit(cx),
-            PaletteAction::BrowseView => {
-                self.mode = Mode::Browse;
-                window.focus(&self.focus_handle);
-                cx.notify();
-            }
-            PaletteAction::SelectInTree => {
-                window.focus(&self.focus_handle);
-                self.reveal_in_tree(cx);
-            }
-            PaletteAction::Rollback => {
-                window.focus(&self.focus_handle);
-                self.open_rollback_path(PathBuf::new(), cx);
-            }
-            PaletteAction::Settings => {
-                self.onboarding_choice = self.keymap.preset;
-                self.onboarding_open = true;
-                window.focus(&self.focus_handle);
-                cx.notify();
-            }
-            PaletteAction::RevealInFinder => {
-                window.focus(&self.focus_handle);
-                if let Some(p) = self
-                    .open_path
-                    .clone()
-                    .or_else(|| self.selected_path.clone())
-                {
-                    self.reveal_in_os(&p, cx);
-                }
-            }
-            PaletteAction::RevealInTerminal => {
-                window.focus(&self.focus_handle);
-                if let Some(p) = self
-                    .open_path
-                    .clone()
-                    .or_else(|| self.selected_path.clone())
-                {
-                    self.reveal_in_terminal(&p, cx);
-                }
-            }
-            PaletteAction::Plugins => {
-                self.open_modal_window(ModalKind::Plugins, "Language Plugins", 520.0, 560.0, cx);
-            }
-            PaletteAction::Fonts => {
-                self.open_modal_window(ModalKind::Fonts, "Fonts", 760.0, 620.0, cx);
-            }
-        }
-    }
 
     /// Toggle a language pack's installed state from the plugin manager, persist it, and
     /// re-highlight the open file in place if it's affected (so colors appear/clear at once).
@@ -3003,81 +2582,6 @@ impl Kyde {
             }
         }
         cx.notify();
-    }
-    pub(crate) fn finder_close(
-        &mut self,
-        _: &FinderClose,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.finder_open = false;
-        window.focus(&self.focus_handle);
-        cx.notify();
-    }
-    pub(crate) fn finder_up(&mut self, _: &FinderUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.finder_selected = self.finder_selected.saturating_sub(1);
-        cx.notify();
-    }
-    pub(crate) fn finder_down(&mut self, _: &FinderDown, _: &mut Window, cx: &mut Context<Self>) {
-        let len = match self.finder_mode {
-            FinderMode::Files => self.finder_results.len(),
-            FinderMode::Content => self.content_results.len(),
-            FinderMode::Actions | FinderMode::Scratch => self.action_results.len(),
-        };
-        if self.finder_selected + 1 < len {
-            self.finder_selected += 1;
-        }
-        cx.notify();
-    }
-    pub(crate) fn finder_confirm(
-        &mut self,
-        _: &FinderConfirm,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match self.finder_mode {
-            FinderMode::Files => {
-                if let Some(p) = self.finder_results.get(self.finder_selected).cloned() {
-                    self.open_file(p, cx);
-                    self.mode = Mode::Browse;
-                }
-                self.finder_open = false;
-                window.focus(&self.focus_handle);
-                cx.notify();
-            }
-            FinderMode::Content => {
-                if let Some(hit) = self.content_results.get(self.finder_selected).cloned() {
-                    self.finder_open = false;
-                    self.open_file_at_line(hit.path, hit.line, window, cx);
-                } else {
-                    self.finder_open = false;
-                    window.focus(&self.focus_handle);
-                }
-                cx.notify();
-            }
-            FinderMode::Actions => {
-                if let Some(&i) = self.action_results.get(self.finder_selected) {
-                    self.run_palette(PALETTE[i].1, window, cx);
-                } else {
-                    self.finder_open = false;
-                    window.focus(&self.focus_handle);
-                    cx.notify();
-                }
-            }
-            FinderMode::Scratch => {
-                let ext = self
-                    .action_results
-                    .get(self.finder_selected)
-                    .map(|&i| scratch::LANGS[i].1);
-                self.finder_open = false;
-                window.focus(&self.focus_handle);
-                if let Some(ext) = ext {
-                    self.create_scratch(ext, cx);
-                } else {
-                    cx.notify();
-                }
-            }
-        }
     }
 
     // ── keymap / onboarding ───────────────────────────────────────
