@@ -18,6 +18,10 @@ mod file_ops;
 mod find;
 mod finder;
 mod history;
+mod modals;
+mod notifications;
+mod onboarding;
+mod projects_view;
 mod push;
 mod rollback;
 pub(crate) use app::{

@@ -405,142 +405,12 @@ impl Kyde {
         Repo::discover(self.repo_root.as_ref()?).ok()
     }
 
-    /// Open a folder as the active project (or switch to it if already open): record it in
-    /// recents, add a project tab, and load its state. Each open project is a tab above the
-    /// UI; switching preserves the one you're leaving (see `ProjectSession`).
-    pub(crate) fn open_project(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.recents.touch(&path);
-        self.recents.save();
-        // Keep the Dock + menu-bar "Recent Projects" lists in sync with the new order.
-        cx.set_dock_menu(dock_menu(&self.recents));
-        cx.set_menus(crate::app_menus(&self.recents));
-        // Stash the project we're leaving so a later switch back restores it.
-        self.save_active_session();
-        if !self.open_projects.contains(&path) {
-            self.open_projects.push(path.clone());
-        }
-        self.load_project_state(path, cx);
-        cx.notify();
-    }
 
-    /// Snapshot the active project's UI state into `project_sessions` (no-op on the landing
-    /// view). Called before switching away so switching back restores it.
-    fn save_active_session(&mut self) {
-        if let Some(root) = self.repo_root.clone() {
-            self.project_sessions.insert(
-                root,
-                crate::ProjectSession {
-                    mode: self.mode,
-                    open_path: self.open_path.clone(),
-                    open_tabs: self.open_tabs.clone(),
-                    preview_tab: self.preview_tab.clone(),
-                    selected: self.selected,
-                    expanded: self.expanded.clone(),
-                },
-            );
-        }
-    }
 
-    /// Make `path` the active project, restoring its saved session if we have one (which file
-    /// was open, the editor tabs, tree expansion, mode) or starting fresh otherwise.
-    fn load_project_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        self.repo_root = Some(path.clone());
-        match self.project_sessions.remove(&path) {
-            Some(s) => {
-                self.mode = s.mode;
-                self.expanded = s.expanded;
-                self.open_tabs = s.open_tabs;
-                self.preview_tab = s.preview_tab;
-                self.selected = s.selected;
-                self.refresh();
-                // Reload the file that was open into the editor; else leave it empty.
-                // Restore as permanent — `open_file` would clear the preview slot, so save it
-                // first and put it back (the restored active file may itself be the preview).
-                let preview = self.preview_tab.clone();
-                match s.open_path {
-                    Some(p) => self.open_file(p, cx),
-                    None => self.open_path = None,
-                }
-                self.preview_tab = preview;
-            }
-            None => {
-                self.mode = Mode::Browse; // open into the code view, not git
-                self.open_path = None;
-                self.open_tabs.clear();
-                self.preview_tab = None;
-                self.selected = None;
-                self.expanded.clear();
-                self.expanded.insert(PathBuf::new()); // root folder visible by default
-                self.refresh();
-            }
-        }
-    }
 
-    /// Close an open-project tab. Switches to a neighbour if it was active; closing the last
-    /// one returns to the Projects landing view.
-    pub(crate) fn close_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
-        let Some(idx) = self.open_projects.iter().position(|p| p == &root) else {
-            return;
-        };
-        let was_active = self.repo_root.as_ref() == Some(&root);
-        self.open_projects.remove(idx);
-        self.project_sessions.remove(&root);
-        if !was_active {
-            cx.notify();
-            return;
-        }
-        if self.open_projects.is_empty() {
-            // Back to the landing view.
-            self.repo_root = None;
-            self.open_path = None;
-            self.open_tabs.clear();
-            self.preview_tab = None;
-            self.selected = None;
-        } else {
-            // Prefer the tab that shifted into this slot, else the previous one.
-            let next = self.open_projects[idx.min(self.open_projects.len() - 1)].clone();
-            self.load_project_state(next, cx);
-        }
-        cx.notify();
-    }
 
-    /// Open a project chosen from the Dock's "Recent Projects" submenu.
-    pub(crate) fn open_recent_project(
-        &mut self,
-        a: &OpenRecentProject,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_project(PathBuf::from(&a.0), cx);
-    }
 
-    /// File → Open… — pick a folder and open it as a new project tab.
-    pub(crate) fn act_open_project(
-        &mut self,
-        _: &OpenProject,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.pick_folder(cx);
-    }
 
-    /// Native folder picker for the "Open" / "New Project" buttons.
-    pub(crate) fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(p) = paths.into_iter().next() {
-                    this.update(cx, |this, cx| this.open_project(p, cx)).ok();
-                }
-            }
-        })
-        .detach();
-    }
 
     pub(crate) fn refresh(&mut self) {
         if let Some(repo) = self.repo() {
@@ -654,98 +524,6 @@ impl Kyde {
 
 
 
-    /// Act on the update banner. Running from a `.app` bundle with a zip asset → download,
-    /// swap in place, relaunch. Otherwise (dev binary, or a release with no zip) → open the
-    /// release page in the browser.
-    pub(crate) fn do_update(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.update_available.clone() else {
-            return;
-        };
-        match update::running_bundle() {
-            Some(bundle) if !rel.zip_url.is_empty() => {
-                if self.updating {
-                    return;
-                }
-                self.updating = true;
-                cx.notify();
-                let zip = rel.zip_url.clone();
-                cx.spawn(async move |this, cx| {
-                    let res = cx
-                        .background_executor()
-                        .spawn({
-                            let bundle = bundle.clone();
-                            async move { update::download_and_swap(&zip, &bundle) }
-                        })
-                        .await;
-                    this.update(cx, |this, cx| {
-                        this.updating = false;
-                        match res {
-                            // Relaunch the freshly-swapped bundle, then quit this instance.
-                            Ok(()) => {
-                                let _ = std::process::Command::new("open").arg(&bundle).spawn();
-                                cx.quit();
-                            }
-                            Err(e) => {
-                                this.op_error = Some(format!("Update failed: {e}"));
-                                cx.notify();
-                            }
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-            _ => {
-                // No bundle to swap (dev binary). Download the zip to ~/Downloads and reveal
-                // it in Finder; only fall back to the release page if there's no zip asset.
-                if rel.zip_url.is_empty() {
-                    let url = if rel.page_url.is_empty() {
-                        "https://github.com/kyle-ssg/kyde/releases/latest".to_string()
-                    } else {
-                        rel.page_url.clone()
-                    };
-                    let _ = std::process::Command::new("open").arg(url).spawn();
-                    return;
-                }
-                if self.updating {
-                    return;
-                }
-                self.updating = true;
-                cx.notify();
-                let zip = rel.zip_url.clone();
-                cx.spawn(async move |this, cx| {
-                    let dir = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-                        .join("Downloads");
-                    let res = cx
-                        .background_executor()
-                        .spawn(async move { update::download_zip(&zip, &dir) })
-                        .await;
-                    this.update(cx, |this, cx| {
-                        this.updating = false;
-                        match res {
-                            // Reveal the downloaded zip so the user can install it.
-                            Ok(path) => {
-                                let _ = std::process::Command::new("open")
-                                    .arg("-R")
-                                    .arg(&path)
-                                    .spawn();
-                            }
-                            Err(e) => this.op_error = Some(format!("Download failed: {e}")),
-                        }
-                        cx.notify();
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-        }
-    }
-
-    /// Dismiss the update banner for this session (reappears on next launch if still behind).
-    pub(crate) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
-        self.update_available = None;
-        cx.notify();
-    }
 
 
 
@@ -762,114 +540,9 @@ impl Kyde {
 
 
 
-    /// The window handle slot for a modal kind.
-    fn modal_slot(&mut self, kind: ModalKind) -> &mut Option<gpui::WindowHandle<ModalWindow>> {
-        match kind {
-            ModalKind::Rollback => &mut self.rollback_win,
-            ModalKind::Push => &mut self.push_win,
-            ModalKind::Diff => &mut self.diff_win,
-            ModalKind::NewBranch => &mut self.new_branch_win,
-            ModalKind::Plugins => &mut self.plugins_win,
-            ModalKind::Fonts => &mut self.fonts_win,
-            ModalKind::ClearData => &mut self.clear_data_win,
-        }
-    }
 
-    /// Open (or re-focus) a modal as its own native OS window. Opened from a spawned task so
-    /// `cx.open_window` never runs inside this `Kyde` update — the new window's first render
-    /// calls back into `Kyde` (`kyde.update`), which would panic re-entrantly otherwise. See
-    /// the memory note on gpui phase/re-entrancy gotchas.
-    pub(crate) fn open_modal_window(
-        &mut self,
-        kind: ModalKind,
-        title: impl Into<SharedString>,
-        w: f32,
-        h: f32,
-        cx: &mut Context<Self>,
-    ) {
-        let title = title.into();
-        // Already open → just bring it forward (handle.update fails if it was closed).
-        if let Some(existing) = *self.modal_slot(kind) {
-            if existing
-                .update(cx, |_, window, _| window.activate_window())
-                .is_ok()
-            {
-                return;
-            }
-            *self.modal_slot(kind) = None; // stale (user closed it) → fall through and reopen
-        }
-        let kyde = cx.entity();
-        // The Diff modal opens at the MAIN window's bounds (captured each frame in
-        // `impl Render for Kyde`) so it's as big as the editor and lands over it — NOT the
-        // focused window's, which may be another modal (e.g. Rollback) it was launched from.
-        let main_bounds = (kind == ModalKind::Diff)
-            .then_some(self.main_window_bounds)
-            .flatten();
-        cx.spawn(async move |this, cx| {
-            let opened = cx.update(|cx| {
-                // Center on the display the main window is on (else gpui picks the primary
-                // monitor, so the modal can pop up on a different screen than the IDE).
-                let display = cx
-                    .active_window()
-                    .and_then(|w| {
-                        w.update(cx, |_, window, cx| window.display(cx).map(|d| d.id()))
-                            .ok()
-                    })
-                    .flatten();
-                let window_bounds = main_bounds.unwrap_or_else(|| {
-                    WindowBounds::Windowed(Bounds::centered(display, gpui::size(px(w), px(h)), cx))
-                });
-                cx.open_window(
-                    WindowOptions {
-                        window_bounds: Some(window_bounds),
-                        titlebar: Some(gpui::TitlebarOptions {
-                            title: Some(title.clone()),
-                            appears_transparent: false,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    {
-                        let kyde = kyde.clone();
-                        move |_, cx| cx.new(|cx| ModalWindow::new(kyde.clone(), kind, cx))
-                    },
-                )
-            });
-            if let Ok(Ok(handle)) = opened {
-                let _ = handle.update(cx, |view, window, cx| {
-                    // New Branch: focus the name field so you can type immediately. Others:
-                    // focus the root so Escape (on_key_down) dispatches.
-                    if view.kind == ModalKind::NewBranch {
-                        let input = view.kyde.read(cx).branch_query.read(cx).focus_handle(cx);
-                        window.focus(&input);
-                    } else if view.kind == ModalKind::Plugins {
-                        let input = view.kyde.read(cx).plugins_query.read(cx).focus_handle(cx);
-                        window.focus(&input);
-                    } else {
-                        let fh = view.focus_handle(cx);
-                        window.focus(&fh);
-                    }
-                    cx.activate(true);
-                });
-                this.update(cx, |k, _| *k.modal_slot(kind) = Some(handle))
-                    .ok();
-            }
-        })
-        .detach();
-    }
 
-    /// Close a modal's native window (if open) and clear its handle. The actual
-    /// `remove_window` is deferred: it's often called from *inside* that window's own button
-    /// handler (e.g. the rollback window's "Rollback" button → `do_rollback`), and removing a
-    /// window mid-dispatch of its own event is re-entrant; deferring runs it once the current
-    /// effect cycle finishes.
-    pub(crate) fn close_modal_window(&mut self, kind: ModalKind, cx: &mut Context<Self>) {
-        if let Some(handle) = self.modal_slot(kind).take() {
-            cx.defer(move |cx| {
-                let _ = handle.update(cx, |_, window, _| window.remove_window());
-            });
-        }
-    }
+
 
 
 
@@ -1021,7 +694,7 @@ impl Kyde {
     /// If the open file is a font and the "font" plugin is installed, parse its family name
     /// and register it with the text system so the preview pane can render it. Otherwise
     /// clears the cached preview. Cheap + idempotent (skips re-registering the same path).
-    fn load_font_preview(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn load_font_preview(&mut self, cx: &mut Context<Self>) {
         let Some(rel) = self.open_path.clone().filter(|p| is_font_file(p)) else {
             self.font_preview = None;
             return;
@@ -1119,67 +792,6 @@ impl Kyde {
 
 
 
-    /// Open a pre-filled GitHub issue for the previous crash, then dismiss the banner.
-    fn report_crash(&mut self, cx: &mut Context<Self>) {
-        if let Some(crash) = self.pending_crash.clone() {
-            cx.open_url(&crash_issue_url(&crash));
-        }
-        self.dismiss_crash(cx);
-    }
-    /// Clear the crash banner + truncate the log so it doesn't reappear.
-    fn dismiss_crash(&mut self, cx: &mut Context<Self>) {
-        self.pending_crash = None;
-        if let Some(p) = crash_log_path() {
-            let _ = std::fs::write(p, "");
-        }
-        cx.notify();
-    }
-    /// Thin top banner shown after a crash, with Report-on-GitHub + Dismiss.
-    pub(crate) fn render_crash_banner(
-        &self,
-        ui: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let t = theme::get();
-        let btn = |label: &'static str, primary: bool| {
-            div()
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .when(primary, |d| d.bg(t.primary).text_color(t.primary_text))
-                .when(!primary, |d| d.text_color(t.secondary_text))
-                .child(label)
-        };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(34.0))
-            .px_3()
-            .bg(gpui::rgb(0x3A2A2C))
-            .border_b_1()
-            .border_color(t.divider)
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size))
-            .text_color(t.text)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child("kyde crashed on the previous run."),
-            )
-            .child(btn("Report on GitHub", true).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.report_crash(cx)),
-            ))
-            .child(btn("Dismiss", false).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.dismiss_crash(cx)),
-            ))
-            .into_any_element()
-    }
 
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
     /// silent no-op. `ctx` is a short human label ("Commit", "Push", …); the error is
@@ -1189,49 +801,7 @@ impl Kyde {
         self.op_error = Some(format!("{ctx} failed: {e}"));
     }
 
-    /// Dismiss the git-operation error banner.
-    fn dismiss_op_error(&mut self, cx: &mut Context<Self>) {
-        self.op_error = None;
-        cx.notify();
-    }
 
-    /// Thin banner shown when a git operation failed, with a Dismiss button. Mirrors the
-    /// crash banner (same surface + placement); shown only while `op_error` is set.
-    pub(crate) fn render_op_error_banner(
-        &self,
-        ui: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let t = theme::get();
-        let msg = self.op_error.clone().unwrap_or_default();
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(34.0))
-            .px_3()
-            .bg(gpui::rgb(0x3A2A2C))
-            .border_b_1()
-            .border_color(t.divider)
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size))
-            .text_color(t.text)
-            .child(div().flex_1().min_w_0().truncate().child(msg))
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .text_color(t.secondary_text)
-                    .child("Dismiss")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.dismiss_op_error(cx)),
-                    ),
-            )
-            .into_any_element()
-    }
 
     /// Reset the editor to nothing-open.
     fn clear_open(&mut self, cx: &mut Context<Self>) {
@@ -1253,37 +823,8 @@ impl Kyde {
         }
     }
 
-    /// Pack available for the open file but not yet installed (drives the banner).
-    pub(crate) fn pending_pack(&self) -> Option<&'static highlight::Pack> {
-        self.open_path
-            .as_ref()
-            .and_then(|p| Lang::from_path(p).pack())
-            .filter(|p| !self.plugins.is_installed(p.id) && !self.ignored_packs.contains(p.id))
-    }
 
-    /// Dismiss the install banner for the open file's type (session-only).
-    pub(crate) fn ignore_open_pack(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = self.pending_pack() {
-            self.ignored_packs.insert(p.id);
-            cx.notify();
-        }
-    }
 
-    /// Install the pack for the open file and re-highlight it in place
-    /// (without disturbing the buffer's content, selection, or dirty flag).
-    pub(crate) fn install_open_pack(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.open_path.clone() else {
-            return;
-        };
-        let lang = Lang::from_path(&rel);
-        if let Some(p) = lang.pack() {
-            self.plugins.install(p.id);
-            self.plugins.save();
-            // Re-highlight in place so the colors appear immediately — previously this only
-            // set the lang, leaving the cached (plain) spans until the file was reopened.
-            self.file_editor.update(cx, |e, cx| e.set_lang(lang, cx));
-        }
-    }
 
     /// Persist `rel`'s `text` to disk: through the repo's working tree in a git repo, else
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
@@ -1357,40 +898,8 @@ impl Kyde {
         save_show_fps(self.show_fps); // remember across launches
         cx.notify();
     }
-    /// Escape: close whatever overlay is open (most-transient first); if none, cancel the
-    /// Commit view back to Browse. A no-op in plain Browse.
-    /// Native-menu "Plugins…": open the language-pack manager (native modal window).
-    pub(crate) fn act_open_plugins(
-        &mut self,
-        _: &OpenPlugins,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_modal_window(ModalKind::Plugins, "Language Plugins", 520.0, 560.0, cx);
-    }
 
-    /// Native-menu "Clear Data & Restart…": open the confirmation as a native modal window.
-    pub(crate) fn act_clear_data(
-        &mut self,
-        _: &ClearData,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_modal_window(
-            ModalKind::ClearData,
-            "Clear Data & Restart",
-            460.0,
-            230.0,
-            cx,
-        );
-    }
 
-    /// Confirmed: wipe the config dir (uninstalls every plugin, drops keymap/theme/projects/
-    /// ui prefs) and restart into a clean first-run state.
-    pub(crate) fn do_clear_data(&mut self, cx: &mut Context<Self>) {
-        let _ = std::fs::remove_dir_all(crate::config_dir());
-        cx.restart();
-    }
 
     pub(crate) fn act_escape(
         &mut self,
@@ -1425,56 +934,8 @@ impl Kyde {
 
 
 
-    /// Toggle a language pack's installed state from the plugin manager, persist it, and
-    /// re-highlight the open file in place if it's affected (so colors appear/clear at once).
-    /// Install a pack by id (used by the font-file install prompt), persist, and refresh the
-    /// relevant preview/highlight so it applies immediately.
-    pub(crate) fn install_pack(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.plugins.install(id);
-        self.plugins.save();
-        if id == "font" {
-            self.load_font_preview(cx);
-        } else if let Some(rel) = self.open_path.clone() {
-            let eff = self.effective_lang(&rel);
-            self.file_editor.update(cx, |e, cx| e.set_lang(eff, cx));
-        }
-        cx.notify();
-    }
 
-    pub(crate) fn toggle_plugin(&mut self, pack_id: &str, cx: &mut Context<Self>) {
-        if self.plugins.is_installed(pack_id) {
-            self.plugins.uninstall(pack_id);
-        } else {
-            self.plugins.install(pack_id);
-        }
-        self.plugins.save();
-        if pack_id == "font" {
-            self.load_font_preview(cx);
-        } else if let Some(rel) = self.open_path.clone() {
-            // If the open file's language maps to this pack, re-highlight it now.
-            let lang = Lang::from_path(&rel);
-            if lang.pack().map(|p| p.id) == Some(pack_id) {
-                let eff = self.effective_lang(&rel);
-                self.file_editor.update(cx, |e, cx| e.set_lang(eff, cx));
-            }
-        }
-        cx.notify();
-    }
 
-    // ── keymap / onboarding ───────────────────────────────────────
-    pub(crate) fn open_keymap(&mut self, _: &OpenKeymap, _: &mut Window, cx: &mut Context<Self>) {
-        self.onboarding_choice = self.keymap.preset;
-        self.onboarding_open = true;
-        cx.notify();
-    }
-    pub(crate) fn choose_preset(&mut self, preset: Preset, cx: &mut Context<Self>) {
-        self.keymap.set_preset(preset);
-        self.keymap.save();
-        apply_keymap(cx, &self.keymap);
-        self.onboarding_open = false;
-        self.onboarding_forced = false;
-        cx.notify();
-    }
 
     // ── configurable action handlers ──────────────────────────────
     pub(crate) fn act_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
