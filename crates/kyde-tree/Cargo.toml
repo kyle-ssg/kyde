@@ -1,0 +1,6 @@
+[package]
+name = "kyde-tree"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "File-tree model for Kyde. Pure std, no GUI."

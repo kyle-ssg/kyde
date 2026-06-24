@@ -1,0 +1,9 @@
+[package]
+name = "kyde-markdown"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Markdown block/span model for Kyde (built on pulldown-cmark). Pure, no GUI."
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false }

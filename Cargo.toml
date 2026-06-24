@@ -6,9 +6,24 @@ description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
 license = "Apache-2.0"
 repository = "https://github.com/kyle-ssg/Kyde"
 
+# Cargo workspace: the binary (this package, root) + the extracted library crates under
+# crates/. Pure-logic crates (git, diff, tree, …) live there so the compiler enforces their
+# boundaries, they get real test targets, and touching one doesn't recompile the others.
+[workspace]
+members = ["crates/*"]
+
 [dependencies]
 # GUI — Zed's framework. Apache-2.0. API moves fast; pin once it builds.
 gpui = "0.2"
+
+# Extracted workspace crates (pure logic, no gpui). Aliased back to their old module names
+# in main.rs (`use kyde_git as git;`) so existing call sites are untouched.
+kyde-git = { path = "crates/kyde-git" }
+kyde-diff = { path = "crates/kyde-diff" }
+kyde-tree = { path = "crates/kyde-tree" }
+kyde-markdown = { path = "crates/kyde-markdown" }
+kyde-update = { path = "crates/kyde-update" }
+kyde-config = { path = "crates/kyde-config" }
 
 # Diff computation — word/char/line, Apache-2.0. (Swap to imara-diff later if big files lag.)
 similar = { version = "3", features = ["unicode", "inline"] }

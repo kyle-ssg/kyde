@@ -1,0 +1,9 @@
+[package]
+name = "kyde-git"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Git operations for Kyde — shells out to the git binary. Pure, no GUI."
+
+[dependencies]
+anyhow = "1"

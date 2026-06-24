@@ -2897,6 +2897,12 @@ dependencies = [
  "futures",
  "fuzzy-matcher",
  "gpui",
+ "kyde-config",
+ "kyde-diff",
+ "kyde-git",
+ "kyde-markdown",
+ "kyde-tree",
+ "kyde-update",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -2923,6 +2929,47 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "winresource",
+]
+
+[[package]]
+name = "kyde-config"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kyde-diff"
+version = "0.1.0"
+dependencies = [
+ "similar",
+]
+
+[[package]]
+name = "kyde-git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "kyde-markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
+name = "kyde-tree"
+version = "0.1.0"
+
+[[package]]
+name = "kyde-update"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
 ]
 
 [[package]]

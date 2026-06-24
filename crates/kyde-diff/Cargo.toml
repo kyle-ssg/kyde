@@ -1,0 +1,9 @@
+[package]
+name = "kyde-diff"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Line + word diff for Kyde (built on `similar`). Pure, no GUI."
+
+[dependencies]
+similar = { version = "3", features = ["unicode", "inline"] }

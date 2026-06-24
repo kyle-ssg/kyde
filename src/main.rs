@@ -7,15 +7,15 @@
 
 mod app;
 mod clipboard;
-mod diff;
+use kyde_diff as diff;
 mod editor;
-mod git;
+use kyde_git as git;
 mod highlight;
-mod keymap;
-mod markdown;
+use kyde_config::keymap;
+use kyde_markdown as markdown;
 mod mdview;
-mod plugins;
-mod projects;
+use kyde_config::plugins;
+use kyde_config::projects;
 #[cfg(feature = "remote-images")]
 mod remote_img;
 mod render;
@@ -24,8 +24,8 @@ mod shellcmd;
 #[cfg(feature = "terminal")]
 mod terminal;
 mod theme;
-mod tree;
-mod update;
+use kyde_tree as tree;
+use kyde_update as update;
 
 use diff::{FileDiff, HunkKind};
 use editor::{CodeEditor, EditorEvent};

@@ -1,0 +1,10 @@
+[package]
+name = "kyde-update"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "GitHub release check + self-update for Kyde. Pure, no GUI."
+
+[dependencies]
+anyhow = "1"
+serde_json = "1"
