@@ -232,11 +232,68 @@ fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
 /// equal gap to the window edge (left) and the island (right). The islands begin at this x.
 const RAIL_W: f32 = 38.0 + theme::FRAME_GAP * 2.0;
 
+/// Width of the diff center gutter (the `»`/checkbox column). It's `flex_none`, so the two
+/// diff panes share only `island_w - DIFF_GUTTER_W`.
+pub(crate) const DIFF_GUTTER_W: f32 = 44.0;
+
+/// Width a full-width island spans (the diff view + history). Islands begin at the rail's
+/// right edge (`RAIL_W` already includes the frame-gap margin) and end a frame gap from the
+/// window's right. Used by both the layout and the divider math so they agree exactly.
+pub(crate) fn full_island_w(vw: f32) -> f32 {
+    (vw - RAIL_W - theme::FRAME_GAP).max(1.0)
+}
+
+/// Every draggable resize divider in the app. They ALL share one drag mechanism
+/// (`Kyde::start_divider_drag` + `drag_divider`): the pane each controls is laid out at an
+/// explicit pixel size, and the grab offset captured on mouse-down cancels the (context-
+/// dependent) geometry, so the bar stays exactly under the cursor — the behaviour the
+/// markdown split already had, now applied uniformly.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Divider {
+    /// Browse / Commit file-tree pane width (horizontal).
+    Tree,
+    /// Markdown split: code-editor pane width (horizontal).
+    MdSplit,
+    /// Side-by-side diff: left pane width (horizontal).
+    DiffPane,
+    /// History view: commit-list pane width (horizontal).
+    HistCommit,
+    /// History view: bottom log-panel height (vertical, grows upward).
+    HistPanel,
+    /// Bottom terminal panel height (vertical, grows upward). Only ever dragged when the
+    /// `terminal` feature is built in (the panel doesn't exist otherwise).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Term,
+}
+
+impl Divider {
+    /// Vertical dividers drag along Y; the rest along X.
+    fn vertical(self) -> bool {
+        matches!(self, Self::HistPanel | Self::Term)
+    }
+    /// "Trailing" panes are anchored to the far (bottom) edge and grow as the cursor moves
+    /// toward the near edge; "leading" panes grow with the cursor.
+    fn trailing(self) -> bool {
+        matches!(self, Self::HistPanel | Self::Term)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Commit,
     Browse,
     History,
+}
+
+/// Which editor the in-editor find/replace bar acts on (set from focus when it opens).
+#[derive(Clone, Copy, PartialEq)]
+enum FindTarget {
+    /// The Browse file editor.
+    File,
+    /// The diff's left (base) pane — read-only, so replace is disabled.
+    DiffLeft,
+    /// The diff's right (working) pane.
+    DiffRight,
 }
 
 /// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
@@ -447,6 +504,7 @@ struct ProjectSession {
     mode: Mode,
     open_path: Option<PathBuf>,
     open_tabs: Vec<PathBuf>,
+    preview_tab: Option<PathBuf>,
     selected: Option<usize>,
     expanded: std::collections::HashSet<PathBuf>,
 }
@@ -512,8 +570,10 @@ struct Kyde {
     diff_scroll: ScrollHandle,
     /// Left pane's fraction of the diff island width (the draggable center divider sets it).
     diff_split: f32,
-    /// True while dragging the center divider to resize the two diff panes.
-    diff_pane_resizing: bool,
+    /// The single in-flight divider drag, if any: which divider + the grab offset captured at
+    /// mouse-down (cursor coord minus the divider's position). One field for every divider —
+    /// see `Divider` and `Kyde::drag_divider`.
+    divider_drag: Option<(Divider, f32)>,
     /// Scroll handle for the Browse editor pane — drives the hover scrollbars.
     file_scroll: ScrollHandle,
     /// Active scrollbar-thumb drag (which scroll handle, axis, grab cursor, grab offset).
@@ -534,7 +594,6 @@ struct Kyde {
     projects_search_focused: bool,
     /// Editor pane width (px) of the markdown side-by-side split (drag-resizable).
     md_editor_w: f32,
-    diff_resizing: bool,
 
     // Browse mode
     all_files: Vec<PathBuf>,
@@ -548,17 +607,13 @@ struct Kyde {
     /// True when the commit view's changed-files panel is minimized to a thin strip (its `−`
     /// button), giving the side-by-side diff the full width. Independent of `tree_collapsed`.
     commit_collapsed: bool,
-    /// True while the user is dragging the tree/editor divider.
-    tree_resizing: bool,
-    /// Cursor-x minus the divider edge at drag start, so the first mouse-move doesn't jolt
-    /// the divider under the pointer.
-    tree_drag_offset: f32,
-    /// Same grab-offset trick for the diff-pane center divider and the markdown split — the
-    /// cursor-x minus the divider's pixel position at drag start.
-    diff_drag_offset: f32,
     open_path: Option<PathBuf>,
     /// Open editor tabs, left→right in open order. `open_path` = the active one.
     open_tabs: Vec<PathBuf>,
+    /// VS Code-style *preview* tab: at most one tab is temporary, shown in italics. A
+    /// single-click in the tree opens here, reusing this same slot for the next single-click;
+    /// a double-click (or editing the file) promotes it to a permanent tab (`= None`).
+    preview_tab: Option<PathBuf>,
     /// Project-scoped scratch files (absolute paths, outside the repo), shown in the tree.
     scratches: Vec<PathBuf>,
     /// Scroll position of the (horizontally scrollable) tab strip, so opening a
@@ -572,9 +627,11 @@ struct Kyde {
     tree_scroll: ScrollHandle,
     file_editor: Entity<CodeEditor>,
 
-    // In-editor find / replace bar (operates on `file_editor`).
+    // In-editor find / replace bar. Targets whichever editor was focused when it opened
+    // (`find_target`) — the Browse file editor, or a diff pane in the Show-Diff view.
     find_open: bool,
     find_replace: bool,
+    find_target: FindTarget,
     find_query: Entity<CodeEditor>,
     replace_query: Entity<CodeEditor>,
     find_matches: Vec<std::ops::Range<usize>>,
@@ -639,6 +696,16 @@ struct Kyde {
     context_menu: Option<ContextMenu>,
     /// Show-Diff viewer — its own native OS window (`None` when closed).
     diff_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// True while the Show-Diff modal window is open. The modal renders the shared
+    /// `diff_left`/`diff_right` editors, so the inline diff is suppressed meanwhile (rendering
+    /// one editor in two windows desyncs scroll). Set on open, cleared on the window's release.
+    diff_modal_open: bool,
+    /// The main window's bounds, refreshed each frame in `impl Render for Kyde`.
+    main_window_bounds: Option<gpui::WindowBounds>,
+    /// True when the main window is showing the full-screen Show-Diff view (rollback/push diff).
+    /// It replaces the normal mode content and reuses the inline `render_diff`, so it inherits
+    /// all editor functionality (find, divider drag, scroll). Escape / the Back button exits.
+    diff_view_open: bool,
     /// Rollback — its own native OS window (real titlebar + traffic lights). `None` closed.
     rollback_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Create New Branch" dialog — its own native window. The name is typed into
@@ -721,11 +788,6 @@ struct Kyde {
     /// When true the history bottom panel is minimised to just its toolbar (the header
     /// chevron toggles it), giving the diff the full height.
     history_panel_collapsed: bool,
-    /// True while dragging the history panel's top (vertical) divider.
-    history_v_resizing: bool,
-    /// Cursor-to-divider gap captured at drag start, so the panel doesn't jolt to the
-    /// cursor on the first mouse-move (mirrors `diff_drag_offset` for the vertical axis).
-    history_v_drag_offset: f32,
     /// What the selected commit is diffed against.
     history_compare: CompareMode,
     /// Compare-mode dropdown open in the history view.
@@ -742,11 +804,9 @@ struct Kyde {
     history_commit_query: Entity<CodeEditor>,
     /// Scroll position of the commit list.
     history_scroll: ScrollHandle,
-    /// Width (px) of the commit-list pane on the left of the history panel (resizable);
-    /// the changed-files pane fills the rest on the right.
-    history_commit_w: f32,
-    /// True while dragging the commit/files divider in the history panel.
-    history_resizing: bool,
+    /// Fraction (0..1) of the history panel width given to the commit-list pane on the left
+    /// (resizable); the changed-files pane fills the rest on the right. Defaults to 2/3.
+    history_commit_frac: f32,
 
     // Bottom terminal panel (gated behind the `terminal` Cargo feature).
     /// One `TerminalView` entity per tab, left→right in open order.
@@ -761,9 +821,6 @@ struct Kyde {
     /// Height (px) of the terminal panel, drag-resizable via its top divider.
     #[cfg(feature = "terminal")]
     term_height: f32,
-    /// True while dragging the terminal panel's top divider.
-    #[cfg(feature = "terminal")]
-    term_resizing: bool,
     /// When true the terminal fills the whole right column (tree + editor hidden).
     #[cfg(feature = "terminal")]
     term_maximized: bool,
@@ -795,6 +852,20 @@ struct ModalWindow {
 impl ModalWindow {
     fn new(kyde: Entity<Kyde>, kind: ModalKind, cx: &mut Context<Self>) -> Self {
         cx.observe(&kyde, |_, _, cx| cx.notify()).detach();
+        // The Diff modal renders the SAME `diff_left`/`diff_right` editors as the inline diff;
+        // rendering one editor entity in two windows desyncs scroll + garbles layout. So while
+        // this window lives, the main view suppresses its inline diff (`diff_modal_open`). Clear
+        // the flag when the window closes (manual or programmatic) so the inline diff returns.
+        if kind == ModalKind::Diff {
+            let kyde = kyde.clone();
+            cx.on_release(move |_, cx| {
+                kyde.update(cx, |k, kcx| {
+                    k.diff_modal_open = false;
+                    kcx.notify();
+                });
+            })
+            .detach();
+        }
         Self {
             kyde,
             kind,

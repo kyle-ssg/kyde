@@ -122,6 +122,11 @@ impl Kyde {
         // rewrite it; real edits/undo set dirty=true and flush here.
         cx.subscribe(&file_editor, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) && this.file_editor.read(cx).dirty {
+                // Editing a preview (temporary) tab promotes it to a permanent tab — VS Code
+                // behaviour, so the edit survives the next single-click elsewhere.
+                if this.preview_tab.is_some() && this.preview_tab == this.open_path {
+                    this.preview_tab = None;
+                }
                 this.autosave(cx);
             }
         })
@@ -250,7 +255,7 @@ impl Kyde {
             diff_base: String::new(),
             diff_scroll: ScrollHandle::new(),
             diff_split: 0.5,
-            diff_pane_resizing: false,
+            divider_drag: None,
             file_scroll: ScrollHandle::new(),
             sb_drag: None,
             scroll_dims: std::collections::HashMap::new(),
@@ -259,7 +264,6 @@ impl Kyde {
             md_view: None,
             projects_search_focused: false,
             md_editor_w: 480.0,
-            diff_resizing: false,
             all_files: Vec::new(),
             file_tree: tree::Tree::default(),
             // Root folder starts expanded so the tree shows on open.
@@ -267,11 +271,9 @@ impl Kyde {
             tree_width: 320.0,
             tree_collapsed: false,
             commit_collapsed: false,
-            tree_resizing: false,
-            tree_drag_offset: 0.0,
-            diff_drag_offset: 0.0,
             open_path: None,
             open_tabs: Vec::new(),
+            preview_tab: None,
             scratches: Vec::new(),
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
@@ -314,6 +316,10 @@ impl Kyde {
             op_error: None,
             context_menu: None,
             diff_win: None,
+            diff_modal_open: false,
+            main_window_bounds: None,
+            diff_view_open: false,
+            find_target: crate::FindTarget::File,
             rollback_win: None,
             new_branch_win: None,
             new_branch_checkout: true,
@@ -354,8 +360,6 @@ impl Kyde {
             history_files_query,
             history_panel_h: 320.0,
             history_panel_collapsed: false,
-            history_v_resizing: false,
-            history_v_drag_offset: 0.0,
             history_compare: CompareMode::Local,
             history_compare_open: false,
             history_branch_open: false,
@@ -364,8 +368,7 @@ impl Kyde {
             history_branch_query,
             history_commit_query,
             history_scroll: ScrollHandle::new(),
-            history_commit_w: 560.0,
-            history_resizing: false,
+            history_commit_frac: 2.0 / 3.0,
             #[cfg(feature = "terminal")]
             term_tabs: Vec::new(),
             #[cfg(feature = "terminal")]
@@ -374,8 +377,6 @@ impl Kyde {
             term_open: false,
             #[cfg(feature = "terminal")]
             term_height: 260.0,
-            #[cfg(feature = "terminal")]
-            term_resizing: false,
             // Restore the user's persisted "maximized terminal" preference.
             #[cfg(feature = "terminal")]
             term_maximized: crate::load_ui_bool("terminal_maximized", false),
@@ -432,6 +433,7 @@ impl Kyde {
                     mode: self.mode,
                     open_path: self.open_path.clone(),
                     open_tabs: self.open_tabs.clone(),
+                    preview_tab: self.preview_tab.clone(),
                     selected: self.selected,
                     expanded: self.expanded.clone(),
                 },
@@ -448,18 +450,24 @@ impl Kyde {
                 self.mode = s.mode;
                 self.expanded = s.expanded;
                 self.open_tabs = s.open_tabs;
+                self.preview_tab = s.preview_tab;
                 self.selected = s.selected;
                 self.refresh();
                 // Reload the file that was open into the editor; else leave it empty.
+                // Restore as permanent — `open_file` would clear the preview slot, so save it
+                // first and put it back (the restored active file may itself be the preview).
+                let preview = self.preview_tab.clone();
                 match s.open_path {
                     Some(p) => self.open_file(p, cx),
                     None => self.open_path = None,
                 }
+                self.preview_tab = preview;
             }
             None => {
                 self.mode = Mode::Browse; // open into the code view, not git
                 self.open_path = None;
                 self.open_tabs.clear();
+                self.preview_tab = None;
                 self.selected = None;
                 self.expanded.clear();
                 self.expanded.insert(PathBuf::new()); // root folder visible by default
@@ -486,6 +494,7 @@ impl Kyde {
             self.repo_root = None;
             self.open_path = None;
             self.open_tabs.clear();
+            self.preview_tab = None;
             self.selected = None;
         } else {
             // Prefer the tab that shifted into this slot, else the previous one.
@@ -1041,8 +1050,15 @@ impl Kyde {
         // panes (it gates on a path); `readonly = true` suppresses the revert chevrons +
         // autosave for this committed diff.
         self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);
-        let title = file.path.to_string_lossy().into_owned();
-        self.open_modal_window(ModalKind::Diff, title, 1100.0, 680.0, cx);
+        // Show the diff full-screen in the MAIN window; close the Push window we came from.
+        self.diff_view_open = true;
+        self.close_modal_window(ModalKind::Push, cx);
+        cx.notify();
+    }
+
+    /// Leave the full-screen Show-Diff view, back to whatever mode the main window was in.
+    pub(crate) fn close_diff_view(&mut self, cx: &mut Context<Self>) {
+        self.diff_view_open = false;
         cx.notify();
     }
 
@@ -1490,16 +1506,13 @@ impl Kyde {
     /// Commit → "Show Diff": open the floating diff viewer for that changed file.
     pub(crate) fn menu_show_diff(&mut self, idx: usize, cx: &mut Context<Self>) {
         // `select_with(.., Some(cx))` — not `select` — so the diff editors + `diff_path`
-        // actually populate (plain `select` only updates `current_diff`, leaving the modal
-        // showing "Select a file").
+        // actually populate (plain `select` only updates `current_diff`).
         self.select_with(idx, Some(cx));
-        let title = self
-            .files
-            .get(idx)
-            .map(|f| f.path.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Diff".to_string());
         self.context_menu = None;
-        self.open_modal_window(ModalKind::Diff, title, 1100.0, 680.0, cx);
+        // Show the diff full-screen in the MAIN window (reuses every editor feature). Close the
+        // Rollback window we were launched from so the main window comes forward.
+        self.diff_view_open = true;
+        self.close_modal_window(ModalKind::Rollback, cx);
         cx.notify();
     }
 
@@ -1565,6 +1578,12 @@ impl Kyde {
             *self.modal_slot(kind) = None; // stale (user closed it) → fall through and reopen
         }
         let kyde = cx.entity();
+        // The Diff modal opens at the MAIN window's bounds (captured each frame in
+        // `impl Render for Kyde`) so it's as big as the editor and lands over it — NOT the
+        // focused window's, which may be another modal (e.g. Rollback) it was launched from.
+        let main_bounds = (kind == ModalKind::Diff)
+            .then_some(self.main_window_bounds)
+            .flatten();
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 // Center on the display the main window is on (else gpui picks the primary
@@ -1576,10 +1595,12 @@ impl Kyde {
                             .ok()
                     })
                     .flatten();
-                let bounds = Bounds::centered(display, gpui::size(px(w), px(h)), cx);
+                let window_bounds = main_bounds.unwrap_or_else(|| {
+                    WindowBounds::Windowed(Bounds::centered(display, gpui::size(px(w), px(h)), cx))
+                });
                 cx.open_window(
                     WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_bounds: Some(window_bounds),
                         titlebar: Some(gpui::TitlebarOptions {
                             title: Some(title.clone()),
                             appears_transparent: false,
@@ -1947,7 +1968,21 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Open `rel` as a permanent tab (double-click, finder, "Open", restore, …). If it was
+    /// the preview tab, it's promoted (the preview slot clears).
     pub(crate) fn open_file(&mut self, rel: PathBuf, cx: &mut Context<Self>) {
+        self.open_file_inner(rel, false, cx);
+    }
+
+    /// Open `rel` as the VS Code-style *preview* (temporary) tab: a single-click in the tree.
+    /// Reuses the one preview slot — a subsequent single-click on a different file replaces it
+    /// in place rather than opening a new tab. Clicking a file that's already open as a
+    /// permanent tab just activates it (no demotion).
+    pub(crate) fn preview_file(&mut self, rel: PathBuf, cx: &mut Context<Self>) {
+        self.open_file_inner(rel, true, cx);
+    }
+
+    fn open_file_inner(&mut self, rel: PathBuf, preview: bool, cx: &mut Context<Self>) {
         // Images preview via `img()` and font files preview in their own typeface (see
         // render_browse) — don't load their binary bytes into the text editor.
         if !is_image(&rel) && !is_font_file(&rel) {
@@ -1982,7 +2017,25 @@ impl Kyde {
             self.file_editor.update(cx, |e, _| e.set_scroll_handle(h));
         }
         self.selected_path = Some(rel.clone());
-        if !self.open_tabs.contains(&rel) {
+        if self.open_tabs.contains(&rel) {
+            // Already open. A permanent open promotes it out of the preview slot; a preview
+            // open of an already-permanent tab leaves its permanence alone (just activates).
+            if !preview && self.preview_tab.as_ref() == Some(&rel) {
+                self.preview_tab = None;
+            }
+        } else if preview {
+            // Reuse the single preview slot: replace its path in place if one exists, else
+            // append. The replaced file's tab vanishes — exactly one temporary tab at a time.
+            match self
+                .preview_tab
+                .take()
+                .and_then(|prev| self.open_tabs.iter().position(|t| t == &prev))
+            {
+                Some(i) => self.open_tabs[i] = rel.clone(),
+                None => self.open_tabs.push(rel.clone()),
+            }
+            self.preview_tab = Some(rel.clone());
+        } else {
             self.open_tabs.push(rel.clone());
         }
         self.open_path = Some(rel);
@@ -2039,6 +2092,9 @@ impl Kyde {
             return;
         }
         let closing = self.open_tabs.remove(idx);
+        if self.preview_tab.as_ref() == Some(&closing) {
+            self.preview_tab = None;
+        }
         if self.open_path.as_ref() == Some(&closing) {
             let next = self
                 .open_tabs
@@ -2059,6 +2115,8 @@ impl Kyde {
             return;
         };
         self.open_tabs = vec![keep.clone()];
+        // Drop a stale preview pointer if its tab was among those closed.
+        self.preview_tab = self.preview_tab.take().filter(|p| p == &keep);
         self.open_file(keep, cx);
         self.close_menu(cx);
     }
@@ -2075,6 +2133,14 @@ impl Kyde {
             .and_then(|p| self.open_tabs.iter().position(|t| t == p))
             .is_some_and(|pos| pos > idx);
         self.open_tabs.truncate(idx + 1);
+        // Drop a stale preview pointer if its tab was truncated away.
+        if self
+            .preview_tab
+            .as_ref()
+            .is_some_and(|p| !self.open_tabs.contains(p))
+        {
+            self.preview_tab = None;
+        }
         if active_removed {
             if let Some(p) = self.open_tabs.get(idx).cloned() {
                 self.open_file(p, cx);
@@ -2232,9 +2298,121 @@ impl Kyde {
             .into_any_element()
     }
 
+    // ─── Unified divider dragging ──────────────────────────────────────────────────────────
+    // Every resize divider routes through these three methods. The pane each divider controls
+    // is laid out at an explicit pixel size, and the grab offset captured in `start_divider_drag`
+    // cancels the (context-dependent) geometry, so the bar stays exactly under the cursor — the
+    // 1:1 tracking the markdown split always had, now shared by all of them.
+
+    /// Current pixel size of the pane `d` controls. Diff/history store a *fraction*; convert it
+    /// to live pixels with the SAME width the layout uses, so the round-trip through
+    /// `set_divider_size` is lossless (the fractional scale cancels).
+    fn divider_size(&self, d: Divider, vw: f32, _vh: f32) -> f32 {
+        match d {
+            Divider::Tree => self.tree_width,
+            Divider::MdSplit => self.md_editor_w,
+            Divider::DiffPane => {
+                self.diff_split.clamp(0.15, 0.85) * (full_island_w(vw) - DIFF_GUTTER_W).max(1.0)
+            }
+            Divider::HistCommit => self.history_commit_frac.clamp(0.15, 0.85) * full_island_w(vw),
+            Divider::HistPanel => self.history_panel_h,
+            Divider::Term => {
+                #[cfg(feature = "terminal")]
+                {
+                    self.term_height
+                }
+                #[cfg(not(feature = "terminal"))]
+                {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// Set state so the pane `d` controls becomes `size` px, clamped to keep both sides usable.
+    fn set_divider_size(&mut self, d: Divider, size: f32, vw: f32, vh: f32) {
+        match d {
+            Divider::Tree => self.tree_width = size.clamp(180.0, 900.0),
+            Divider::MdSplit => {
+                let island_left = RAIL_W + self.tree_width + theme::FRAME_GAP;
+                let island_w = (vw - island_left - theme::FRAME_GAP).max(1.0);
+                self.md_editor_w = size.clamp(200.0, (island_w - 200.0).max(200.0));
+            }
+            Divider::DiffPane => {
+                let avail = (full_island_w(vw) - DIFF_GUTTER_W).max(1.0);
+                self.diff_split = (size / avail).clamp(0.15, 0.85);
+            }
+            Divider::HistCommit => {
+                self.history_commit_frac = (size / full_island_w(vw)).clamp(0.15, 0.85);
+            }
+            Divider::HistPanel => {
+                self.history_panel_h = size.clamp(140.0, (vh - 180.0).max(140.0));
+            }
+            Divider::Term => {
+                #[cfg(feature = "terminal")]
+                {
+                    self.term_height = size.clamp(120.0, (vh - 160.0).max(120.0));
+                }
+                #[cfg(not(feature = "terminal"))]
+                {
+                    let _ = (size, vh);
+                }
+            }
+        }
+    }
+
+    /// Begin dragging divider `d`. Captures the grab offset so the first move doesn't jolt the
+    /// bar to the cursor — and, because the offset absorbs the geometry, tracking is exact 1:1.
+    pub(crate) fn start_divider_drag(
+        &mut self,
+        d: Divider,
+        cursor: gpui::Point<gpui::Pixels>,
+        window: &Window,
+    ) {
+        let sz = window.viewport_size();
+        let (vw, vh) = (f32::from(sz.width), f32::from(sz.height));
+        let coord = f32::from(if d.vertical() { cursor.y } else { cursor.x });
+        let size = self.divider_size(d, vw, vh);
+        // Leading panes grow with the cursor (size = coord − grab); trailing panes grow as the
+        // cursor moves toward the near edge (size = grab − coord).
+        let grab = if d.trailing() {
+            coord + size
+        } else {
+            coord - size
+        };
+        self.divider_drag = Some((d, grab));
+    }
+
+    /// Apply the active divider drag for the current cursor position. Returns whether a drag was
+    /// active (so the caller can `cx.notify()`).
+    pub(crate) fn drag_divider(
+        &mut self,
+        cursor: gpui::Point<gpui::Pixels>,
+        vw: f32,
+        vh: f32,
+    ) -> bool {
+        let Some((d, grab)) = self.divider_drag else {
+            return false;
+        };
+        let coord = f32::from(if d.vertical() { cursor.y } else { cursor.x });
+        let size = if d.trailing() {
+            grab - coord
+        } else {
+            coord - grab
+        };
+        self.set_divider_size(d, size, vw, vh);
+        true
+    }
+
+    /// Whether divider `d` is the one currently being dragged.
+    pub(crate) fn dragging(&self, d: Divider) -> bool {
+        matches!(self.divider_drag, Some((k, _)) if k == d)
+    }
+
     /// Reset the editor to nothing-open.
     fn clear_open(&mut self, cx: &mut Context<Self>) {
         self.open_path = None;
+        self.preview_tab = None;
         self.file_editor.update(cx, |e, cx| {
             e.set_content(String::new(), Lang::PlainText, cx)
         });
@@ -2572,6 +2750,8 @@ impl Kyde {
         } else if self.find_open {
             self.close_find(&CloseFind, window, cx);
             return;
+        } else if self.diff_view_open {
+            self.diff_view_open = false; // Escape leaves the full-screen Show-Diff view
         } else if self.delete_target.is_some() {
             self.delete_target = None;
         } else if self.branch_popup_open {
@@ -2614,14 +2794,33 @@ impl Kyde {
     ) {
         self.open_find(true, window, cx);
     }
-    pub(crate) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
-        // Find only applies in the code editor with a file open.
-        if self.mode != Mode::Browse || self.open_path.is_none() {
-            return;
+    /// The editor the find/replace bar currently acts on.
+    fn find_ed(&self) -> Entity<CodeEditor> {
+        match self.find_target {
+            crate::FindTarget::File => self.file_editor.clone(),
+            crate::FindTarget::DiffLeft => self.diff_left.clone(),
+            crate::FindTarget::DiffRight => self.diff_right.clone(),
         }
+    }
+    pub(crate) fn open_find(&mut self, replace: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Works in the Browse editor (with a file open) and the Show-Diff view's panes.
+        let target = if self.diff_view_open {
+            // Default to the working (right) pane; the base (left) pane is read-only.
+            if self.diff_left.read(cx).focus_handle.is_focused(window) {
+                crate::FindTarget::DiffLeft
+            } else {
+                crate::FindTarget::DiffRight
+            }
+        } else if self.mode == Mode::Browse && self.open_path.is_some() {
+            crate::FindTarget::File
+        } else {
+            return;
+        };
+        self.find_target = target;
         self.find_open = true;
-        self.find_replace = replace;
-        // Seed the query from the editor's current selection, if any.
+        // Replace needs an editable target — the diff base pane / committed diffs are read-only,
+        // so ⌘R there opens find only.
+        self.find_replace = replace && !self.find_ed().read(cx).read_only;
         self.recompute_find(cx);
         let handle = self.find_query.read(cx).focus_handle.clone();
         window.focus(&handle);
@@ -2636,8 +2835,13 @@ impl Kyde {
     ) {
         self.find_open = false;
         self.find_matches.clear();
-        self.file_editor.update(cx, |e, _| e.word_bg.clear());
-        let handle = self.file_editor.read(cx).focus_handle.clone();
+        let ed = self.find_ed();
+        // Only the file editor's `word_bg` is owned by find — the diff panes use `word_bg` for
+        // word-level diff highlighting, so don't clobber it there.
+        if self.find_target == crate::FindTarget::File {
+            ed.update(cx, |e, _| e.word_bg.clear());
+        }
+        let handle = ed.read(cx).focus_handle.clone();
         window.focus(&handle);
         cx.notify();
     }
@@ -2645,7 +2849,7 @@ impl Kyde {
     /// the highlights + select the current match.
     fn recompute_find(&mut self, cx: &mut Context<Self>) {
         let q = self.find_query.read(cx).text().to_string();
-        let content = self.file_editor.read(cx).text().to_string();
+        let content = self.find_ed().read(cx).text().to_string();
         self.find_matches.clear();
         if !q.is_empty() && q.len() <= content.len() {
             // `to_ascii_lowercase` preserves byte length, so positions map 1:1 to `content`.
@@ -2665,7 +2869,8 @@ impl Kyde {
     }
     /// Paint match highlights on the editor (via its `word_bg`) and select the current one.
     fn apply_find_highlight(&mut self, cx: &mut Context<Self>) {
-        let content = self.file_editor.read(cx).text().to_string();
+        let ed = self.find_ed();
+        let content = ed.read(cx).text().to_string();
         let mut map: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>> =
             std::collections::HashMap::new();
         for r in &self.find_matches {
@@ -2679,12 +2884,17 @@ impl Kyde {
             let e = (r.end.min(line_end)) - line_start;
             map.entry(line).or_default().push(s..e);
         }
-        self.file_editor.update(cx, |e, _| {
-            e.word_bg = map;
-            e.word_bg_color = gpui::rgba(0x6E5A1EFF); // amber search highlight
-        });
+        // The diff panes already use `word_bg` for word-level diff highlighting, so only paint
+        // the amber match highlight on the file editor; in the diff the selection marks the
+        // match (and find_next/prev navigate).
+        if self.find_target == crate::FindTarget::File {
+            ed.update(cx, |e, _| {
+                e.word_bg = map;
+                e.word_bg_color = gpui::rgba(0x6E5A1EFF); // amber search highlight
+            });
+        }
         if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.file_editor.update(cx, |e, cx| e.select_range(r, cx));
+            ed.update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
@@ -2694,7 +2904,7 @@ impl Kyde {
         }
         self.find_idx = (self.find_idx + 1) % self.find_matches.len();
         if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.file_editor.update(cx, |e, cx| e.select_range(r, cx));
+            self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
@@ -2704,14 +2914,14 @@ impl Kyde {
         }
         self.find_idx = (self.find_idx + self.find_matches.len() - 1) % self.find_matches.len();
         if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.file_editor.update(cx, |e, cx| e.select_range(r, cx));
+            self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
     pub(crate) fn replace_one(&mut self, _: &ReplaceOne, _w: &mut Window, cx: &mut Context<Self>) {
         let rep = self.replace_query.read(cx).text().to_string();
         if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
-            self.file_editor
+            self.find_ed()
                 .update(cx, |e, cx| e.replace_range_text(r, &rep, cx));
             // The edit fires autosave + Changed; re-scan against the new content.
             self.recompute_find(cx);
@@ -2721,7 +2931,7 @@ impl Kyde {
         let rep = self.replace_query.read(cx).text().to_string();
         // Replace right-to-left so earlier ranges stay valid.
         let ranges: Vec<_> = self.find_matches.clone();
-        self.file_editor.update(cx, |e, cx| {
+        self.find_ed().update(cx, |e, cx| {
             for r in ranges.into_iter().rev() {
                 e.replace_range_text(r, &rep, cx);
             }
@@ -3031,6 +3241,7 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         self.mode = Mode::Browse;
+        self.diff_view_open = false;
         cx.notify();
     }
 
@@ -3038,6 +3249,7 @@ impl Kyde {
     /// load the selected file into the diff editors.
     pub(crate) fn enter_commit(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::Commit;
+        self.diff_view_open = false;
         // Drop the caret into the commit-message box on the next frame (render_commit consumes
         // this once the input element is in the tree).
         self.focus_commit_msg = true;
@@ -3108,6 +3320,7 @@ impl Kyde {
 
     fn enter_history_inner(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::History;
+        self.diff_view_open = false;
         self.history_rev = self
             .current_branch
             .clone()

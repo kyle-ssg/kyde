@@ -9,6 +9,10 @@ impl Render for Kyde {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let ui = theme::font::UI_FAMILY;
         let fs = px(theme::get().ui_font_size);
+        // Track the MAIN window's bounds (this `impl Render` runs only for the main window; the
+        // modals are `ModalWindow`). The Diff modal opens at these bounds so it's as big as the
+        // editor and lands over it.
+        self.main_window_bounds = Some(window.window_bounds());
 
         // No project open → the Projects landing view.
         if self.repo_root.is_none() {
@@ -85,6 +89,7 @@ impl Render for Kyde {
                         Mode::History => this.enter_history(cx),
                         Mode::Browse => {
                             this.mode = Mode::Browse;
+                            this.diff_view_open = false;
                             cx.notify();
                         }
                     }),
@@ -134,7 +139,7 @@ impl Render for Kyde {
             .bg(theme::get().frame_bg)
             .child(mode_btn(
                 "icons/folder.svg",
-                "Browse files",
+                "Explorer",
                 self.mode == Mode::Browse,
                 Mode::Browse,
                 cx,
@@ -189,10 +194,14 @@ impl Render for Kyde {
             rail
         };
 
-        let inner = match self.mode {
-            Mode::Commit => self.render_commit(ui, fs, window, cx),
-            Mode::Browse => self.render_browse(ui, fs, window, cx),
-            Mode::History => self.render_history(ui, fs, window, cx),
+        let inner = if self.diff_view_open {
+            self.render_diff_view(ui, fs, window, cx)
+        } else {
+            match self.mode {
+                Mode::Commit => self.render_commit(ui, fs, window, cx),
+                Mode::Browse => self.render_browse(ui, fs, window, cx),
+                Mode::History => self.render_history(ui, fs, window, cx),
+            }
         };
         // Frame gap around the island panels (rail provides the left chrome).
         let body = div()
@@ -240,12 +249,16 @@ impl Render for Kyde {
             .flex_col()
             .size_full()
             .bg(theme::get().frame_bg)
-            // While dragging the divider, pin the resize cursor across the whole window so
-            // it doesn't flicker as the pointer sweeps over rows/editor.
-            .when(
-                self.tree_resizing || self.diff_resizing || self.history_resizing,
-                |d| d.cursor_col_resize(),
-            )
+            // While dragging any divider, pin its resize cursor (row for vertical, col for
+            // horizontal) across the whole window so it doesn't flicker as the pointer sweeps
+            // over rows/editor.
+            .when_some(self.divider_drag.map(|(k, _)| k.vertical()), |d, vert| {
+                if vert {
+                    d.cursor_row_resize()
+                } else {
+                    d.cursor_col_resize()
+                }
+            })
             .on_action(cx.listener(Self::act_go_to_file))
             .on_action(cx.listener(Self::act_find_in_files))
             .on_action(cx.listener(Self::act_actions))
@@ -281,47 +294,10 @@ impl Render for Kyde {
         let root = root
             .on_mouse_move(
                 cx.listener(move |this, e: &gpui::MouseMoveEvent, window, cx| {
-                    if this.tree_resizing {
-                        // Tree's left edge sits at the rail's right edge (body has no left pad).
-                        // Subtract the grab offset so the divider doesn't snap under the cursor.
-                        let w = f32::from(e.position.x) - RAIL_W - this.tree_drag_offset;
-                        this.tree_width = w.clamp(180.0, 900.0);
-                        cx.notify();
-                    } else if this.diff_resizing {
-                        // Markdown split: editor pane width = cursor x minus the island's left
-                        // edge (after the rail + tree). Clamp so neither pane vanishes.
-                        let island_left = RAIL_W + this.tree_width + theme::FRAME_GAP;
-                        let vw = f32::from(window.viewport_size().width);
-                        let island_w = (vw - island_left - theme::FRAME_GAP).max(1.0);
-                        let w = f32::from(e.position.x) - island_left - this.diff_drag_offset;
-                        this.md_editor_w = w.clamp(200.0, (island_w - 200.0).max(200.0));
-                        cx.notify();
-                    } else if this.diff_pane_resizing {
-                        // Center divider between the two diff panes → set the left pane's
-                        // fraction of the diff island width. The island starts after the rail +
-                        // file-list column + its divider; ends a frame gap from the right edge.
-                        let island_left =
-                            RAIL_W + theme::FRAME_GAP + this.tree_width + theme::FRAME_GAP;
-                        let vw = f32::from(window.viewport_size().width);
-                        let island_w = (vw - island_left - theme::FRAME_GAP).max(1.0);
-                        let frac = (f32::from(e.position.x) - this.diff_drag_offset - island_left)
-                            / island_w;
-                        this.diff_split = frac.clamp(0.15, 0.85);
-                        cx.notify();
-                    } else if this.history_resizing {
-                        // Commit/files divider: the commit list is on the left, so its width =
-                        // cursor x − the panel's left edge (the rail's right edge).
-                        let vw = f32::from(window.viewport_size().width);
-                        let w = f32::from(e.position.x) - RAIL_W;
-                        let panel_w = (vw - RAIL_W - theme::FRAME_GAP).max(1.0);
-                        this.history_commit_w = w.clamp(200.0, (panel_w - 160.0).max(200.0));
-                        cx.notify();
-                    } else if this.history_v_resizing {
-                        // History panel height = window bottom (minus status bar + body pad) −
-                        // cursor y. Drag the strip between the diff and the log panel.
-                        let vh = f32::from(window.viewport_size().height);
-                        let h = vh - f32::from(e.position.y) - 34.0 - this.history_v_drag_offset;
-                        this.history_panel_h = h.clamp(140.0, (vh - 180.0).max(140.0));
+                    // All dividers share one handler: `drag_divider` tracks the active one 1:1.
+                    let sz = window.viewport_size();
+                    let (vw, vh) = (f32::from(sz.width), f32::from(sz.height));
+                    if this.drag_divider(e.position, vw, vh) {
                         cx.notify();
                     } else if let Some(drag) = this.sb_drag.clone() {
                         // Drag a scrollbar thumb: move the dragged view's content so the thumb
@@ -345,37 +321,14 @@ impl Render for Kyde {
                         drag.handle.set_offset(o);
                         cx.notify();
                     }
-                    #[cfg(feature = "terminal")]
-                    if this.term_resizing {
-                        // Panel height = window bottom (minus status bar) − cursor y.
-                        let vh = f32::from(window.viewport_size().height);
-                        let h = vh - f32::from(e.position.y) - 26.0;
-                        this.term_height = h.clamp(120.0, (vh - 160.0).max(120.0));
-                        cx.notify();
-                    }
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
-                    if this.tree_resizing
-                        || this.diff_resizing
-                        || this.diff_pane_resizing
-                        || this.history_resizing
-                        || this.history_v_resizing
-                        || this.sb_drag.is_some()
-                    {
-                        this.tree_resizing = false;
-                        this.diff_resizing = false;
-                        this.diff_pane_resizing = false;
-                        this.history_resizing = false;
-                        this.history_v_resizing = false;
-                        this.sb_drag = None;
-                        cx.notify();
-                    }
-                    #[cfg(feature = "terminal")]
-                    if this.term_resizing {
-                        this.term_resizing = false;
+                    let was_divider = this.divider_drag.take().is_some();
+                    let was_sb = this.sb_drag.take().is_some();
+                    if was_divider || was_sb {
                         cx.notify();
                     }
                 }),
@@ -812,9 +765,8 @@ impl Kyde {
             .cursor_col_resize()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
-                    this.tree_resizing = true;
-                    this.tree_drag_offset = f32::from(e.position.x) - RAIL_W - this.tree_width;
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.start_divider_drag(Divider::Tree, e.position, window);
                     cx.notify();
                 }),
             );
@@ -1509,14 +1461,15 @@ impl Kyde {
             .font_family(ui)
             .text_size(px(t.ui_font_size + 1.0))
             .children(commit_rows);
-        // Commit list = a fixed (resizable) pixel width on the LEFT; files pane = flex_1 on
-        // the right. Order matters: a flex_1 scroll pane placed BEFORE a flex_none sibling
-        // pushes it off-screen (clipped). So fixed-first + flex_1-last, exactly like the
-        // commit view's tree(fixed) + diff(flex) split. (Percentage flex-basis also doesn't
-        // resolve in this column-nested row, so pixels it is.)
+        // Commit list = a resizable share of the panel width on the LEFT (defaults to 2/3); the
+        // files pane fills the rest (flex_1). Sized in EXPLICIT pixels from the same formula the
+        // divider drag inverts (`Divider::HistCommit`), so the bar tracks the cursor exactly 1:1.
+        let commit_frac = self.history_commit_frac.clamp(0.15, 0.85);
+        let commit_w = commit_frac * full_island_w(f32::from(window.viewport_size().width));
         let commit_wrap = div()
-            .w(px(self.history_commit_w))
+            .w(px(commit_w))
             .flex_none()
+            .min_w_0()
             .h_full()
             .child(commit_pane);
 
@@ -1659,8 +1612,7 @@ impl Kyde {
 
         // Flat 1px dividers between sections (IntelliJ-style), not frame-gap islands.
         let hdiv = || div().h(px(3.0)).flex_none().bg(t.bg_light);
-        // Draggable commit/files divider (sets `history_resizing`; the root move handler
-        // updates `history_split`). A touch wider than 1px so it's easy to grab.
+        // Draggable commit/files divider. A touch wider than 1px so it's easy to grab.
         let split_divider = div()
             .id("hist-split")
             .w(px(5.0))
@@ -1670,8 +1622,8 @@ impl Kyde {
             .child(div().w(px(1.0)).h_full().mx(px(2.0)).bg(t.divider))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    this.history_resizing = true;
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.start_divider_drag(Divider::HistCommit, e.position, window);
                     cx.notify();
                 }),
             );
@@ -1717,12 +1669,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.history_v_resizing = true;
-                    // Pin the current height: offset = where the formula would put us minus the
-                    // actual height, so the first move keeps the panel exactly where it is.
-                    let vh = f32::from(window.viewport_size().height);
-                    this.history_v_drag_offset =
-                        (vh - f32::from(e.position.y) - 34.0) - this.history_panel_h;
+                    this.start_divider_drag(Divider::HistPanel, e.position, window);
                     cx.notify();
                 }),
             );
@@ -1921,6 +1868,67 @@ impl Kyde {
     /// Side-by-side diff = two editors in one rounded island: left is the read-only base
     /// (HEAD/index), right is the editable working copy (live-saved). A draggable divider
     /// sets the 50/50 split. Both syntax-highlight when the language pack is installed.
+    /// Full-screen Show-Diff view in the MAIN window (rollback / push diff). A header with a
+    /// Back button + the file path over the inline `render_diff`, so it reuses every editor
+    /// feature — find (⌘F), divider drag, scrollbars, change navigation. Escape / Back exits.
+    fn render_diff_view(
+        &mut self,
+        ui: &'static str,
+        fs: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let title: SharedString = self
+            .diff_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Diff".to_string())
+            .into();
+        let back = div()
+            .id("diff-back")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(t.secondary_text)
+            .hover(|s| s.bg(t.bg_mid).text_color(t.text))
+            .child("‹ Back")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.close_diff_view(cx)),
+            );
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .px_1()
+            .pb(px(theme::FRAME_GAP))
+            .font_family(ui)
+            .text_size(px(t.ui_font_size))
+            .child(back)
+            .child(div().min_w_0().truncate().text_color(t.text).child(title));
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(header);
+        // The find/replace bar (⌘F / ⌘R), targeting whichever diff pane is focused.
+        if self.find_open {
+            col = col.child(self.render_find_bar(ui, cx));
+        }
+        col.child(self.render_diff(ui, fs, Some(window), cx))
+            .into_any_element()
+    }
+
     /// IntelliJ-style side-by-side diff: aligned rows, with a center gutter showing the old
     /// and new line numbers, a `»` chevron (revert the hunk) and a checkbox (stage it).
     fn render_diff(
@@ -1943,6 +1951,20 @@ impl Kyde {
                 .text_size(fs)
                 .text_color(t.text)
         };
+
+        // The Diff modal window renders the same `diff_left`/`diff_right` editors; rendering one
+        // editor entity in two windows desyncs scroll + garbles layout. So while the modal is
+        // open, the INLINE diff (the only caller that passes `Some(window)`) yields the panes to
+        // it and shows a placeholder. The modal itself passes `None`, so it renders normally.
+        if window.is_some() && self.diff_modal_open {
+            return island()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(t.line_number)
+                .child("Viewing diff in window…")
+                .into_any_element();
+        }
 
         // Image file selected → preview it centered + scaled (same as Browse), not a text diff.
         if let Some(rel) = self.diff_image.clone() {
@@ -2089,27 +2111,33 @@ impl Kyde {
                 .into_any_element();
         }
 
-        let left = div()
-            .relative()
-            .flex_basis(gpui::relative(frac))
-            .flex_shrink()
-            .min_w_0()
-            .h_full()
-            .child(left_inner);
-        let right = div()
-            .relative()
-            .flex_basis(gpui::relative(1.0 - frac))
-            .flex_shrink()
-            .min_w_0()
-            .h_full()
-            .child(right_inner);
+        // Left pane width: when we know the viewport (the inline diff, the only resizable
+        // caller — the modal passes `None`), size it to an explicit pixel width from the SAME
+        // formula the resize handler inverts, and let the right pane flex to fill the rest. The
+        // modal falls back to proportional flex_basis (its divider isn't dragged through the
+        // main-window handler). Both keep `min_w_0` so neither pane can be pushed off-window.
+        let left_px = window.as_deref().map(|w| {
+            (frac * (full_island_w(f32::from(w.viewport_size().width)) - DIFF_GUTTER_W)).max(40.0)
+        });
+        let left = div().relative().min_w_0().h_full();
+        let left = match left_px {
+            Some(w) => left.w(px(w)).flex_none(),
+            None => left.flex_basis(gpui::relative(frac)).flex_shrink(),
+        }
+        .child(left_inner);
+        let right = div().relative().min_w_0().h_full();
+        let right = match left_px {
+            Some(_) => right.flex_1(),
+            None => right.flex_basis(gpui::relative(1.0 - frac)).flex_shrink(),
+        }
+        .child(right_inner);
         // The gutter (chevrons) shares the editors' vertical scroll by translating its content
         // by the SAME offset; it also doubles as the draggable divider (drag to resize the
         // split). Clicks on a `»` still revert their hunk (chevrons are children).
         let scroll_y = self.diff_scroll.offset().y;
         let gutter = div()
             .id("diff-gutter")
-            .w(px(44.0))
+            .w(px(DIFF_GUTTER_W))
             .flex_none()
             .h_full()
             .overflow_hidden()
@@ -2123,15 +2151,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.diff_pane_resizing = true;
-                    // Grab offset: cursor-x minus the divider's current pixel position, so the
-                    // first move doesn't snap the split under the pointer.
-                    let island_left =
-                        RAIL_W + theme::FRAME_GAP + this.tree_width + theme::FRAME_GAP;
-                    let vw = f32::from(window.viewport_size().width);
-                    let island_w = (vw - island_left - theme::FRAME_GAP).max(1.0);
-                    let divider_x = island_left + this.diff_split * island_w;
-                    this.diff_drag_offset = f32::from(e.position.x) - divider_x;
+                    this.start_divider_drag(Divider::DiffPane, e.position, window);
                     cx.notify();
                 }),
             )
@@ -2599,7 +2619,7 @@ impl Kyde {
             .cursor_pointer()
             .when(selected, |d| d.bg(t.selected_bg))
             // No hover tint on the active row (it would override its selected colour).
-            .when(!selected && !self.tree_resizing, |d| {
+            .when(!selected && !self.dragging(Divider::Tree), |d| {
                 d.hover(|d| d.bg(t.bg_mid))
             })
             .child(content)
@@ -2833,13 +2853,12 @@ impl Kyde {
                                 .bg(theme::get().divider)
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
-                                        this.diff_resizing = true;
-                                        // Grab offset so the split doesn't jolt to the cursor.
-                                        let island_left =
-                                            RAIL_W + this.tree_width + theme::FRAME_GAP;
-                                        let divider_x = island_left + this.md_editor_w;
-                                        this.diff_drag_offset = f32::from(e.position.x) - divider_x;
+                                    cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                                        this.start_divider_drag(
+                                            Divider::MdSplit,
+                                            e.position,
+                                            window,
+                                        );
                                         cx.notify();
                                     }),
                                 ),
@@ -2900,9 +2919,8 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // While dragging the divider the cursor sweeps over rows; per-frame hover toggling
-        // makes their backgrounds flicker. Suppress row hover for the duration of a resize.
-        let resizing = self.tree_resizing;
+        // Row-hover suppression during a tree resize now lives in `tree_row` (it reads
+        // `dragging(Divider::Tree)`), so the cursor sweeping over rows mid-drag doesn't flicker.
         // Show the repo root as the top row; everything else nests one level under it,
         // and collapsing the root hides the whole tree.
         let root_name = self
@@ -2913,9 +2931,8 @@ impl Kyde {
             .unwrap_or_else(|| "/".to_string());
         let visible = self.browse_visible_rows();
         let scratch_group = scratch_group_path();
-        let _ = resizing; // hover-suppression now lives in `tree_row` (reads tree_resizing)
-                          // O(1) status lookup per row (was `self.files.iter().find()` — O(changed) per row,
-                          // i.e. O(rows×changed) for the whole tree on every frame).
+        // O(1) status lookup per row (was `self.files.iter().find()` — O(changed) per row,
+        // i.e. O(rows×changed) for the whole tree on every frame).
         let status_by_path: std::collections::HashMap<&PathBuf, FileStatus> =
             self.files.iter().map(|f| (&f.path, f.status)).collect();
         let rows: Vec<gpui::AnyElement> = visible
@@ -2955,16 +2972,20 @@ impl Kyde {
                     name_color,
                     None,
                     move |this, e, window, cx| {
-                        // Single click selects; double click opens. Folders toggle expansion.
+                        // Folders toggle expansion. Files (VS Code-style): single click opens in
+                        // the temporary *preview* tab (reused by the next single-click), double
+                        // click opens a permanent tab.
                         this.selected_path = Some(p_act.clone());
                         // Focus the app root so the "Kyde"-context Backspace (delete) binding
-                        // is live on the selected row. (Double-click open_file re-focuses the
+                        // is live on the selected row. (open_file/preview_file re-focus the
                         // editor below, which is what we want there.)
                         window.focus(&this.focus_handle);
                         if is_dir {
                             this.toggle_dir(p_act.clone(), cx);
                         } else if e.click_count >= 2 {
                             this.open_file(p_act.clone(), cx);
+                        } else {
+                            this.preview_file(p_act.clone(), cx);
                         }
                         cx.notify();
                     },
@@ -3078,9 +3099,8 @@ impl Kyde {
             .cursor_col_resize()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
-                    this.tree_resizing = true;
-                    this.tree_drag_offset = f32::from(e.position.x) - RAIL_W - this.tree_width;
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.start_divider_drag(Divider::Tree, e.position, window);
                     cx.notify();
                 }),
             );
@@ -3701,6 +3721,8 @@ impl Kyde {
         let dirty = self.file_editor.read(cx).dirty;
         let tabs = self.open_tabs.iter().enumerate().map(|(i, p)| {
             let active = self.open_path.as_ref() == Some(p);
+            // The preview (temporary) tab renders in italics, like VS Code.
+            let preview = self.preview_tab.as_ref() == Some(p);
             let name: SharedString = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -3753,10 +3775,17 @@ impl Kyde {
                 .rounded_md()
                 .border_1()
                 .cursor_pointer()
-                .when(active, |d| {
+                // Preview (temporary) tab → the same outline + translucent-fill treatment as an
+                // active tab, but in grey instead of the accent blue, so it reads as "tentative".
+                // A permanent active tab keeps the blue; inactive permanent tabs are bare.
+                .when(preview, |d| {
+                    d.bg(gpui::rgba(0x8A909022))
+                        .border_color(gpui::rgb(0x6B7079))
+                })
+                .when(active && !preview, |d| {
                     d.bg(gpui::rgba(0x3574F026)).border_color(t.primary)
                 })
-                .when(!active, |d| {
+                .when(!active && !preview, |d| {
                     d.border_color(gpui::rgba(0x00000000))
                         .hover(|d| d.bg(t.bg_mid))
                 })
@@ -4125,17 +4154,26 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let row_base = |sel: bool| {
+        // gpui only tracks hover on *identified* elements, so each row needs an `.id()` or the
+        // `.hover(...)` style never applies (the tree rows that hover all carry an id).
+        let row_base = |i: usize, sel: bool| {
             div()
+                .id(("finder-row", i))
                 .flex()
                 .flex_row()
                 .items_center()
+                // Inset the rounded pill 2px from the panel edges so the hover/selected
+                // background doesn't run into the corners.
+                .mx(px(2.0))
                 .px_3()
                 .py_1()
                 .rounded_md()
+                .cursor_pointer()
                 .text_color(t.text)
                 .when(sel, |d| d.bg(t.selected_bg))
-                .when(!sel, |d| d.hover(|s| s.bg(t.bg_mid)))
+                // The finder panel itself is `bg_mid`, so hover must be a lighter shade
+                // (`bg_light`) to be visible — `bg_mid` on `bg_mid` shows nothing.
+                .when(!sel, |d| d.hover(|s| s.bg(t.bg_light)))
         };
         let rows: Vec<gpui::AnyElement> = match self.finder_mode {
             FinderMode::Files => self
@@ -4155,7 +4193,7 @@ impl Kyde {
                         .items_center()
                         .justify_end()
                         .child(badge_inner(file_badge(p), 0.0));
-                    row_base(sel)
+                    row_base(i, sel)
                         .child(icon)
                         .child(div().min_w_0().truncate().child(name))
                         .on_mouse_down(
@@ -4198,7 +4236,7 @@ impl Kyde {
                         .items_center()
                         .justify_end()
                         .child(badge_inner(file_badge(&path), 0.0));
-                    row_base(sel)
+                    row_base(i, sel)
                         .child(icon)
                         .child(
                             div()
@@ -4246,7 +4284,7 @@ impl Kyde {
                                 .text_color(t.line_number)
                                 .child(SharedString::from(pretty_key(&k)))
                         });
-                    row_base(sel)
+                    row_base(row, sel)
                         .child(
                             div()
                                 .flex_1()
@@ -4282,7 +4320,7 @@ impl Kyde {
                             file_badge(std::path::Path::new(&format!("x.{ext}"))),
                             0.0,
                         ));
-                    row_base(sel)
+                    row_base(row, sel)
                         .child(icon)
                         .child(SharedString::from(label))
                         .on_mouse_down(
@@ -4356,6 +4394,8 @@ impl Kyde {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
+                    // 2px vertical gap between the rounded rows, matching their 2px side inset.
+                    .gap(px(2.0))
                     .children(rows),
             )
             // Clicks inside the panel must not reach the backdrop (which would close the finder
@@ -6334,15 +6374,15 @@ impl Kyde {
             .child(strip)
             .child(div().flex_1().min_h_0().child(body));
 
-        // A thin top divider whose drag resizes the panel (sets `term_resizing`).
+        // A thin top divider whose drag resizes the panel (the shared `Divider::Term` drag).
         let divider = div()
             .h(px(6.0))
             .flex_none()
             .cursor_row_resize()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    this.term_resizing = true;
+                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                    this.start_divider_drag(Divider::Term, e.position, window);
                     cx.notify();
                 }),
             );
