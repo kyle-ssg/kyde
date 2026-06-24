@@ -11,7 +11,7 @@ pub(crate) const SCROLL_CONTEXT_ROWS: usize = 3;
 /// `git status` + re-diff all shell out, so bursts of typing are coalesced).
 const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Debounce before a Browse edit triggers a background `git status` refresh.
-const STATUS_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const STATUS_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
 /// Debounce before a Find-in-Files keystroke fires the background `git grep` (coalesces
 /// bursts of typing — a full-repo grep is far too expensive to run per keystroke).
 pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -542,7 +542,7 @@ impl Kyde {
         .detach();
     }
 
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         if let Some(repo) = self.repo() {
             // `git status` failing means we can't trust the file list — surface it rather
             // than show an empty (looks-clean) tree. A later success clears the banner.
@@ -589,9 +589,6 @@ impl Kyde {
         }
     }
 
-    fn select(&mut self, idx: usize) {
-        self.select_with(idx, None);
-    }
 
     /// Push the diff `d`'s per-line / word backgrounds + filler onto both panes. Pure
     /// decoration: it never touches content, language, read-only, line numbers, or scroll
@@ -670,78 +667,6 @@ impl Kyde {
         }
     }
 
-    /// Select a changed file and load it into the diff editors. `cx` is needed to push
-    /// content into the editor entities; when called without a context (e.g. during a
-    /// plain `refresh`) the editors are left as-is and only `current_diff` updates.
-    pub(crate) fn select_with(&mut self, idx: usize, cx: Option<&mut Context<Self>>) {
-        self.selected = Some(idx);
-        self.commit_focus.clear(); // a single selection drops any folder-group highlight
-        let Some(file) = self.files.get(idx).cloned() else {
-            return;
-        };
-        // Image files preview as an image (like Browse), not a text diff. Clear it for every
-        // other selection so a stale preview never lingers.
-        self.diff_image = None;
-        if is_image(&file.path) {
-            self.old_spans = Vec::new();
-            self.new_spans = Vec::new();
-            self.current_diff = None;
-            self.diff_path = None; // keep autosave disabled — never write an image pane
-            self.diff_image = Some(file.path.clone()); // set unconditionally — refresh re-selects with cx=None
-            if let Some(cx) = cx {
-                // Drop any stale text so nothing flashes behind the image.
-                self.diff_left.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-                self.diff_right.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-            }
-            return;
-        }
-        if let Some(repo) = self.repo() {
-            // A deleted file has no working copy: its "after" is empty, so the diff shows the
-            // old content on the left only (render_diff drops the empty right pane). Reading
-            // the (now-absent) file would otherwise error into the binary path below.
-            let after = if matches!(file.status, FileStatus::Deleted) {
-                String::new()
-            } else {
-                // A binary / unreadable working file errors here — don't feed an empty
-                // string through the diff (it would render as "all deleted" and, worse,
-                // the right pane's autosave would truncate the file to empty).
-                let Ok(a) = repo.working_content(&file.path) else {
-                    self.old_spans = Vec::new();
-                    self.new_spans = Vec::new();
-                    self.current_diff = None;
-                    if let Some(cx) = cx {
-                        self.diff_path = None; // disables diff_autosave for this file
-                        let msg = String::from("Binary or non-text file — no diff.");
-                        self.diff_left
-                            .update(cx, |e, cx| e.set_content(msg.clone(), Lang::PlainText, cx));
-                        self.diff_right
-                            .update(cx, |e, cx| e.set_content(msg, Lang::PlainText, cx));
-                    }
-                    return;
-                };
-                a
-            };
-            let before = repo.base_content(&file.path).unwrap_or_default();
-            let lang = self.effective_lang(&file.path);
-            match cx {
-                // No context (e.g. during a plain `refresh`): update only the diff model,
-                // leaving the editor entities as-is.
-                None => {
-                    self.old_spans = highlight::highlight(&before, lang);
-                    self.new_spans = highlight::highlight(&after, lang);
-                    self.current_diff = Some(FileDiff::compute(&before, &after));
-                }
-                // With a context, load both panes (editable working diff: right unlocked).
-                Some(cx) => {
-                    self.load_diff_panes(file.path.clone(), before, after, lang, false, cx);
-                }
-            }
-        }
-    }
 
     /// Live-save the editable (right) diff pane to disk, then re-diff + recolor.
     fn diff_autosave(&mut self, cx: &mut Context<Self>) {
@@ -911,96 +836,13 @@ impl Kyde {
         cx.notify();
     }
 
-    // ── branch switcher ───────────────────────────────────────────
-    pub(crate) fn toggle_branch_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.branch_popup_open {
-            self.branch_popup_open = false;
-            window.focus(&self.focus_handle);
-        } else {
-            self.branch_list = self
-                .repo()
-                .and_then(|r| r.branches().ok())
-                .unwrap_or_default();
-            self.branch_query.update(cx, |e, cx| {
-                e.set_content(String::new(), Lang::PlainText, cx)
-            });
-            // Recent expanded by default; Local collapsed.
-            self.branch_expanded.insert("sec:recent".into());
-            self.branch_popup_open = true;
-            // Focus now and next frame: the popup element isn't in the tree on first open.
-            let handle = self.branch_query.read(cx).focus_handle.clone();
-            window.focus(&handle);
-            window.defer(cx, move |window, _cx| window.focus(&handle));
-        }
-        cx.notify();
-    }
 
-    /// Open the push confirmation modal (lists the files that would be pushed, like the
-    /// commit/rollback views). Push doesn't fire until the user confirms.
-    pub(crate) fn open_push_modal(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        if let Some(repo) = self.repo() {
-            self.push_base = repo.push_base();
-            self.push_files = repo.push_files();
-        } else {
-            self.push_files.clear();
-        }
-        self.open_modal_window(ModalKind::Push, "Push", 520.0, 560.0, cx);
-        cx.notify();
-    }
 
-    /// Switch the git view's tab (Commit / Push), selecting the first file of that tab so
-    /// its diff shows right away.
-    pub(crate) fn set_git_tab(&mut self, tab: GitTab, cx: &mut Context<Self>) {
-        if self.git_tab == tab {
-            return;
-        }
-        self.git_tab = tab;
-        match tab {
-            GitTab::Commit => {
-                // Switching onto the Commit tab focuses the message box, same as entering it.
-                self.focus_commit_msg = true;
-                if self.files.is_empty() {
-                    self.clear_diff_panes(cx);
-                } else {
-                    let i = self.selected.filter(|&i| i < self.files.len()).unwrap_or(0);
-                    self.select_with(i, Some(cx));
-                }
-            }
-            GitTab::Push => {
-                if self.push_files.is_empty() {
-                    self.push_selected = None;
-                    self.clear_diff_panes(cx);
-                } else {
-                    let i = self
-                        .push_selected
-                        .filter(|&i| i < self.push_files.len())
-                        .unwrap_or(0);
-                    self.select_push_file(i, cx);
-                }
-            }
-        }
-        cx.notify();
-    }
 
-    /// Keep `git_tab` on a tab that has content: if the current tab just emptied (after a
-    /// commit or push), switch to the other one and select its first file. No-op when the
-    /// current tab still has files, or when both are empty (the view shows its central message).
-    pub(crate) fn normalize_git_tab(&mut self, cx: &mut Context<Self>) {
-        if self.mode != Mode::Commit {
-            return;
-        }
-        let want = match self.git_tab {
-            GitTab::Commit if self.files.is_empty() && !self.push_files.is_empty() => GitTab::Push,
-            GitTab::Push if self.push_files.is_empty() && !self.files.is_empty() => GitTab::Commit,
-            _ => return,
-        };
-        self.set_git_tab(want, cx);
-    }
 
     /// Empty the diff panes (both sides + cached diff/path) — used when a tab has no file to
     /// show, so a stale file doesn't linger from the other tab.
-    fn clear_diff_panes(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_diff_panes(&mut self, cx: &mut Context<Self>) {
         self.diff_path = None;
         self.current_diff = None;
         self.diff_left.update(cx, |e, cx| {
@@ -1011,50 +853,7 @@ impl Kyde {
         });
     }
 
-    /// Select a file in the Push tab → load its committed change (`push_base` vs HEAD)
-    /// read-only into the diff panes (no working-tree edit, so no revert chevrons/autosave).
-    pub(crate) fn select_push_file(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.push_selected = Some(idx);
-        let Some(file) = self.push_files.get(idx).cloned() else {
-            return;
-        };
-        let Some(repo) = self.repo() else { return };
-        let before = repo
-            .committed_content(&self.push_base, &file.path)
-            .unwrap_or_default();
-        let after = repo
-            .committed_content("HEAD", &file.path)
-            .unwrap_or_default();
-        let lang = self.effective_lang(&file.path);
-        self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);
-        cx.notify();
-    }
 
-    /// Push modal → right-click a file → "View Diff": show that file's committed change
-    /// (`push_base` vs HEAD) read-only in the diff window — no working-tree edit, so no
-    /// gutter revert chevrons or autosave.
-    pub(crate) fn push_show_diff(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        let Some(file) = self.push_files.get(idx).cloned() else {
-            return;
-        };
-        let Some(repo) = self.repo() else { return };
-        let before = repo
-            .committed_content(&self.push_base, &file.path)
-            .unwrap_or_default();
-        let after = repo
-            .committed_content("HEAD", &file.path)
-            .unwrap_or_default();
-        let lang = self.effective_lang(&file.path);
-        // `diff_path = Some` (set inside `load_diff_panes`) makes `render_diff` show the
-        // panes (it gates on a path); `readonly = true` suppresses the revert chevrons +
-        // autosave for this committed diff.
-        self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);
-        // Show the diff full-screen in the MAIN window; close the Push window we came from.
-        self.diff_view_open = true;
-        self.close_modal_window(ModalKind::Push, cx);
-        cx.notify();
-    }
 
     /// Leave the full-screen Show-Diff view, back to whatever mode the main window was in.
     pub(crate) fn close_diff_view(&mut self, cx: &mut Context<Self>) {
@@ -1062,41 +861,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Push the current branch to origin on a background thread (network I/O must
-    /// not block the UI), then refresh status and the ahead-count badge.
-    pub(crate) fn do_push(&mut self, cx: &mut Context<Self>) {
-        self.close_modal_window(ModalKind::Push, cx);
-        if self.pushing {
-            return;
-        }
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        self.pushing = true;
-        self.push_msg = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { Repo::discover(&root).and_then(|r| r.push_rebasing()) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.pushing = false;
-                let err = result.err().map(|e| e.to_string());
-                this.push_msg = err.clone();
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
-                if let Some(m) = err {
-                    this.op_error = Some(format!("Push failed: {m}"));
-                }
-                // Pushed → the Push tab may be empty now; flip to Commit if it has work.
-                this.normalize_git_tab(cx);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
     /// Act on the update banner. Running from a `.app` bundle with a zip asset → download,
     /// swap in place, relaunch. Otherwise (dev binary, or a release with no zip) → open the
@@ -1191,251 +955,16 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Pull = fetch + rebase local commits on top (auto-stashing edits), off the UI thread.
-    /// Mirrors `do_push`. Closes the branch popup so the UI never freezes mid-operation.
-    pub(crate) fn do_pull(&mut self, cx: &mut Context<Self>) {
-        self.branch_popup_open = false;
-        self.context_menu = None;
-        if self.pulling {
-            return;
-        }
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        self.pulling = true;
-        self.push_msg = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { Repo::discover(&root).and_then(|r| r.pull_rebase()) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.pulling = false;
-                let err = result.err().map(|e| e.to_string());
-                this.push_msg = err.clone();
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
-                if let Some(m) = err {
-                    this.op_error = Some(format!("Pull failed: {m}"));
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
-    /// Fetch remote-tracking refs off the UI thread, then refresh so the ahead/behind badges
-    /// reflect the true remote state. Doesn't touch the working tree (unlike Pull).
-    pub(crate) fn do_fetch(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        self.branch_popup_open = false;
-        if self.fetching {
-            return;
-        }
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        self.fetching = true;
-        self.push_msg = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { Repo::discover(&root).and_then(|r| r.fetch()) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.fetching = false;
-                let err = result.err().map(|e| e.to_string());
-                // refresh() recomputes ahead/behind from the freshly-fetched refs.
-                this.refresh();
-                if let Some(m) = err {
-                    this.op_error = Some(format!("Fetch failed: {m}"));
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
-    pub(crate) fn toggle_branch_node(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.branch_expanded.remove(&key) {
-            self.branch_expanded.insert(key);
-        }
-        cx.notify();
-    }
 
-    pub(crate) fn checkout_branch(
-        &mut self,
-        name: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.run_branch_op(window, cx, move |r| r.checkout(&name));
-    }
 
-    /// Open the "Create New Branch" dialog (own native window). `branch_query` doubles as the
-    /// name field (prefilled with whatever was typed in the branch popup).
-    pub(crate) fn open_new_branch(&mut self, cx: &mut Context<Self>) {
-        self.branch_popup_open = false;
-        self.new_branch_checkout = true;
-        self.new_branch_overwrite = false;
-        self.open_modal_window(ModalKind::NewBranch, "Create New Branch", 520.0, 220.0, cx);
-        cx.notify();
-    }
 
-    /// Create the branch named in the dialog, honoring the Checkout / Overwrite toggles, then
-    /// close the dialog and refresh. Spaces in the name become hyphens (git rejects spaces).
-    pub(crate) fn do_create_branch(&mut self, cx: &mut Context<Self>) {
-        let name = slugify_branch(self.branch_query.read(cx).text());
-        if name.is_empty() {
-            return;
-        }
-        let (checkout, overwrite) = (self.new_branch_checkout, self.new_branch_overwrite);
-        self.close_modal_window(ModalKind::NewBranch, cx);
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let res = cx
-                .background_executor()
-                .spawn(async move {
-                    Repo::discover(&root)
-                        .and_then(|r| r.create_branch_opts(&name, checkout, overwrite))
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
-                if let Err(e) = res {
-                    this.fail("Create branch", e);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
-    /// Run a branch git op (checkout / create) OFF the UI thread, then refresh. Closes the
-    /// popup immediately so the UI never freezes mid-operation (`git checkout` touches the
-    /// whole working tree and was blocking the main thread).
-    fn run_branch_op(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        op: impl FnOnce(&Repo) -> anyhow::Result<()> + Send + 'static,
-    ) {
-        self.branch_popup_open = false;
-        window.focus(&self.focus_handle);
-        cx.notify();
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            let res = cx
-                .background_executor()
-                .spawn(async move { Repo::discover(&root).and_then(|r| op(&r)) })
-                .await;
-            this.update(cx, |this, cx| {
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
-                if let Err(e) = res {
-                    this.fail("Branch operation", e);
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-    /// Browse → "Commit": jump to the Commit view, selecting the file if it changed.
-    /// Indices into `self.files` that are committable/rollback-able under `path`:
-    /// a file → itself; a folder → every change beneath it; the repo root (`""`) → all.
-    fn changed_under(&self, path: &std::path::Path) -> Vec<usize> {
-        self.files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| f.path == path || f.path.starts_with(path))
-            .map(|(i, _)| i)
-            .collect()
-    }
 
-    /// True if there is anything to commit/rollback under `path` — gates the Browse
-    /// context menu so Commit/Rollback never show on unchanged files or folders.
-    pub(crate) fn has_changes_under(&self, path: &std::path::Path) -> bool {
-        !self.changed_under(path).is_empty()
-    }
 
-    /// Rebuild the commit view's folder tree from the current changed files. `check_all`
-    /// re-checks everything (entering the view); otherwise existing checks are preserved
-    /// (dropping files that are no longer changed).
-    fn rebuild_commit_view(&mut self, check_all: bool) {
-        let paths: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
-        self.commit_tree = tree::Tree::build(&paths);
-        // Expand the whole tree (root + every ancestor dir) so all changes are visible.
-        self.commit_expanded.clear();
-        self.commit_expanded.insert(PathBuf::new());
-        for p in &paths {
-            for anc in p.ancestors().skip(1) {
-                self.commit_expanded.insert(anc.to_path_buf());
-            }
-        }
-        if check_all {
-            self.commit_checked = paths.into_iter().collect();
-        } else {
-            let live: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
-            self.commit_checked.retain(|p| live.contains(p));
-        }
-    }
 
-    /// Whether every changed file under `path` (a folder, or `""` = root) is checked.
-    pub(crate) fn folder_all_checked(&self, path: &std::path::Path) -> bool {
-        let desc = self.changed_under(path);
-        !desc.is_empty()
-            && desc.iter().all(|&i| {
-                self.files
-                    .get(i)
-                    .is_some_and(|f| self.commit_checked.contains(&f.path))
-            })
-    }
 
-    /// Toggle a commit checkbox. For a folder, set every changed file under it to match
-    /// (uncheck-all if currently all checked, else check-all).
-    pub(crate) fn toggle_commit_check(
-        &mut self,
-        path: PathBuf,
-        is_dir: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if is_dir {
-            let want = !self.folder_all_checked(&path);
-            let descendants: Vec<PathBuf> = self
-                .changed_under(&path)
-                .iter()
-                .filter_map(|&i| self.files.get(i))
-                .map(|f| f.path.clone())
-                .collect();
-            for p in descendants {
-                if want {
-                    self.commit_checked.insert(p);
-                } else {
-                    self.commit_checked.remove(&p);
-                }
-            }
-        } else if !self.commit_checked.remove(&path) {
-            self.commit_checked.insert(path);
-        }
-        cx.notify();
-    }
-    pub(crate) fn toggle_commit_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if !self.commit_expanded.remove(&dir) {
-            self.commit_expanded.insert(dir);
-        }
-        cx.notify();
-    }
 
     /// Same as `folder_all_checked`/`toggle_commit_check`, but for the rollback selection.
     pub(crate) fn rollback_folder_all_checked(&self, path: &std::path::Path) -> bool {
@@ -1474,35 +1003,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Browse → "Commit": jump to the Commit view with every change under the target
-    /// (a file or a whole folder) highlighted as a group, the first one open for diff.
-    pub(crate) fn menu_commit_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let idxs = self.changed_under(&path);
-        self.context_menu = None;
-        let Some(&first) = idxs.first() else {
-            cx.notify();
-            return;
-        };
-        self.mode = Mode::Commit;
-        // Build the commit tree (we may be arriving straight from Browse, never having entered
-        // the commit view) without clobbering it; we set the checkboxes explicitly below.
-        self.rebuild_commit_view(false);
-        // `select_with(.., Some(cx))` (not `select`) so the first file's diff actually opens —
-        // plain `select` passes cx=None and leaves the pane on "Select a file". Clears
-        // commit_focus, so the group is set afterwards.
-        self.select_with(first, Some(cx));
-        let group: std::collections::HashSet<PathBuf> = idxs
-            .iter()
-            .filter_map(|&i| self.files.get(i))
-            .map(|f| f.path.clone())
-            .collect();
-        self.commit_focus = group.clone();
-        // Tick exactly the right-clicked path's changes — "Commit this folder/file" means those
-        // files are the ones staged for the commit (otherwise the view opens with nothing
-        // checked and the Commit button does nothing).
-        self.commit_checked = group;
-        cx.notify();
-    }
     /// Commit → "Show Diff": open the floating diff viewer for that changed file.
     pub(crate) fn menu_show_diff(&mut self, idx: usize, cx: &mut Context<Self>) {
         // `select_with(.., Some(cx))` — not `select` — so the diff editors + `diff_path`
@@ -1701,13 +1201,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// After a revert leaves the working tree clean, drop back to the file (Browse) view —
-    /// there's nothing left to commit, so the git view would just be empty.
-    fn exit_commit_if_clean(&mut self) {
-        if self.mode == Mode::Commit && self.files.is_empty() {
-            self.mode = Mode::Browse;
-        }
-    }
 
     /// Open the delete-confirmation modal for a tree path (is_dir derived from disk).
     /// Open the "new file" prompt, creating in `dir` (rel path; `""` = repo root).
@@ -1859,57 +1352,6 @@ impl Kyde {
         cx.notify();
     }
 
-    pub(crate) fn commit_now(&mut self, cx: &mut Context<Self>) {
-        if self.committing {
-            return;
-        }
-        let msg = self.commit_editor.read(cx).text().trim().to_string();
-        if msg.is_empty() || self.commit_checked.is_empty() {
-            return;
-        }
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        // Snapshot what to stage vs unstage so the actual git work runs off the UI thread
-        // (staging + commit shell out per file — keep the button responsive + show feedback).
-        let checked: Vec<PathBuf> = self.commit_checked.iter().cloned().collect();
-        let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
-        self.committing = true;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let repo = Repo::discover(&root)?;
-                    for p in &all {
-                        if checked.contains(p) {
-                            repo.stage(p)?;
-                        } else {
-                            repo.unstage(p)?;
-                        }
-                    }
-                    repo.commit(&msg)
-                })
-                .await;
-            this.update(cx, |this, cx| {
-                this.committing = false;
-                match result {
-                    Ok(()) => {
-                        this.commit_editor.update(cx, |e, cx| {
-                            e.set_content(String::new(), Lang::PlainText, cx)
-                        });
-                        this.refresh();
-                        // Tab may be empty now → flip to Push if it has work.
-                        this.normalize_git_tab(cx);
-                    }
-                    Err(e) => this.fail("Commit", e),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
 
     /// Expand/collapse a directory in the Browse tree.
     pub(crate) fn toggle_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
@@ -2249,7 +1691,7 @@ impl Kyde {
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
     /// silent no-op. `ctx` is a short human label ("Commit", "Push", …); the error is
     /// stringified after it. Still logs to stderr for debugging.
-    fn fail(&mut self, ctx: &str, e: anyhow::Error) {
+    pub(crate) fn fail(&mut self, ctx: &str, e: anyhow::Error) {
         eprintln!("{ctx} failed: {e:#}");
         self.op_error = Some(format!("{ctx} failed: {e}"));
     }
@@ -2394,25 +1836,6 @@ impl Kyde {
         self.schedule_status_refresh(cx);
     }
 
-    /// Debounced git-status refresh: only the latest edit's timer wins, so status
-    /// catches up ~0.4s after you stop typing instead of on every keystroke.
-    fn schedule_status_refresh(&mut self, cx: &mut Context<Self>) {
-        self.refresh_gen = self.refresh_gen.wrapping_add(1);
-        let generation = self.refresh_gen;
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(STATUS_REFRESH_DEBOUNCE)
-                .await;
-            this.update(cx, |this, cx| {
-                if this.refresh_gen == generation {
-                    this.refresh();
-                    cx.notify();
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
 
     fn save_open(&mut self, cx: &mut Context<Self>) {
         let (Some(rel), text) = (
@@ -2614,19 +2037,6 @@ impl Kyde {
             self.close_tab(idx, cx);
         }
     }
-    pub(crate) fn act_commit(&mut self, _: &DoCommit, _: &mut Window, cx: &mut Context<Self>) {
-        // ⌘K opens the git view with the current file selected (the actual commit happens
-        // from the Commit button), IntelliJ-style.
-        self.enter_commit(cx);
-    }
-    pub(crate) fn act_mode_commit(
-        &mut self,
-        _: &ModeCommit,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.enter_commit(cx);
-    }
     pub(crate) fn act_mode_browse(
         &mut self,
         _: &ModeBrowse,
@@ -2638,59 +2048,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Switch to Commit mode: re-read git status (so edits made in Browse show up) and
-    /// load the selected file into the diff editors.
-    pub(crate) fn enter_commit(&mut self, cx: &mut Context<Self>) {
-        self.mode = Mode::Commit;
-        self.diff_view_open = false;
-        // Drop the caret into the commit-message box on the next frame (render_commit consumes
-        // this once the input element is in the tree).
-        self.focus_commit_msg = true;
-        if let Some(repo) = self.repo() {
-            self.files = repo.status().unwrap_or_default();
-            self.push_base = repo.push_base();
-            self.push_files = repo.push_files();
-        }
-        // Default to the tab that has work: Push if there's nothing to commit but commits
-        // are waiting to be pushed; Commit otherwise.
-        self.git_tab = if self.files.is_empty() && !self.push_files.is_empty() {
-            GitTab::Push
-        } else {
-            GitTab::Commit
-        };
-        // On the Push tab, select the first push file so its diff shows immediately.
-        if self.git_tab == GitTab::Push {
-            self.rebuild_commit_view(true);
-            self.select_push_file(0, cx);
-            cx.notify();
-            return;
-        }
-        self.rebuild_commit_view(true);
-        // Prefer the currently-open file, else the prior selection, else the first change.
-        let idx = self
-            .open_path
-            .as_ref()
-            .and_then(|p| self.files.iter().position(|f| &f.path == p))
-            .or(match self.selected {
-                Some(i) if i < self.files.len() => Some(i),
-                _ => None,
-            })
-            .or(if self.files.is_empty() { None } else { Some(0) });
-        match idx {
-            Some(i) => self.select_with(i, Some(cx)),
-            None => {
-                self.selected = None;
-                self.diff_path = None;
-                self.diff_left.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-                self.diff_right.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-            }
-        }
-        cx.notify();
-    }
 
 
 
