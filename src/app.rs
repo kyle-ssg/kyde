@@ -401,7 +401,7 @@ impl Kyde {
         me
     }
 
-    fn repo(&self) -> Option<Repo> {
+    pub(crate) fn repo(&self) -> Option<Repo> {
         Repo::discover(self.repo_root.as_ref()?).ok()
     }
 
@@ -624,7 +624,7 @@ impl Kyde {
     /// pane is always read-only; `readonly` locks the right pane too (committed/push diffs)
     /// and is mirrored into `diff_readonly`. Shared by `select_with` (editable, `false`) and
     /// `push_show_diff` (committed, `true`).
-    fn load_diff_panes(
+    pub(crate) fn load_diff_panes(
         &mut self,
         path: std::path::PathBuf,
         before: String,
@@ -2310,7 +2310,7 @@ impl Kyde {
     /// The language to actually highlight with: the file's detected language if
     /// its pack is installed (or it needs no pack), else PlainText — so an
     /// un-installed type renders fast and unparsed until the user opts in.
-    fn effective_lang(&self, rel: &std::path::Path) -> Lang {
+    pub(crate) fn effective_lang(&self, rel: &std::path::Path) -> Lang {
         let lang = Lang::from_path(rel);
         match lang.pack() {
             Some(p) if !self.plugins.is_installed(p.id) => Lang::PlainText,
@@ -3188,172 +3188,17 @@ impl Kyde {
         cx.notify();
     }
 
-    // ── History (git log) view ────────────────────────────────────────────
-    /// Enter the history view for the whole repo, logging the current branch.
-    pub(crate) fn enter_history(&mut self, cx: &mut Context<Self>) {
-        self.history_path = None;
-        self.enter_history_inner(cx);
-    }
 
-    /// Enter the history view scoped to `path` (a folder/file) — commits that touched that
-    /// subtree, recursively. Opened from a Browse-tree folder's right-click → "Git History".
-    pub(crate) fn enter_history_for(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        // Root path (empty) = whole repo.
-        self.history_path = if path.as_os_str().is_empty() {
-            None
-        } else {
-            Some(path)
-        };
-        self.enter_history_inner(cx);
-    }
 
-    fn enter_history_inner(&mut self, cx: &mut Context<Self>) {
-        self.mode = Mode::History;
-        self.diff_view_open = false;
-        self.history_rev = self
-            .current_branch
-            .clone()
-            .unwrap_or_else(|| "HEAD".to_string());
-        self.reload_history(cx);
-    }
 
-    /// Reload the commit list for `history_rev` (scoped to `history_path`), select newest.
-    pub(crate) fn reload_history(&mut self, cx: &mut Context<Self>) {
-        let path = self.history_path.clone();
-        self.history_commits = self
-            .repo()
-            .and_then(|r| r.log(&self.history_rev, 300, path.as_deref()).ok())
-            .unwrap_or_default();
-        self.history_selected = None;
-        self.history_files.clear();
-        self.history_file_selected = None;
-        if self.history_commits.is_empty() {
-            cx.notify();
-        } else {
-            self.select_history_commit(0, cx);
-        }
-    }
 
-    /// Toggle the history branch dropdown, loading local + remote branches when opening it
-    /// and resetting the search box.
-    pub(crate) fn toggle_history_branches(&mut self, cx: &mut Context<Self>) {
-        if !self.history_branch_open {
-            if let Some(r) = self.repo() {
-                self.history_locals = r.branches().unwrap_or_default();
-                self.history_remotes = r.remote_branches().unwrap_or_default();
-            }
-            self.history_branch_query.update(cx, |e, cx| {
-                e.set_content(String::new(), Lang::PlainText, cx)
-            });
-        }
-        self.history_branch_open = !self.history_branch_open;
-        cx.notify();
-    }
 
-    /// Point the log at a different branch/rev (from the branch dropdown).
-    pub(crate) fn set_history_rev(&mut self, rev: String, cx: &mut Context<Self>) {
-        self.history_rev = rev;
-        self.history_branch_open = false;
-        self.reload_history(cx);
-    }
 
-    /// `(from, to)` revisions for the current compare mode against `hash`; `to == None`
-    /// means the working tree.
-    fn history_revs(&self, hash: &str) -> (String, Option<String>) {
-        match self.history_compare {
-            CompareMode::Before => (format!("{hash}^"), Some(hash.to_string())),
-            CompareMode::Local => (hash.to_string(), None),
-            CompareMode::BeforeLocal => (format!("{hash}^"), None),
-        }
-    }
 
-    fn recompute_history_files(&mut self) {
-        self.history_files.clear();
-        let (Some(idx), Some(repo)) = (self.history_selected, self.repo()) else {
-            return;
-        };
-        let Some(commit) = self.history_commits.get(idx) else {
-            return;
-        };
-        let (from, to) = self.history_revs(&commit.hash);
-        let path = self.history_path.clone();
-        self.history_files = repo.diff_files(&from, to.as_deref(), path.as_deref());
-        // Folder tree of the changed files, fully expanded so every change is visible.
-        let paths: Vec<PathBuf> = self.history_files.iter().map(|f| f.path.clone()).collect();
-        self.history_files_tree = tree::Tree::build(&paths);
-        self.history_files_expanded.clear();
-        self.history_files_expanded.insert(PathBuf::new());
-        for p in &paths {
-            for anc in p.ancestors().skip(1) {
-                self.history_files_expanded.insert(anc.to_path_buf());
-            }
-        }
-    }
 
-    /// Select a commit → recompute its changed files (per compare mode) + open the first.
-    pub(crate) fn select_history_commit(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.history_selected = Some(idx);
-        self.recompute_history_files();
-        self.history_file_selected = None;
-        if self.history_files.is_empty() {
-            self.diff_path = None;
-            cx.notify();
-        } else {
-            self.select_history_file(0, cx);
-        }
-    }
 
-    /// Right-click a commit → pick a compare mode for it: select that commit, then apply the
-    /// mode (mirrors the header dropdown, which acts on the selected commit).
-    pub(crate) fn history_compare_commit(
-        &mut self,
-        idx: usize,
-        mode: CompareMode,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = None;
-        self.history_selected = Some(idx);
-        self.set_history_compare(mode, cx);
-    }
 
-    /// Change the compare mode (vs parent / latest / local) → refresh files + diff.
-    pub(crate) fn set_history_compare(&mut self, mode: CompareMode, cx: &mut Context<Self>) {
-        self.history_compare = mode;
-        self.history_compare_open = false;
-        match self.history_selected {
-            Some(idx) => self.select_history_commit(idx, cx),
-            None => cx.notify(),
-        }
-    }
 
-    /// Load a file's diff for the selected commit + compare mode (read-only).
-    pub(crate) fn select_history_file(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.history_file_selected = Some(idx);
-        let (Some(cidx), Some(repo)) = (self.history_selected, self.repo()) else {
-            return;
-        };
-        let Some(commit) = self.history_commits.get(cidx).cloned() else {
-            return;
-        };
-        let Some(file) = self.history_files.get(idx).cloned() else {
-            return;
-        };
-        let (from, to) = self.history_revs(&commit.hash);
-        // Right side is the live working tree (`to == None`) → editable + the `»` chevrons
-        // replace the working hunk with the left (committed) version. Comparing two committed
-        // revisions has nothing to edit, so it stays read-only.
-        let editable = to.is_none();
-        let before = repo
-            .committed_content(&from, &file.path)
-            .unwrap_or_default();
-        let after = match to {
-            Some(rev) => repo.committed_content(&rev, &file.path).unwrap_or_default(),
-            None => repo.working_content(&file.path).unwrap_or_default(),
-        };
-        let lang = self.effective_lang(&file.path);
-        self.load_diff_panes(file.path.clone(), before, after, lang, !editable, cx);
-        cx.notify();
-    }
 }
 
 #[cfg(feature = "terminal")]
