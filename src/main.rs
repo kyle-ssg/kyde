@@ -9,10 +9,10 @@ mod app;
 mod clipboard;
 use kyde_diff as diff;
 mod editor;
-use kyde_git as git;
-mod highlight;
 use kyde_config::keymap;
+use kyde_git as git;
 use kyde_markdown as markdown;
+use kyde_syntax as highlight;
 mod mdview;
 use kyde_config::plugins;
 use kyde_config::projects;
@@ -23,7 +23,7 @@ mod scratch;
 mod shellcmd;
 #[cfg(feature = "terminal")]
 mod terminal;
-mod theme;
+use kyde_theme as theme;
 use kyde_tree as tree;
 use kyde_update as update;
 

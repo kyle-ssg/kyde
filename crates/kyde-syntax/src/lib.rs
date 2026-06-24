@@ -4,7 +4,7 @@
 //! This is plain Rust (no gpui) and unit-testable. It turns source text into a
 //! flat list of colored spans the UI can render.
 
-use crate::theme;
+use kyde_theme as theme;
 use std::path::Path;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 

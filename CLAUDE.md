@@ -36,25 +36,38 @@ feel. No web, no Electron, no React.
 - **similar** (Apache-2.0) — line + word diff. Swap to `imara-diff` (what Zed uses) only if
   large-file diffs lag.
 
-## Layout
+## Layout — a Cargo workspace
+The root package is the **gpui binary**; the pure, gpui-free logic lives in **library
+crates** under `crates/` (compiler-enforced boundaries, real test targets, independent
+rebuilds). Each extracted crate is **aliased back to its old module name** in `main.rs`
+(`use kyde_git as git;`, `use kyde_config::keymap;`, …) so every existing `git::` /
+`crate::theme::` call site across the binary compiles unchanged.
 ```
-src/main.rs   entry point + chrome glue: struct Kyde definition, actions!/keymap
-              wiring, native menu/dock, ModalWindow, free render helpers
-              (overlay/badge/aligned_rows/…), main(). ~1500 lines.
+# ── binary (the god trio + gpui-coupled views; still being decomposed) ──
+src/main.rs   entry + chrome glue: struct Kyde, actions!/keymap wiring, native menu/dock,
+              ModalWindow, free render helpers, the `mod`/`use` crate wiring, main().
 src/app.rs    Kyde controller logic — every non-render method (refresh/select/stage/
-              commit/navigation/finder/rollback/…). Sibling of render.rs, so methods
-              the view or root calls are `pub(crate)`.
-src/render.rs `impl Render for Kyde` + every `render_*` method (the view code, split
-              out of main.rs). Child module of the crate root, so it reaches main.rs's
-              private Kyde fields/helpers/types directly — only the 4 modal bodies that
-              ModalWindow (in main.rs) calls back into are `pub(crate)`.
-src/git.rs    Repo: discover/status/base_content/working_content/stage/unstage/
-              apply_patch/commit. Pure Rust, shells out to `git`. Stable.
-src/diff.rs   FileDiff::compute() → line Hunks + word ranges (two-phase, like Zed/IntelliJ).
-              FileDiff::hunk_patch() builds a unified-diff patch for one hunk. Stable.
-src/theme.rs  Original hand-authored dark palette (Darcula-family style). Stable.
-src/terminal.rs  Embedded PTY terminal (TerminalView entity + TerminalElement), gated
-              behind the `terminal` Cargo feature. See "Terminal panel" below.
+              commit/navigation/finder/rollback/divider-drag/…). `pub(crate)` where the
+              view or root calls in.
+src/render.rs `impl Render for Kyde` + every `render_*` method (view code). Child module
+              of the crate root → reaches main.rs's private Kyde fields/helpers directly.
+src/editor.rs / src/mdview.rs / src/terminal.rs / src/remote_img.rs / src/scratch.rs /
+src/shellcmd.rs / src/clipboard.rs   gpui-coupled widgets + small OS utils (not yet crated).
+
+# ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
+kyde-git      Repo: discover/status/base_content/working_content/stage/unstage/apply_patch/
+              commit + Commit/ChangedFile/FileStatus. Shells out to `git`. (anyhow)
+kyde-diff     FileDiff::compute() → line Hunks + word ranges; hunk_patch(). (similar)
+kyde-tree     Tree::build/visible — the file-tree model. (std)
+kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
+kyde-update   GitHub release check + self-update download/swap. (anyhow, serde_json)
+kyde-config   keymap + plugins + projects: config/persistence (JSON, XDG). (serde)
+kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (gpui Rgba, serde)
+kyde-syntax   tree-sitter highlight() + fold_regions(); OWNS every grammar crate behind
+              per-pack features. Binary depends with default-features=false and forwards
+              its own packs (`rust` → `kyde-syntax/rust`); kyde-syntax's own default is
+              `full` so `cargo test -p kyde-syntax` covers all grammars. (gpui Rgba,
+              tree-sitter*, kyde-theme)
 ```
 
 ## Theme — runtime config (`src/theme.rs` + `~/.config/kyde/theme.json`)
@@ -143,8 +156,9 @@ Rust 1.96 + Metal Toolchain are installed. gpui needs Apple's Metal Toolchain to
 its shaders — if a fresh machine errors with "missing Metal Toolchain", run
 `xcodebuild -downloadComponent MetalToolchain` (needs full Xcode, ~700MB).
 ```sh
-cargo build           # compiles clean
-cargo test            # highlight/diff/git logic tests
+cargo build              # the binary (default = full grammars + terminal)
+cargo test --workspace   # binary tests + every crate's tests (the regression gate)
+cargo test -p kyde-syntax  # one crate in isolation (its default = full grammars)
 cargo run -- /path/to/any/git/repo
 ```
 **Fast iteration when rebuilding just to click/screenshot-test:** build DEBUG with slim
@@ -157,7 +171,9 @@ cargo build --no-default-features --features terminal,rust,json && ./target/debu
 `[profile.dev]` is `opt-level = 1`, no LTO — gpui is fast enough in debug for UI testing. Add a
 grammar to `--features` only when testing that language. Use `cargo check` for compile-verify
 between edits. Run `cargo fmt` + `clippy` + `test` ONCE at the end (CI = fmt + clippy + test),
-not per iteration; a default/release build is only for perf claims or shipping.
+not per iteration; a default/release build is only for perf claims or shipping. NOTE: under
+slim features the `kyde-syntax` highlight tests for un-built grammars (typescript, …) fail —
+expected; use `--workspace` or `-p kyde-syntax` (full grammars) for a true green.
 
 Smoke-tested: launches, renders, no panic. NOTE: `screencapture` of the window fails
 silently unless the terminal has macOS Screen-Recording permission (System Settings →
@@ -370,10 +386,15 @@ Opening a project lands in **Browse (code) view**, not git — `open_project`/`n
   = modal, closed via its Close button).
 
 ## Module status
-- Plain Rust, tested: `git.rs`, `diff.rs`, `highlight.rs`, `theme.rs`, `keymap.rs`, `plugins.rs`, `tree.rs`, `scratch.rs`, `shellcmd.rs`.
-- gpui UI: `main.rs` (entry/wiring/overlays/helpers), `app.rs` (Kyde controller
-  methods), `render.rs` (`impl Render` + `render_*`), `editor.rs` (text widget).
-  Compile on gpui 0.2.2.
+- Plain Rust, tested, now **own workspace crates** (`crates/<name>`): `kyde-git`,
+  `kyde-diff`, `kyde-tree`, `kyde-markdown`, `kyde-update`, `kyde-config` (keymap/plugins/
+  projects), `kyde-theme`, `kyde-syntax` (highlight + grammars).
+- Plain Rust, still in the binary (small OS utils, not yet crated): `scratch.rs`,
+  `shellcmd.rs`, `clipboard.rs`.
+- gpui UI in the binary: `main.rs` (entry/wiring/overlays/helpers), `app.rs` (Kyde controller
+  methods), `render.rs` (`impl Render` + `render_*`), `editor.rs` (text widget),
+  `mdview.rs`, `terminal.rs`, `remote_img.rs`. Compile on gpui 0.2.2. The god trio
+  (main/app/render) is the next decomposition target (feature-owned state/entities).
 
 ## Performance regression tests (the speed pitch is the whole point)
 "Lightning fast" is a hard requirement, so the hot paths have **perf-guard unit

@@ -1,0 +1,11 @@
+[package]
+name = "kyde-theme"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Kyde's runtime theme (hand-editable JSON, auto-repairing). Uses only gpui's Rgba color type."
+
+[dependencies]
+gpui = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
