@@ -7,6 +7,8 @@
 
 mod app;
 mod clipboard;
+mod divider;
+pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
 use kyde_diff as diff;
 mod editor;
 use kyde_config::keymap;
@@ -231,52 +233,6 @@ fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
 /// Activity-rail width = button (38) + a frame-gap margin each side, so the icon sits with
 /// equal gap to the window edge (left) and the island (right). The islands begin at this x.
 const RAIL_W: f32 = 38.0 + theme::FRAME_GAP * 2.0;
-
-/// Width of the diff center gutter (the `»`/checkbox column). It's `flex_none`, so the two
-/// diff panes share only `island_w - DIFF_GUTTER_W`.
-pub(crate) const DIFF_GUTTER_W: f32 = 44.0;
-
-/// Width a full-width island spans (the diff view + history). Islands begin at the rail's
-/// right edge (`RAIL_W` already includes the frame-gap margin) and end a frame gap from the
-/// window's right. Used by both the layout and the divider math so they agree exactly.
-pub(crate) fn full_island_w(vw: f32) -> f32 {
-    (vw - RAIL_W - theme::FRAME_GAP).max(1.0)
-}
-
-/// Every draggable resize divider in the app. They ALL share one drag mechanism
-/// (`Kyde::start_divider_drag` + `drag_divider`): the pane each controls is laid out at an
-/// explicit pixel size, and the grab offset captured on mouse-down cancels the (context-
-/// dependent) geometry, so the bar stays exactly under the cursor — the behaviour the
-/// markdown split already had, now applied uniformly.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Divider {
-    /// Browse / Commit file-tree pane width (horizontal).
-    Tree,
-    /// Markdown split: code-editor pane width (horizontal).
-    MdSplit,
-    /// Side-by-side diff: left pane width (horizontal).
-    DiffPane,
-    /// History view: commit-list pane width (horizontal).
-    HistCommit,
-    /// History view: bottom log-panel height (vertical, grows upward).
-    HistPanel,
-    /// Bottom terminal panel height (vertical, grows upward). Only ever dragged when the
-    /// `terminal` feature is built in (the panel doesn't exist otherwise).
-    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
-    Term,
-}
-
-impl Divider {
-    /// Vertical dividers drag along Y; the rest along X.
-    fn vertical(self) -> bool {
-        matches!(self, Self::HistPanel | Self::Term)
-    }
-    /// "Trailing" panes are anchored to the far (bottom) edge and grow as the cursor moves
-    /// toward the near edge; "leading" panes grow with the cursor.
-    fn trailing(self) -> bool {
-        matches!(self, Self::HistPanel | Self::Term)
-    }
-}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
