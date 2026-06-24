@@ -42,17 +42,44 @@ crates** under `crates/` (compiler-enforced boundaries, real test targets, indep
 rebuilds). Each extracted crate is **aliased back to its old module name** in `main.rs`
 (`use kyde_git as git;`, `use kyde_config::keymap;`, …) so every existing `git::` /
 `crate::theme::` call site across the binary compiles unchanged.
+The binary is split into **per-feature modules**, each a crate-root child module with an
+`impl Kyde` block (so it reaches `Kyde`'s private fields directly, like `render.rs` always
+did). A method called from another module is `pub(crate)`; feature-internal ones stay private.
+`main.rs` re-exports shared items (`Divider`, the UI toolkit, a few consts) at the crate root
+so every module gets them via `use super::*`.
 ```
-# ── binary (the god trio + gpui-coupled views; still being decomposed) ──
-src/main.rs   entry + chrome glue: struct Kyde, actions!/keymap wiring, native menu/dock,
-              ModalWindow, free render helpers, the `mod`/`use` crate wiring, main().
-src/app.rs    Kyde controller logic — every non-render method (refresh/select/stage/
-              commit/navigation/finder/rollback/divider-drag/…). `pub(crate)` where the
-              view or root calls in.
-src/render.rs `impl Render for Kyde` + every `render_*` method (view code). Child module
-              of the crate root → reaches main.rs's private Kyde fields/helpers directly.
+# ── binary: core shell ──
+src/main.rs   struct Kyde + its ~80 fields, actions!/keymap wiring, native menu/dock,
+              ModalWindow, free render helpers, the `mod`/`use`/re-export wiring, main().
+src/app.rs    controller core: new/repo/refresh/reload, menus, save/autosave, effective_lang,
+              escape/fps, mode switch. (Was ~3.4k lines; feature logic now lives per-module.)
+src/render.rs `impl Render for Kyde` (the dispatch) + shared shell helpers (with_scrollbars,
+              editor_island_w, render_context_menu). (Was ~6.4k lines.)
+src/ui.rs     shared UI toolkit — btn_primary/btn_secondary, tab_pill, menu_icon, lerp_rgb,
+              scrollbar_thumb, pack metadata. Re-exported at the crate root.
+src/divider.rs unified divider dragging (Divider enum + geometry + drag methods).
+
+# ── binary: feature modules (each = render_* + logic for one feature) ──
+src/browse.rs       file tree + editor pane + markdown/font preview + open-file/preview-tab
+src/tabs.rs         editor tab strip + close logic
+src/commit.rs       git staging view (changed-files tree, per-hunk stage, message box)
+src/diff_view.rs    side-by-side diff, gutter staging, hunk nav, Show-Diff view + modal body
+src/push.rs         push tab + push confirmation modal
+src/branch.rs       branch switcher + status bar + fetch/pull/push
+src/history.rs      git-log view (commit list + files + read-only diff)
+src/finder.rs       fuzzy finder + Find-in-Files + command palette
+src/find.rs         in-editor find/replace bar
+src/rollback.rs     rollback (discard) modal
+src/file_ops.rs     new file / rename / delete / scratch / reveal
+src/modals.rs       native modal windows + bodies (plugins, fonts, clear-data, new-branch)
+src/onboarding.rs   first-run keymap picker + shell-command install
+src/projects_view.rs projects landing + project open/switch/session plumbing
+src/notifications.rs crash / op-error / update banners
+src/terminal_panel.rs bottom terminal panel glue (terminal feature)
+
+# ── binary: gpui-coupled widgets + small OS utils (not yet crated) ──
 src/editor.rs / src/mdview.rs / src/terminal.rs / src/remote_img.rs / src/scratch.rs /
-src/shellcmd.rs / src/clipboard.rs   gpui-coupled widgets + small OS utils (not yet crated).
+src/shellcmd.rs / src/clipboard.rs
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/base_content/working_content/stage/unstage/apply_patch/
