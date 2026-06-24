@@ -9,6 +9,8 @@ mod app;
 mod clipboard;
 mod divider;
 pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
+mod ui;
+pub(crate) use ui::*;
 use kyde_diff as diff;
 mod editor;
 use kyde_config::keymap;
