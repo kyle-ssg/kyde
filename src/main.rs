@@ -13,10 +13,13 @@ mod ui;
 pub(crate) use ui::*;
 mod branch;
 mod commit;
+mod diff_view;
+mod file_ops;
 mod find;
 mod finder;
 mod history;
 mod push;
+mod rollback;
 pub(crate) use app::{
     CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
     STATUS_REFRESH_DEBOUNCE,

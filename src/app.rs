@@ -590,206 +590,15 @@ impl Kyde {
     }
 
 
-    /// Push the diff `d`'s per-line / word backgrounds + filler onto both panes. Pure
-    /// decoration: it never touches content, language, read-only, line numbers, or scroll
-    /// — those are owned by `load_diff_panes` on the initial load and intentionally left
-    /// alone on a re-diff. Shared by `load_diff_panes`, `recompute_diff`, and the `»` revert.
-    fn apply_diff_decorations(&mut self, d: &FileDiff, cx: &mut Context<Self>) {
-        let (old_bg, new_bg) = diff_line_bgs(d);
-        let (old_words, new_words) = diff_word_bgs(d);
-        let (lf, lf_end, rf, rf_end) = diff_fillers(d);
-        let t = theme::get();
-        self.diff_left.update(cx, |e, _| {
-            e.line_bg = old_bg;
-            e.word_bg = old_words;
-            e.word_bg_color = t.diff_word_old_bg;
-            e.filler = lf;
-            e.filler_end = lf_end;
-        });
-        self.diff_right.update(cx, |e, _| {
-            e.line_bg = new_bg;
-            e.word_bg = new_words;
-            e.word_bg_color = t.diff_word_new_bg;
-            e.filler = rf;
-            e.filler_end = rf_end;
-        });
-    }
-
-    /// Compute the `before`→`after` diff, store it (`current_diff`/`diff_base`/`diff_path`),
-    /// highlight both sides, and load both panes — content + decorations + shared scroll —
-    /// opening scrolled to the first hunk (a few lines of context above). The left (base)
-    /// pane is always read-only; `readonly` locks the right pane too (committed/push diffs)
-    /// and is mirrored into `diff_readonly`. Shared by `select_with` (editable, `false`) and
-    /// `push_show_diff` (committed, `true`).
-    pub(crate) fn load_diff_panes(
-        &mut self,
-        path: std::path::PathBuf,
-        before: String,
-        after: String,
-        lang: Lang,
-        readonly: bool,
-        cx: &mut Context<Self>,
-    ) {
-        self.old_spans = highlight::highlight(&before, lang);
-        self.new_spans = highlight::highlight(&after, lang);
-        let d = FileDiff::compute(&before, &after);
-        // Row of the first change (for the open-at-first-hunk scroll below). The leading
-        // region before the first hunk is all-equal, so its display-row count ==
-        // the hunk's old_range.start.
-        let first_hunk_row = d.hunks.first().map(|h| h.old_range.start);
-        self.diff_path = Some(path);
-        self.diff_readonly = readonly;
-        self.diff_base = before.clone();
-        self.apply_diff_decorations(&d, cx);
-        self.current_diff = Some(d);
-        // Content goes in its own update closure — `set_content` leaves the decoration
-        // fields set just above intact. Left is always locked (base); right tracks `readonly`.
-        self.diff_left.update(cx, |e, cx| {
-            e.read_only = true;
-            e.line_numbers = true;
-            e.set_content(before, lang, cx);
-        });
-        self.diff_right.update(cx, |e, cx| {
-            e.read_only = readonly;
-            e.line_numbers = true;
-            e.set_content(after, lang, cx);
-        });
-        // Both panes scroll via the shared `diff_scroll`, so caret-follow / drag auto-scroll
-        // and the first-hunk offset below move both panes + the gutter together.
-        let dh = self.diff_scroll.clone();
-        self.diff_left
-            .update(cx, |e, _| e.set_scroll_handle(dh.clone()));
-        self.diff_right.update(cx, |e, _| e.set_scroll_handle(dh));
-        if let Some(start) = first_hunk_row {
-            let row = start.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
-            self.diff_scroll
-                .set_offset(gpui::point(px(0.0), px(-row * editor::line_height_px())));
-        }
-    }
 
 
-    /// Live-save the editable (right) diff pane to disk, then re-diff + recolor.
-    fn diff_autosave(&mut self, cx: &mut Context<Self>) {
-        let (Some(rel), text) = (
-            self.diff_path.clone(),
-            self.diff_right.read(cx).text().to_string(),
-        ) else {
-            return;
-        };
-        if let Some(repo) = self.repo() {
-            let _ = repo.save_file(&rel, &text);
-            self.files = repo.status().unwrap_or_default();
-        }
-        self.recompute_diff(&text, cx);
-    }
 
-    /// Re-diff the working text against the cached base and push backgrounds/filler/spans
-    /// onto both panes. Shared by live autosave and the `»` revert.
-    fn recompute_diff(&mut self, text: &str, cx: &mut Context<Self>) {
-        let d = FileDiff::compute(&self.diff_base, text);
-        let lang = self
-            .diff_path
-            .clone()
-            .map(|p| self.effective_lang(&p))
-            .unwrap_or(Lang::PlainText);
-        self.old_spans = highlight::highlight(&self.diff_base, lang);
-        self.new_spans = highlight::highlight(text, lang);
-        self.apply_diff_decorations(&d, cx);
-        self.current_diff = Some(d);
-        self.rebuild_commit_view(false);
-        cx.notify();
-    }
 
-    /// `»` in the diff gutter: discard one hunk's working change by replacing its new
-    /// lines with the base lines, then save + re-diff. (Clean text op, no `git apply`.)
-    pub(crate) fn diff_revert_hunk(&mut self, hi: usize, cx: &mut Context<Self>) {
-        let Some(d) = self.current_diff.clone() else {
-            return;
-        };
-        let Some(h) = d.hunks.get(hi) else {
-            return;
-        };
-        let mut lines = d.new.clone();
-        let replacement = d.old[h.old_range.clone()].to_vec();
-        lines.splice(h.new_range.clone(), replacement);
-        let content = lines.join("\n");
-        let lang = self
-            .diff_path
-            .clone()
-            .map(|p| self.effective_lang(&p))
-            .unwrap_or(Lang::PlainText);
-        self.diff_right
-            .update(cx, |e, cx| e.set_content(content.clone(), lang, cx));
-        if let (Some(rel), Some(repo)) = (self.diff_path.clone(), self.repo()) {
-            let _ = repo.save_file(&rel, &content);
-            self.files = repo.status().unwrap_or_default();
-        }
-        self.recompute_diff(&content, cx);
-        self.exit_commit_if_clean();
-    }
 
-    /// Alt+↓ — jump to the next changed region in the diff.
-    pub(crate) fn act_diff_next(
-        &mut self,
-        _: &crate::DiffNextChange,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.diff_nav_hunk(true, cx);
-    }
 
-    /// Alt+↑ — jump to the previous changed region in the diff.
-    pub(crate) fn act_diff_prev(
-        &mut self,
-        _: &crate::DiffPrevChange,
-        _w: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.diff_nav_hunk(false, cx);
-    }
 
-    /// Display-row index where each hunk begins (in the aligned two-pane layout). Drives the
-    /// diff's change count + the prev/next navigation.
-    fn diff_hunk_rows(&self) -> Vec<usize> {
-        let Some(d) = self.current_diff.as_ref() else {
-            return Vec::new();
-        };
-        crate::aligned_rows(d)
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.hunk_start)
-            .map(|(i, _)| i)
-            .collect()
-    }
 
-    /// Jump the diff to the next (`next`) or previous changed region, wrapping around. The
-    /// anchor is the hunk currently scrolled to the top (`load_diff_panes` parks each hunk
-    /// `SCROLL_CONTEXT_ROWS` below the viewport top, so we add that back).
-    pub(crate) fn diff_nav_hunk(&mut self, next: bool, cx: &mut Context<Self>) {
-        let rows = self.diff_hunk_rows();
-        if rows.is_empty() {
-            return;
-        }
-        let lh = editor::line_height_px();
-        let top = (-f32::from(self.diff_scroll.offset().y) / lh).round() as i64;
-        let anchor = top + SCROLL_CONTEXT_ROWS as i64;
-        let target = if next {
-            rows.iter()
-                .copied()
-                .find(|&r| (r as i64) > anchor)
-                .unwrap_or(rows[0]) // past the last → wrap to the first
-        } else {
-            rows.iter()
-                .copied()
-                .rev()
-                .find(|&r| (r as i64) < anchor)
-                .unwrap_or_else(|| *rows.last().unwrap()) // before the first → wrap to the last
-        };
-        let row = target.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
-        self.diff_scroll
-            .set_offset(gpui::point(gpui::px(0.0), gpui::px(-row * lh)));
-        cx.notify();
-    }
+
 
     /// Re-read git + the open file from disk. Triggered when the window regains focus,
     /// since an external tool (another editor, a branch switch, a rebase, etc.) may have
@@ -840,26 +649,9 @@ impl Kyde {
 
 
 
-    /// Empty the diff panes (both sides + cached diff/path) — used when a tab has no file to
-    /// show, so a stale file doesn't linger from the other tab.
-    pub(crate) fn clear_diff_panes(&mut self, cx: &mut Context<Self>) {
-        self.diff_path = None;
-        self.current_diff = None;
-        self.diff_left.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
-        });
-        self.diff_right.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
-        });
-    }
 
 
 
-    /// Leave the full-screen Show-Diff view, back to whatever mode the main window was in.
-    pub(crate) fn close_diff_view(&mut self, cx: &mut Context<Self>) {
-        self.diff_view_open = false;
-        cx.notify();
-    }
 
 
     /// Act on the update banner. Running from a `.app` bundle with a zip asset → download,
@@ -966,80 +758,9 @@ impl Kyde {
 
 
 
-    /// Same as `folder_all_checked`/`toggle_commit_check`, but for the rollback selection.
-    pub(crate) fn rollback_folder_all_checked(&self, path: &std::path::Path) -> bool {
-        let desc = self.changed_under(path);
-        !desc.is_empty()
-            && desc.iter().all(|&i| {
-                self.files
-                    .get(i)
-                    .is_some_and(|f| self.rollback_checked.contains(&f.path))
-            })
-    }
-    pub(crate) fn toggle_rollback_check(
-        &mut self,
-        path: PathBuf,
-        is_dir: bool,
-        cx: &mut Context<Self>,
-    ) {
-        if is_dir {
-            let want = !self.rollback_folder_all_checked(&path);
-            let descendants: Vec<PathBuf> = self
-                .changed_under(&path)
-                .iter()
-                .filter_map(|&i| self.files.get(i))
-                .map(|f| f.path.clone())
-                .collect();
-            for p in descendants {
-                if want {
-                    self.rollback_checked.insert(p);
-                } else {
-                    self.rollback_checked.remove(&p);
-                }
-            }
-        } else if !self.rollback_checked.remove(&path) {
-            self.rollback_checked.insert(path);
-        }
-        cx.notify();
-    }
 
-    /// Commit → "Show Diff": open the floating diff viewer for that changed file.
-    pub(crate) fn menu_show_diff(&mut self, idx: usize, cx: &mut Context<Self>) {
-        // `select_with(.., Some(cx))` — not `select` — so the diff editors + `diff_path`
-        // actually populate (plain `select` only updates `current_diff`).
-        self.select_with(idx, Some(cx));
-        self.context_menu = None;
-        // Show the diff full-screen in the MAIN window (reuses every editor feature). Close the
-        // Rollback window we were launched from so the main window comes forward.
-        self.diff_view_open = true;
-        self.close_modal_window(ModalKind::Rollback, cx);
-        cx.notify();
-    }
 
-    /// Browse → "Rollback": open the rollback modal with every change under `path`
-    /// (a file, or all changes within a folder) pre-checked.
-    pub(crate) fn open_rollback_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let checked: std::collections::HashSet<PathBuf> = self
-            .changed_under(&path)
-            .iter()
-            .filter_map(|&i| self.files.get(i))
-            .map(|f| f.path.clone())
-            .collect();
-        self.context_menu = None;
-        if checked.is_empty() {
-            cx.notify();
-            return;
-        }
-        self.rollback_checked = checked;
-        self.rollback_delete_added = false;
-        self.open_modal_window(ModalKind::Rollback, "Rollback Changes", 560.0, 640.0, cx);
-        cx.notify();
-    }
 
-    /// Close the rollback window.
-    pub(crate) fn close_rollback_window(&mut self, cx: &mut Context<Self>) {
-        self.close_modal_window(ModalKind::Rollback, cx);
-    }
 
     /// The window handle slot for a modal kind.
     fn modal_slot(&mut self, kind: ModalKind) -> &mut Option<gpui::WindowHandle<ModalWindow>> {
@@ -1149,208 +870,13 @@ impl Kyde {
             });
         }
     }
-    /// Discard the checked files (modified/deleted → restore from HEAD; added/untracked →
-    /// unstage and, if "delete local copies" is set, remove the file).
-    pub(crate) fn do_rollback(&mut self, cx: &mut Context<Self>) {
-        let delete_added = self.rollback_delete_added;
-        let targets: Vec<ChangedFile> = self
-            .files
-            .iter()
-            .filter(|f| self.rollback_checked.contains(&f.path))
-            .cloned()
-            .collect();
-        let mut failures: Vec<String> = Vec::new();
-        if let Some(repo) = self.repo() {
-            for f in targets {
-                let r = match f.status {
-                    FileStatus::Untracked => {
-                        if delete_added {
-                            repo.delete_file(&f.path)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    FileStatus::Added => {
-                        let _ = repo.unstage(&f.path);
-                        if delete_added {
-                            repo.delete_file(&f.path)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    _ => repo.discard(&f.path),
-                };
-                if let Err(e) = r {
-                    eprintln!("rollback {:?} failed: {e:#}", f.path);
-                    failures.push(f.path.display().to_string());
-                }
-            }
-        }
-        self.close_rollback_window(cx);
-        self.refresh();
-        // Set after refresh — a successful status read clears `op_error`, so this would
-        // otherwise be wiped out the moment it's set.
-        if !failures.is_empty() {
-            self.op_error = Some(format!(
-                "Rollback failed for {} file(s): {}",
-                failures.len(),
-                failures.join(", ")
-            ));
-        }
-        self.exit_commit_if_clean();
-        cx.notify();
-    }
 
 
-    /// Open the delete-confirmation modal for a tree path (is_dir derived from disk).
-    /// Open the "new file" prompt, creating in `dir` (rel path; `""` = repo root).
-    pub(crate) fn start_new_file(
-        &mut self,
-        dir: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = None;
-        self.name_prompt = Some(NamePrompt::NewFile(dir));
-        self.name_input.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
-        });
-        let handle = self.name_input.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        window.defer(cx, move |window, _cx| window.focus(&handle));
-        cx.notify();
-    }
 
-    /// Open the "rename" prompt for `path` (rel), pre-filled with its current name.
-    pub(crate) fn start_rename(
-        &mut self,
-        path: PathBuf,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = None;
-        let cur = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        self.name_prompt = Some(NamePrompt::Rename(path));
-        self.name_input
-            .update(cx, |e, cx| e.set_content(cur, Lang::PlainText, cx));
-        let handle = self.name_input.read(cx).focus_handle.clone();
-        window.focus(&handle);
-        window.defer(cx, move |window, _cx| window.focus(&handle));
-        cx.notify();
-    }
 
-    pub(crate) fn cancel_name_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.name_prompt = None;
-        window.focus(&self.focus_handle);
-        cx.notify();
-    }
 
-    /// Apply the name prompt: create the new file (and open it) or rename, then
-    /// refresh. A blank name just cancels.
-    pub(crate) fn confirm_name_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(prompt) = self.name_prompt.take() else {
-            return;
-        };
-        let name = self.name_input.read(cx).text().trim().to_string();
-        window.focus(&self.focus_handle);
-        if name.is_empty() {
-            cx.notify();
-            return;
-        }
-        match prompt {
-            NamePrompt::NewFile(dir) => {
-                let rel = if dir.as_os_str().is_empty() {
-                    PathBuf::from(&name)
-                } else {
-                    dir.join(&name)
-                };
-                if let Some(repo) = self.repo() {
-                    if repo.save_file(&rel, "").is_ok() {
-                        self.refresh();
-                        self.open_file(rel, cx);
-                    }
-                }
-            }
-            NamePrompt::Rename(path) => {
-                let dst = path
-                    .parent()
-                    .map(|d| d.join(&name))
-                    .unwrap_or_else(|| PathBuf::from(&name));
-                let ok = self
-                    .repo()
-                    .map(|r| r.rename(&path, &dst).is_ok())
-                    .unwrap_or(false);
-                if ok {
-                    // Repoint any open tab / selection from the old path to the new one.
-                    for t in self.open_tabs.iter_mut() {
-                        if *t == path {
-                            *t = dst.clone();
-                        }
-                    }
-                    let was_open = self.open_path.as_ref() == Some(&path);
-                    if self.selected_path.as_ref() == Some(&path) {
-                        self.selected_path = Some(dst.clone());
-                    }
-                    self.refresh();
-                    if was_open {
-                        self.open_file(dst, cx);
-                    }
-                }
-            }
-        }
-        cx.notify();
-    }
 
-    pub(crate) fn open_delete(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        let abs = if path.is_absolute() {
-            path.clone()
-        } else {
-            self.repo_root
-                .as_ref()
-                .map(|r| r.join(&path))
-                .unwrap_or_else(|| path.clone())
-        };
-        let is_dir = abs.is_dir();
-        self.context_menu = None;
-        self.delete_target = Some((path, is_dir));
-        cx.notify();
-    }
 
-    /// Delete the pending file/folder from disk, then refresh the trees.
-    pub(crate) fn do_delete(&mut self, cx: &mut Context<Self>) {
-        let Some((path, is_dir)) = self.delete_target.take() else {
-            return;
-        };
-        let abs = if path.is_absolute() {
-            path.clone()
-        } else {
-            self.repo_root
-                .as_ref()
-                .map(|r| r.join(&path))
-                .unwrap_or_else(|| path.clone())
-        };
-        let r = if is_dir {
-            std::fs::remove_dir_all(&abs)
-        } else {
-            std::fs::remove_file(&abs)
-        };
-        if let Err(e) = r {
-            eprintln!("delete {abs:?} failed: {e:#}");
-        }
-        // Drop any open tab / selection pointing at the deleted path.
-        self.open_tabs.retain(|t| t != &path);
-        if self.open_path.as_ref() == Some(&path) {
-            self.open_path = self.open_tabs.last().cloned();
-        }
-        if self.selected_path.as_ref() == Some(&path) {
-            self.selected_path = None;
-        }
-        self.refresh();
-        cx.notify();
-    }
 
 
     /// Expand/collapse a directory in the Browse tree.
@@ -1591,40 +1117,7 @@ impl Kyde {
         self.close_menu(cx);
     }
 
-    /// Reveal a repo-relative path in the OS file manager (macOS Finder via `open -R`).
-    pub(crate) fn reveal_in_os(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(root) = &self.repo_root {
-            let full = root.join(rel);
-            std::process::Command::new("open")
-                .arg("-R")
-                .arg(&full)
-                .spawn()
-                .ok();
-        }
-        self.close_menu(cx);
-    }
 
-    /// Open the system terminal in the folder containing a repo-relative path
-    /// (macOS: `open -a Terminal <dir>`). Files open their parent dir; dirs open
-    /// themselves.
-    pub(crate) fn reveal_in_terminal(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
-        if let Some(root) = &self.repo_root {
-            let full = root.join(rel);
-            let dir = if full.is_dir() {
-                full.clone()
-            } else {
-                full.parent()
-                    .map_or_else(|| root.clone(), |p| p.to_path_buf())
-            };
-            std::process::Command::new("open")
-                .arg("-a")
-                .arg("Terminal")
-                .arg(&dir)
-                .spawn()
-                .ok();
-        }
-        self.close_menu(cx);
-    }
 
     /// Open a pre-filled GitHub issue for the previous crash, then dismiss the banner.
     fn report_crash(&mut self, cx: &mut Context<Self>) {
@@ -1926,49 +1419,10 @@ impl Kyde {
         window.focus(&self.focus_handle);
         cx.notify();
     }
-    /// Backspace: delete the selected Browse-tree file/folder — identical to the
-    /// right-click "Delete…" menu item (both route through `open_delete`, which pops the
-    /// confirm modal). Browse mode only; no-op when nothing is selected.
-    pub(crate) fn act_delete_file(
-        &mut self,
-        _: &DeleteFile,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.mode != Mode::Browse {
-            return;
-        }
-        if let Some(path) = self.selected_path.clone() {
-            self.open_delete(path, cx);
-        }
-    }
 
 
 
-    pub(crate) fn act_new_scratch(
-        &mut self,
-        _: &NewScratch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_finder(FinderMode::Scratch, window, cx);
-    }
 
-    /// Create a scratch file of the given extension and open it.
-    pub(crate) fn create_scratch(&mut self, ext: &str, cx: &mut Context<Self>) {
-        let Some(root) = self.repo_root.clone() else {
-            return;
-        };
-        match scratch::create(&root, ext) {
-            Ok(path) => {
-                self.refresh();
-                self.mode = Mode::Browse;
-                self.open_file(path, cx);
-            }
-            Err(e) => eprintln!("scratch create failed: {e:#}"),
-        }
-        cx.notify();
-    }
 
 
     /// Toggle a language pack's installed state from the plugin manager, persist it, and
