@@ -953,34 +953,6 @@ impl Focusable for Kyde {
     }
 }
 
-/// A full-window dimmed overlay that centers its child. When `dismissable`, clicking the
-/// backdrop closes the open overlays; otherwise the backdrop swallows the click (modal).
-fn overlay(cx: &mut Context<Kyde>, dismissable: bool) -> gpui::Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        // A dim scrim, not a blackout — the app stays visible behind the modal.
-        .bg(gpui::rgba(0x00000099))
-        .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _e, window, cx| {
-                if dismissable {
-                    this.finder_open = false;
-                    this.onboarding_open = false;
-                    this.delete_target = None;
-                    window.focus(&this.focus_handle);
-                    cx.notify();
-                }
-            }),
-        )
-}
 
 /// A flattened row of the branch tree.
 struct BranchRow {
@@ -1082,50 +1054,7 @@ fn emit_branch_level(
     }
 }
 
-/// How a file's icon renders in the Browse tree.
-enum Badge {
-    /// A short colored monogram, e.g. "rs", "{}".
-    Tag(&'static str, gpui::Rgba),
-    /// An SVG icon (path served by `Assets`), tinted with the given color.
-    Icon(&'static str, gpui::Rgba),
-    /// A filled rounded "brand" box with bold letters (TS/JS-style), `(text, fg, bg)`.
-    Mono(&'static str, gpui::Rgba, gpui::Rgba),
-}
 
-/// The inner element for a badge, at a consistent visual size. Callers wrap it in their
-/// own fixed-width box / alignment. `bump` adds 2px (file explorer + bottom bar use it;
-/// the tabs / commit list stay at the base size).
-fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
-    let d = grow;
-    match b {
-        Badge::Tag(label, color) => div()
-            .text_size(px(10.0 + d))
-            .text_color(color)
-            .child(label)
-            .into_any_element(),
-        Badge::Icon(path, color) => svg()
-            .path(path)
-            .size(px(14.0 + d))
-            .text_color(color)
-            .into_any_element(),
-        Badge::Mono(text, fg, bg) => div()
-            .w(px(16.0 + d))
-            .h(px(14.0 + d))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .bg(bg)
-            .child(
-                div()
-                    .text_size(px(8.0 + d))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(fg)
-                    .child(text),
-            )
-            .into_any_element(),
-    }
-}
 
 /// File-type badge for the Browse tree (approximates IntelliJ's icons). Known types get a
 /// colored monogram; everything else gets the generic lines/document icon.
@@ -1174,41 +1103,6 @@ fn font_family_name(bytes: &[u8]) -> Option<String> {
     fallback
 }
 
-fn file_badge(path: &std::path::Path) -> Badge {
-    let rgb = |v: u32| gpui::rgb(v);
-    // Ignore files (.gitignore, .dockerignore, .prettierignore, …) → a "ban" circle-slash.
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.ends_with("ignore") {
-            return Badge::Icon("icons/ban.svg", rgb(0x9AA0A6));
-        }
-    }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "rs" => Badge::Tag("rs", rgb(0xDEA584)),
-        // Brand-style filled boxes, like the real-world TS/JS icons.
-        "ts" | "tsx" => Badge::Mono("TS", rgb(0xFFFFFF), rgb(0x3178C6)),
-        "js" | "jsx" | "mjs" | "cjs" => Badge::Mono("JS", rgb(0x1A1A1A), rgb(0xF7DF1E)),
-        // JSON: plain braces, no filled box.
-        "json" => Badge::Tag("{}", rgb(0xCBCB41)),
-        "md" | "markdown" => Badge::Tag("md", rgb(0x7E9BF0)),
-        "css" => Badge::Tag("css", rgb(0x3178C6)),
-        "scss" | "sass" => Badge::Tag("css", rgb(0xCF649A)),
-        "html" | "htm" => Badge::Tag("<>", rgb(0xE44D26)),
-        "sh" | "bash" | "zsh" => Badge::Tag("sh", rgb(0x89E051)),
-        "yml" | "yaml" => Badge::Tag("yml", rgb(0xD46A6A)),
-        "toml" => Badge::Tag("tml", rgb(0x9C4221)),
-        "py" | "pyi" => Badge::Tag("py", rgb(0x3572A5)),
-        "go" => Badge::Tag("go", rgb(0x00ADD8)),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" | "tiff" | "tif"
-        | "svg" => Badge::Icon("icons/image.svg", rgb(0xB180D7)),
-        // Generic file (incl. no extension): IntelliJ-style plain-text lines icon.
-        _ => Badge::Icon("icons/file-lines.svg", rgb(0x9AA0A6)),
-    }
-}
 
 /// Sentinel path for the virtual "Scratches" tree folder. The leading control char keeps
 /// it from ever matching a real file path (used only for tree grouping + expand state).
@@ -1263,29 +1157,6 @@ fn save_show_fps(v: bool) {
     save_ui_bool("show_fps", v);
 }
 
-/// The app's standard checkbox: a small rounded square, filled with `check.svg` when ticked.
-/// Used by the tree rows and the rollback modal — never an emoji glyph.
-fn checkbox_box(checked: bool) -> gpui::Div {
-    let t = theme::get();
-    let b = div()
-        .flex_none()
-        .size(px(15.0))
-        .rounded_sm()
-        .border_1()
-        .flex()
-        .items_center()
-        .justify_center();
-    if checked {
-        b.bg(t.primary).border_color(t.primary).child(
-            svg()
-                .path("icons/check.svg")
-                .size(px(11.0))
-                .text_color(t.primary_text),
-        )
-    } else {
-        b.border_color(t.line_number)
-    }
-}
 
 /// One visual row of the aligned side-by-side diff. `old`/`new` index into each
 /// side's lines (`None` = filler/blank). `hunk` tags rows belonging to a change;

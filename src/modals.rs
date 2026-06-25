@@ -625,3 +625,52 @@ impl Kyde {
     }
 
 }
+
+// ── plugin-pack metadata (file extension + approx compiled size) ──
+/// Representative file extension for a pack id, so `file_badge` can pick the language
+/// monogram chip shown in the plugin manager.
+pub(crate) fn pack_ext(id: &str) -> &'static str {
+    match id {
+        "json" => "json",
+        "typescript" => "ts",
+        "javascript" => "js",
+        "rust" => "rs",
+        "markdown" => "md",
+        "shell" => "sh",
+        "css" => "css",
+        "scss" => "scss",
+        "yaml" => "yml",
+        "toml" => "toml",
+        "python" => "py",
+        "html" => "html",
+        "go" => "go",
+        "env" => "env",
+        "gitignore" => "gitignore",
+        "font" => "ttf",
+        _ => "txt",
+    }
+}
+
+/// Approximate compiled footprint of a pack's grammar (tree-sitter parse tables linked
+/// into the binary). These ship in the binary rather than being downloaded, so this is the
+/// resident size each adds — a rough, static figure, not an exact per-build measurement.
+pub(crate) fn pack_size(id: &str) -> &'static str {
+    match id {
+        "json" => "~55 KB",
+        "typescript" => "~2.6 MB",
+        "javascript" => "~1.1 MB",
+        "rust" => "~1.6 MB",
+        "markdown" => "~210 KB",
+        "shell" => "~480 KB",
+        "css" => "~260 KB",
+        "scss" => "shares CSS grammar",
+        "yaml" => "~150 KB",
+        "toml" => "~120 KB",
+        "python" => "~900 KB",
+        "html" => "~120 KB",
+        "go" => "~700 KB",
+        "env" | "gitignore" => "built-in (no grammar)",
+        "font" => "preview only",
+        _ => "—",
+    }
+}
