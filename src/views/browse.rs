@@ -1,7 +1,7 @@
 //! Browse (code) view — file tree, editor pane, markdown preview, font preview, and the
 //! open-file / preview-tab logic. Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
 

@@ -1,7 +1,7 @@
 //! Fuzzy file finder + Find-in-Files + command palette — the transient `⌘P`/`⌘⇧F`/`⌘⇧A`
 //! overlay (FinderMode::Files|Content|Actions). Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_finder(

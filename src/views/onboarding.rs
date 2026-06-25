@@ -1,6 +1,6 @@
 //! First-run onboarding / keymap picker overlay + shell-command install row. Crate-root child.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_onboarding(

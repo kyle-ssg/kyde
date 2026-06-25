@@ -1,7 +1,7 @@
 //! In-editor find / replace bar (⌘F / ⌘R) — targets the Browse editor or a diff pane.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Find / replace bar shown atop the editor (cmd-f / cmd-r). Live-highlights matches;

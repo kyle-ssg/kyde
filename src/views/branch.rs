@@ -1,7 +1,7 @@
 //! Branch switcher + status bar (branch chip, ahead/behind, fetch/pull/push) + branch picker.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Bottom status bar — currently just the branch switcher, anchored bottom-right.

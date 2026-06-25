@@ -1,7 +1,7 @@
 //! Rollback (discard changes) modal — checkbox tree of changes + delete-added toggle.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Rollback Changes window body: checkbox tree of changes + Close/Rollback. Right-click a

@@ -1,7 +1,7 @@
 //! Bottom terminal panel UI glue (tabs, toggle, resize). The PTY engine lives in
 //! src/terminal.rs; this drives it from Kyde. Crate-root child module (terminal feature).
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Bottom terminal panel: a drag-resize divider, a tab strip (one tab per shell +

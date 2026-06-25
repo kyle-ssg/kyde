@@ -2,7 +2,7 @@
 //! read-only side-by-side diff, with branch picker, path scope, and compare modes. A
 //! crate-root child module; its `impl Kyde` block reaches Kyde's private fields directly.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// History (git log) view: a commit list (left), the selected commit's changed files

@@ -1,7 +1,7 @@
 //! Side-by-side diff: the two-pane editor, center-gutter staging, hunk navigation, the
 //! full-screen Show-Diff view + the Diff modal body. Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Side-by-side diff = two editors in one rounded island: left is the read-only base

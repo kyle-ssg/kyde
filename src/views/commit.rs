@@ -1,7 +1,7 @@
 //! Commit (git staging) view — changed-files tree, per-hunk staging, commit message box.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_commit(

@@ -1,7 +1,7 @@
 //! File operations — new file, rename, delete, scratch files, reveal in Finder/terminal.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_delete_modal(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {

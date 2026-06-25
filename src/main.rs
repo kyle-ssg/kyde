@@ -5,49 +5,42 @@
 //! a fuzzy "Go to File" finder (Cmd+Shift+O), a configurable keymap with WebStorm
 //! and VSCode presets, and a re-accessible onboarding / keymap picker.
 
+// ── core shell ──
 mod app;
-mod clipboard;
 mod divider;
-pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
+mod render;
 mod ui;
+pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
 pub(crate) use ui::*;
-mod branch;
-mod browse;
-mod commit;
-mod diff_view;
-mod file_ops;
-mod find;
-mod finder;
-mod history;
-mod modals;
-mod notifications;
-mod onboarding;
-mod projects_view;
-mod push;
-mod rollback;
-mod tabs;
-#[cfg(feature = "terminal")]
-mod terminal_panel;
 pub(crate) use app::{
     CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
     STATUS_REFRESH_DEBOUNCE,
 };
-use kyde_diff as diff;
-mod editor;
+
+// ── per-feature views (impl Kyde blocks; see src/views/) ──
+mod views;
+
+// ── gpui-coupled widgets; re-aliased so `editor::`/`mdview::`/… paths stay unchanged ──
+mod widgets;
+use widgets::editor;
+use widgets::mdview;
+#[cfg(feature = "remote-images")]
+use widgets::remote_img;
+#[cfg(feature = "terminal")]
+use widgets::terminal;
+
+// ── small OS utilities ──
+mod platform;
+use platform::{scratch, shellcmd};
+
+// ── workspace crates, aliased back to their old module names ──
 use kyde_config::keymap;
+use kyde_config::plugins;
+use kyde_config::projects;
+use kyde_diff as diff;
 use kyde_git as git;
 use kyde_markdown as markdown;
 use kyde_syntax as highlight;
-mod mdview;
-use kyde_config::plugins;
-use kyde_config::projects;
-#[cfg(feature = "remote-images")]
-mod remote_img;
-mod render;
-mod scratch;
-mod shellcmd;
-#[cfg(feature = "terminal")]
-mod terminal;
 use kyde_theme as theme;
 use kyde_tree as tree;
 use kyde_update as update;

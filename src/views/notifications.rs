@@ -1,6 +1,6 @@
 //! Transient banners: crash report, last-op error, update-available. Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Top-of-editor prompt offering to install syntax support for the open file.

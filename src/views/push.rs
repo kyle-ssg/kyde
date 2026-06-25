@@ -1,7 +1,7 @@
 //! Push view — the Push tab + push confirmation modal (commits ahead of upstream).
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     /// Left column of the Push tab: a flat list of the files a push would send (click → diff)

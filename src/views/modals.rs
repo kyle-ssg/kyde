@@ -1,7 +1,7 @@
 //! Native modal windows + their bodies: language-pack manager, fonts, clear-data, new-branch,
 //! the install banner, and the ModalWindow plumbing (open/close/slot). Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_install_banner(

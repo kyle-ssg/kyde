@@ -1,7 +1,7 @@
 //! Projects landing view (recents, welcome hero) + project open/switch/session plumbing.
 //! Crate-root child module.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_projects(

@@ -1,6 +1,6 @@
 //! Editor tab strip (tab bar, overflow menu, empty state) + tab close logic. Crate-root child.
 
-use super::*;
+use crate::*;
 
 impl Kyde {
     pub(crate) fn render_tab_bar(
