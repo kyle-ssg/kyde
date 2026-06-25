@@ -359,8 +359,9 @@ impl Kyde {
                 let expanded = self.history_files_expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let p_act = r.path.clone();
-                self.tree_row(
+                ui::tree::item(
                     cx,
+                    self.dragging(Divider::Tree),
                     &r.path,
                     is_dir,
                     expanded,

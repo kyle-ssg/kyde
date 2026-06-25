@@ -4,143 +4,6 @@
 use super::*;
 
 impl Kyde {
-    /// Shared tree row used by Browse, Commit, and Rollback — so items look identical
-    /// everywhere. `checkbox: None` = no checkbox; `Some(checked)` shows one. The three
-    /// closures wire per-site behavior (activate / toggle-check / context-menu).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn tree_row(
-        &self,
-        cx: &mut Context<Self>,
-        path: &std::path::Path,
-        is_dir: bool,
-        expanded: bool,
-        depth: usize,
-        selected: bool,
-        name: SharedString,
-        name_color: gpui::Rgba,
-        checkbox: Option<bool>,
-        on_activate: impl Fn(&mut Self, &gpui::MouseDownEvent, &mut Window, &mut Context<Self>)
-            + 'static,
-        on_check: impl Fn(&mut Self, &mut Context<Self>) + 'static,
-        on_context: impl Fn(&mut Self, gpui::Point<Pixels>, &mut Context<Self>) + 'static,
-    ) -> gpui::AnyElement {
-        let t = theme::get();
-        let indent = px(8.0 + depth as f32 * 14.0);
-
-        // Caret column (chevron for dirs, empty spacer for files) — fixed width so the
-        // checkbox/badge/name columns align across rows.
-        let caret = div()
-            .w(px(16.0))
-            .flex_none()
-            .text_color(t.line_number)
-            // Larger than the tree's text size for a chunkier chevron.
-            .text_size(px(theme::get().ui_font_size + 5.0))
-            .when(is_dir, |d| d.child(if expanded { "▾" } else { "▸" }));
-
-        // A real drawn checkbox (rounded square; filled with a check svg when ticked),
-        // placed AFTER the caret. Its own click toggles, without firing the row.
-        let checkbox_el = checkbox.map(|checked| {
-            let mut b = div()
-                .flex_none()
-                .size(px(15.0))
-                .mr(px(6.0))
-                .rounded_sm()
-                .border_1()
-                .flex()
-                .items_center()
-                .justify_center();
-            b = if checked {
-                b.bg(t.primary).border_color(t.primary).child(
-                    svg()
-                        .path("icons/check.svg")
-                        .size(px(11.0))
-                        .text_color(t.primary_text),
-                )
-            } else {
-                b.border_color(t.line_number)
-            };
-            b.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _e, _w, cx| {
-                    cx.stop_propagation();
-                    on_check(this, cx);
-                }),
-            )
-        });
-
-        let badge = div()
-            .w(px(22.0))
-            .flex_none()
-            .mr(px(4.0))
-            .overflow_hidden()
-            .flex()
-            .items_center()
-            .justify_end()
-            .child(if is_dir {
-                svg()
-                    .path("icons/folder.svg")
-                    .size(px(16.0))
-                    .text_color(gpui::rgb(0x9AA0A6))
-                    .into_any_element()
-            } else {
-                badge_inner(file_badge(path), 2.0)
-            });
-
-        let content = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .flex_1()
-            .min_w_0()
-            .pl(indent)
-            .child(caret)
-            .when_some(checkbox_el, |d, cb| d.child(cb))
-            .child(badge)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(name_color)
-                    .child(name),
-            );
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .h(px(38.0))
-            // Set the row's font here (not on the container) so every tree — browse, commit,
-            // rollback — renders identically regardless of which island hosts it.
-            .text_size(px(theme::get().ui_font_size + 3.0))
-            // Never let the flex column shrink a row: with many rows (root expanded) the
-            // shrink would squash every row below its height, making a collapsed root's rows
-            // look taller. `flex_none` keeps them a fixed height and lets the list scroll.
-            .flex_none()
-            .mx(px(6.0))
-            .pr_1()
-            .rounded_md()
-            .cursor_pointer()
-            .when(selected, |d| d.bg(t.selected_bg))
-            // No hover tint on the active row (it would override its selected colour).
-            .when(!selected && !self.dragging(Divider::Tree), |d| {
-                d.hover(|d| d.bg(t.bg_mid))
-            })
-            .child(content)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &gpui::MouseDownEvent, w, cx| {
-                    on_activate(this, e, w, cx)
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
-                    on_context(this, e.position, cx)
-                }),
-            )
-            .into_any_element()
-    }
 
     /// The flattened Browse tree rows: the repo root, its expanded descendants (only when
     /// the root is open), then a virtual "Scratches" folder + its files at the bottom.
@@ -465,8 +328,9 @@ impl Kyde {
                     .flatten()
                     .map(|&s| status_color(s))
                     .unwrap_or(theme::get().text);
-                self.tree_row(
+                ui::tree::item(
                     cx,
+                    self.dragging(Divider::Tree),
                     &r.path,
                     is_dir,
                     expanded,

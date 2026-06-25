@@ -240,8 +240,9 @@ impl Kyde {
                 let expanded = self.commit_expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let (p_act, p_check, p_ctx) = (r.path.clone(), r.path.clone(), r.path.clone());
-                self.tree_row(
+                ui::tree::item(
                     cx,
+                    self.dragging(Divider::Tree),
                     &r.path,
                     is_dir,
                     expanded,

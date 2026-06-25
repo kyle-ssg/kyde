@@ -11,6 +11,8 @@ mod menu;
 mod overlay;
 mod scrollbar;
 mod tab;
+/// Public module (not glob-re-exported): call sites use the explicit `ui::tree::item(…)`.
+pub(crate) mod tree;
 
 pub(crate) use badge::*;
 pub(crate) use button::*;
