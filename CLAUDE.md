@@ -42,44 +42,35 @@ crates** under `crates/` (compiler-enforced boundaries, real test targets, indep
 rebuilds). Each extracted crate is **aliased back to its old module name** in `main.rs`
 (`use kyde_git as git;`, `use kyde_config::keymap;`, …) so every existing `git::` /
 `crate::theme::` call site across the binary compiles unchanged.
-The binary is split into **per-feature modules**, each a crate-root child module with an
-`impl Kyde` block (so it reaches `Kyde`'s private fields directly, like `render.rs` always
-did). A method called from another module is `pub(crate)`; feature-internal ones stay private.
-`main.rs` re-exports shared items (`Divider`, the UI toolkit, a few consts) at the crate root
-so every module gets them via `use super::*`.
+The binary is grouped into **tiers**, each a module folder. A feature module is an `impl Kyde`
+block (reaches `Kyde`'s private fields directly, like `render.rs` always did); a method called
+from another module is `pub(crate)`, feature-internal ones stay private. `main.rs` re-exports
+shared items (`Divider`, the `ui` toolkit, a few consts) at the crate root, and re-aliases the
+widget/util submodules (`use widgets::editor;`, `use platform::shellcmd;`), so `editor::` /
+`ui` / `Divider` references resolve unchanged via `use crate::*` in every module.
 ```
-# ── binary: core shell ──
-src/main.rs   struct Kyde + its ~80 fields, actions!/keymap wiring, native menu/dock,
-              ModalWindow, free render helpers, the `mod`/`use`/re-export wiring, main().
-src/app.rs    controller core: new/repo/refresh/reload, menus, save/autosave, effective_lang,
-              escape/fps, mode switch. (Was ~3.4k lines; feature logic now lives per-module.)
-src/render.rs `impl Render for Kyde` (the dispatch) + shared shell helpers (with_scrollbars,
-              editor_island_w, render_context_menu). (Was ~6.4k lines.)
-src/ui.rs     shared UI toolkit — btn_primary/btn_secondary, tab_pill, menu_icon, lerp_rgb,
-              scrollbar_thumb, pack metadata. Re-exported at the crate root.
-src/divider.rs unified divider dragging (Divider enum + geometry + drag methods).
+# ── core shell (src/) ──
+main.rs       struct Kyde + its ~80 fields, actions!/keymap wiring, native menu/dock,
+              ModalWindow, free render helpers, the mod/use/re-export wiring, main().
+app.rs        controller core: new/repo/refresh/reload, menus, save/autosave, effective_lang.
+render.rs     `impl Render for Kyde` (dispatch) + shared shell helpers (with_scrollbars,
+              editor_island_w, render_context_menu).
+divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 
-# ── binary: feature modules (each = render_* + logic for one feature) ──
-src/browse.rs       file tree + editor pane + markdown/font preview + open-file/preview-tab
-src/tabs.rs         editor tab strip + close logic
-src/commit.rs       git staging view (changed-files tree, per-hunk stage, message box)
-src/diff_view.rs    side-by-side diff, gutter staging, hunk nav, Show-Diff view + modal body
-src/push.rs         push tab + push confirmation modal
-src/branch.rs       branch switcher + status bar + fetch/pull/push
-src/history.rs      git-log view (commit list + files + read-only diff)
-src/finder.rs       fuzzy finder + Find-in-Files + command palette
-src/find.rs         in-editor find/replace bar
-src/rollback.rs     rollback (discard) modal
-src/file_ops.rs     new file / rename / delete / scratch / reveal
-src/modals.rs       native modal windows + bodies (plugins, fonts, clear-data, new-branch)
-src/onboarding.rs   first-run keymap picker + shell-command install
-src/projects_view.rs projects landing + project open/switch/session plumbing
-src/notifications.rs crash / op-error / update banners
-src/terminal_panel.rs bottom terminal panel glue (terminal feature)
+# ── ui/ — reusable, Kyde-agnostic toolkit (one component per file) ──
+ui/button.rs tab.rs badge.rs checkbox.rs overlay.rs menu.rs color.rs scrollbar.rs
+ui/tree.rs    file-tree row, GENERIC over the view (`ui::tree::item<V>`) — knows nothing
+              about Kyde; callers pass row data + 3 handlers + suppress_hover.
 
-# ── binary: gpui-coupled widgets + small OS utils (not yet crated) ──
-src/editor.rs / src/mdview.rs / src/terminal.rs / src/remote_img.rs / src/scratch.rs /
-src/shellcmd.rs / src/clipboard.rs
+# ── views/ — per-feature modules (render_* + logic for one feature) ──
+browse  tabs  commit  diff_view  push  branch  history  finder  find  rollback
+file_ops  modals  onboarding  projects_view  notifications  terminal_panel
+
+# ── widgets/ — gpui-coupled widgets (own Entities/Elements) ──
+editor/  mdview.rs  terminal.rs  remote_img.rs
+
+# ── platform/ — small OS utils (no gpui) ──
+clipboard.rs  scratch.rs  shellcmd.rs
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/base_content/working_content/stage/unstage/apply_patch/
@@ -416,12 +407,14 @@ Opening a project lands in **Browse (code) view**, not git — `open_project`/`n
 - Plain Rust, tested, now **own workspace crates** (`crates/<name>`): `kyde-git`,
   `kyde-diff`, `kyde-tree`, `kyde-markdown`, `kyde-update`, `kyde-config` (keymap/plugins/
   projects), `kyde-theme`, `kyde-syntax` (highlight + grammars).
-- Plain Rust, still in the binary (small OS utils, not yet crated): `scratch.rs`,
-  `shellcmd.rs`, `clipboard.rs`.
-- gpui UI in the binary: `main.rs` (entry/wiring/overlays/helpers), `app.rs` (Kyde controller
-  methods), `render.rs` (`impl Render` + `render_*`), `editor.rs` (text widget),
-  `mdview.rs`, `terminal.rs`, `remote_img.rs`. Compile on gpui 0.2.2. The god trio
-  (main/app/render) is the next decomposition target (feature-owned state/entities).
+- Plain Rust, still in the binary (small OS utils, not yet crated): `platform/{scratch,
+  shellcmd,clipboard}.rs`.
+- gpui UI in the binary: core shell `main.rs`/`app.rs`/`render.rs`/`divider.rs`; the `ui/`
+  toolkit; the `views/` feature modules; the `widgets/` (editor, mdview, terminal, remote_img).
+  Compile on gpui 0.2.2. NEXT (optional, not done): the deeper "best practice" step —
+  decompose the `Kyde` god struct (~80 fields) into feature-owned sub-state / gpui entities so
+  features are encapsulated, not just filed separately. Today every `views/` module still
+  mutates one shared `Kyde`.
 
 ## Performance regression tests (the speed pitch is the whole point)
 "Lightning fast" is a hard requirement, so the hot paths have **perf-guard unit
