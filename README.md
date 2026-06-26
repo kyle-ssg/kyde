@@ -8,6 +8,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache-2.0"></a>
 </p>
 
+<p align="center">
+  <img src="assets/screenshots/welcome.gif" alt="Kyde's animated welcome screen — a 3D KYDE logo with a diagonal shimmer sweep, over New Project / Open Folder buttons" width="720">
+</p>
+
 I don't know Rust.
 
 These days I barely open my full IDE — pre-AI I was doing thousands of commits a year, and now I mostly live in its commit and diff view, one of the few things heavy enough to make me wait for a JVM to start.

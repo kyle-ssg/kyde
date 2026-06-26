@@ -1594,6 +1594,19 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         }
         view.plugins.save();
     };
+    // Pick the changed file to open in the diff pane: prefer the curated `color.rs` showcase
+    // (the screenshot fixture edits it), then any Rust file, else the first change.
+    fn diff_pick(view: &Kyde) -> Option<usize> {
+        view.files
+            .iter()
+            .position(|f| f.path.ends_with("color.rs"))
+            .or_else(|| {
+                view.files
+                    .iter()
+                    .position(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rs"))
+            })
+            .or(if view.files.is_empty() { None } else { Some(0) })
+    }
     match name {
         // Commit view, a changed Rust file selected → side-by-side coloured diff.
         "git-diff" => {
@@ -1605,14 +1618,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.open_project(PathBuf::from(repo), cx);
             }
             view.enter_commit(cx);
-            // Click a changed file so the main content shows a side-by-side diff: prefer
-            // README.md, else fall back to the first changed file.
-            let pick = view
-                .files
-                .iter()
-                .position(|f| f.path.as_path() == std::path::Path::new("README.md"))
-                .or(if view.files.is_empty() { None } else { Some(0) });
-            if let Some(i) = pick {
+            // Click a changed file so the main content shows a side-by-side diff.
+            if let Some(i) = diff_pick(view) {
                 view.select_with(i, Some(cx));
             }
         }
@@ -1712,6 +1719,13 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 t.read(cx).send_input("git status && ls src\n");
             }
             view.focus_active_terminal(window, cx);
+            cx.notify();
+        }
+        // Projects landing welcome hero (the animated 3D KYDE logo + shimmer) — used by the
+        // README welcome GIF. Force no project open so `render` takes the landing path; the
+        // throwaway config has no recents, so it renders the animated hero (not the list).
+        "welcome" => {
+            view.repo_root = None;
             cx.notify();
         }
         other => eprintln!("KYDE_SHOT: unknown state {other:?}"),

@@ -96,9 +96,9 @@ impl Kyde {
                 div()
                     .text_color(theme::get().line_number)
                     .child(if self.onboarding_forced {
-                        "Pick a keymap to get started. You can change it later in Kyde → Settings."
+                        "Pick a keymap and theme to get started. You can change these any time in Kyde → Settings (⌘,)."
                     } else {
-                        "Reopen any time from Kyde → Settings (⌘,)."
+                        "Change your keymap, theme and more any time in Kyde → Settings (⌘,)."
                     }),
             )
             .child(
@@ -109,6 +109,7 @@ impl Kyde {
                     .child(preset_card(Preset::WebStorm, cx))
                     .child(preset_card(Preset::VSCode, cx)),
             )
+            .child(self.theme_select(cx))
             .child(self.render_shell_command_row(cx))
             // Single primary action, bottom-right: confirm the highlighted choice.
             .child(

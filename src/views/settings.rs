@@ -75,7 +75,7 @@ impl Kyde {
     /// Theme select — the reusable `ui::select` over the named palettes. The dropdown floats
     /// over the content (deferred absolute overlay), so it doesn't shove the size rows down.
     /// Picking a palette applies it live (preserving the user's font sizes / row height).
-    fn theme_select(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn theme_select(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::get();
         let presets = theme::Theme::presets();
         let labels: Vec<&'static str> = presets.iter().map(|(l, _)| *l).collect();
