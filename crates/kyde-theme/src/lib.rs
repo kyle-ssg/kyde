@@ -623,6 +623,175 @@ mod tests {
         }
     }
 
+    // ---- Colour-vision-deficiency simulation (Viénot et al. 1999) -------------------------
+    // Guards the design intent of the CVD presets: the *semantic* colours must stay
+    // perceptually separated (ΔE) for the deficiency each preset targets, and stay legible on
+    // their surface. Without this, an innocent hex edit could compile, pass the cheap
+    // RGB-inequality test, and silently destroy CVD-safety. Methodology (reproducible):
+    //   sRGB → linear → LMS (Hunt-Pointer-Estevez `RGB2LMS`) → project onto the dichromat
+    //   plane (`S_*`) → back to linear RGB → CIE-Lab → ΔE76 between the two simulated colours.
+    // The matrices and the per-category ΔE floors come from the tuning that produced the
+    // palettes (true minimums measured at status 26.8 / syntax 16.1 / diff 15.0 / contrast
+    // 3.02; floors set below those with slack so CI isn't flaky but real regressions trip it).
+    type Mat = [[f64; 3]; 3];
+    const RGB2LMS: [[f64; 3]; 3] = [
+        [17.8824, 43.5161, 4.11935],
+        [3.45565, 27.1554, 3.86714],
+        [0.0299566, 0.184309, 1.46709],
+    ];
+    const LMS2RGB: [[f64; 3]; 3] = [
+        [8.0944447905e-02, -1.3050440916e-01, 1.1672106644e-01],
+        [-1.0248533515e-02, 5.4019326636e-02, -1.1361470821e-01],
+        [-3.6529693786e-04, -4.1216146859e-03, 6.9351140486e-01],
+    ];
+    // Dichromat projection matrices (applied in LMS space).
+    const S_DEUT: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.494207, 0.0, 1.24827], [0.0, 0.0, 1.0]];
+    const S_PROT: [[f64; 3]; 3] = [[0.0, 2.02344, -2.52581], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    const S_TRIT: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-0.395913, 0.801109, 0.0]];
+
+    fn matvec(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|i| m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2])
+    }
+    fn srgb_to_lin(c: f64) -> f64 {
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    fn lin_rgb(c: Rgba) -> [f64; 3] {
+        [
+            srgb_to_lin(c.r as f64),
+            srgb_to_lin(c.g as f64),
+            srgb_to_lin(c.b as f64),
+        ]
+    }
+    /// Relative luminance → WCAG contrast ratio between two colours.
+    fn contrast(a: Rgba, b: Rgba) -> f64 {
+        let l = |c: Rgba| {
+            let v = lin_rgb(c);
+            0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+        };
+        let (la, lb) = (l(a), l(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+    /// Simulate `c` as seen with the dichromacy `s`; returns linear RGB.
+    fn simulate(c: Rgba, s: &[[f64; 3]; 3]) -> [f64; 3] {
+        let lms = matvec(&RGB2LMS, lin_rgb(c));
+        matvec(&LMS2RGB, matvec(s, lms)).map(|x| x.clamp(0.0, 1.0))
+    }
+    fn lin_to_lab(rgb: [f64; 3]) -> [f64; 3] {
+        // linear sRGB → XYZ (D65) → Lab.
+        const X: [[f64; 3]; 3] = [
+            [0.4124, 0.3576, 0.1805],
+            [0.2126, 0.7152, 0.0722],
+            [0.0193, 0.1192, 0.9505],
+        ];
+        let xyz = matvec(&X, rgb);
+        let wp = [0.95047, 1.0, 1.08883];
+        let f = |t: f64| {
+            if t > 0.008856 {
+                t.cbrt()
+            } else {
+                7.787 * t + 16.0 / 116.0
+            }
+        };
+        let (fx, fy, fz) = (f(xyz[0] / wp[0]), f(xyz[1] / wp[1]), f(xyz[2] / wp[2]));
+        [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+    }
+    /// ΔE76 between two colours as seen with dichromacy `s`.
+    fn delta_e(a: Rgba, b: Rgba, s: &[[f64; 3]; 3]) -> f64 {
+        let (la, lb) = (lin_to_lab(simulate(a, s)), lin_to_lab(simulate(b, s)));
+        ((la[0] - lb[0]).powi(2) + (la[1] - lb[1]).powi(2) + (la[2] - lb[2]).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn cvd_presets_stay_perceptually_separated_under_their_deficiency() {
+        // (preset, name, the dichromacies it must survive).
+        let cases: [(Theme, &str, &[&Mat]); 4] = [
+            (Theme::dark_redgreen(), "dark_redgreen", &[&S_DEUT, &S_PROT]),
+            (
+                Theme::light_redgreen(),
+                "light_redgreen",
+                &[&S_DEUT, &S_PROT],
+            ),
+            (Theme::dark_tritan(), "dark_tritan", &[&S_TRIT]),
+            (Theme::light_tritan(), "light_tritan", &[&S_TRIT]),
+        ];
+        for (t, name, mats) in cases {
+            // Worst ΔE across the relevant deficiencies for a pair.
+            let worst = |a: Rgba, b: Rgba| {
+                mats.iter()
+                    .map(|s| delta_e(a, b, s))
+                    .fold(f64::INFINITY, f64::min)
+            };
+            let check = |a: Rgba, b: Rgba, floor: f64, pair: &str| {
+                let d = worst(a, b);
+                assert!(d >= floor, "{name}: {pair} ΔE={d:.1} < {floor}");
+            };
+
+            // Git status — the carrying colours, mutually distinct (floor 22; min measured 26.8).
+            let st = [
+                ("added/modified", t.status_added, t.status_modified),
+                ("added/conflict", t.status_added, t.status_conflict),
+                ("added/deleted", t.status_added, t.status_deleted),
+                ("modified/conflict", t.status_modified, t.status_conflict),
+                ("modified/deleted", t.status_modified, t.status_deleted),
+                ("conflict/deleted", t.status_conflict, t.status_deleted),
+            ];
+            for (p, a, b) in st {
+                check(a, b, 22.0, p);
+            }
+            // Common syntax roles (floor 13; min measured 16.1).
+            let syn = [
+                ("string/keyword", t.syn_string, t.syn_keyword),
+                ("string/function", t.syn_string, t.syn_function),
+                ("string/number", t.syn_string, t.syn_number),
+                ("keyword/function", t.syn_keyword, t.syn_function),
+                ("keyword/number", t.syn_keyword, t.syn_number),
+                ("number/function", t.syn_number, t.syn_function),
+            ];
+            for (p, a, b) in syn {
+                check(a, b, 13.0, p);
+            }
+            // Diff hunk tints (floor 12; min measured 15.0).
+            let df = [
+                ("ins/del", t.diff_inserted_bg, t.diff_deleted_bg),
+                ("ins/mod", t.diff_inserted_bg, t.diff_modified_bg),
+                ("del/mod", t.diff_deleted_bg, t.diff_modified_bg),
+            ];
+            for (p, a, b) in df {
+                check(a, b, 12.0, p);
+            }
+            // Legibility: every carrying colour readable on the editor surface (floor 2.8;
+            // min measured 3.02 — clears WCAG 3:1 for large/bold UI text).
+            for (label, col) in [
+                ("status_added", t.status_added),
+                ("status_modified", t.status_modified),
+                ("status_conflict", t.status_conflict),
+                ("syn_string", t.syn_string),
+                ("syn_keyword", t.syn_keyword),
+                ("syn_number", t.syn_number),
+                ("syn_function", t.syn_function),
+            ] {
+                let cr = contrast(col, t.main_bg);
+                assert!(cr >= 2.8, "{name}: {label} contrast={cr:.2} < 2.8");
+            }
+        }
+    }
+
+    #[test]
+    fn cvd_simulation_matches_known_confusions() {
+        // Sanity-check the simulator against the *default* palette's known weak pairs (the ones
+        // that motivated the presets): they must read as low-ΔE under the deficiency that hurts
+        // them, proving the metric actually detects CVD collisions (not just always-passing).
+        let d = Theme::default();
+        // Green added vs red conflict collapses for deuteranopes.
+        assert!(delta_e(d.status_added, d.status_conflict, &S_DEUT) < 12.0);
+        // Green string vs orange keyword collapses for protanopes.
+        assert!(delta_e(d.syn_string, d.syn_keyword, &S_PROT) < 12.0);
+    }
+
     #[test]
     fn presets_are_six_distinct_palettes() {
         let ps = Theme::presets();
