@@ -6,7 +6,7 @@
 use gpui::Rgba;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 /// 0xRRGGBB → opaque Rgba (compile-time-friendly).
 const fn c(hex: u32) -> Rgba {
@@ -19,7 +19,9 @@ const fn c(hex: u32) -> Rgba {
 }
 
 /// All themeable colors, flat for easy hand-editing. Serialized as `"#RRGGBB"`.
-#[derive(Clone, Serialize, Deserialize)]
+/// `Copy` (all fields are `Rgba`/`f32`) so `get()` can hand out cheap snapshots from behind
+/// the `RwLock` without lifetime juggling.
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Theme {
     // Surfaces
     /// Window frame / gaps behind the rounded island panels (darkest surface).
@@ -113,11 +115,13 @@ pub struct Theme {
     pub editor_font_size: f32,
     /// UI chrome: tree rows, finder, status bar, menus.
     pub ui_font_size: f32,
+    /// File-tree row height (px). small = 22, medium = 30, large = 38.
+    pub tree_row_height: f32,
 }
 
 /// Theme keys that are plain numbers, not `#RRGGBB` colours (so `merge` validates them as
 /// numbers rather than hex).
-const NUMERIC_KEYS: &[&str] = &["editor_font_size", "ui_font_size"];
+const NUMERIC_KEYS: &[&str] = &["editor_font_size", "ui_font_size", "tree_row_height"];
 
 impl Default for Theme {
     fn default() -> Self {
@@ -169,6 +173,7 @@ impl Default for Theme {
 
             editor_font_size: 14.0,
             ui_font_size: 13.0,
+            tree_row_height: 30.0,
         }
     }
 }
@@ -258,11 +263,30 @@ impl Theme {
     }
 }
 
-static THEME: OnceLock<Theme> = OnceLock::new();
+/// Live theme, behind an `RwLock` so settings can mutate it at runtime (font sizes, colours)
+/// and every `get()` after sees the change — no app restart. `None` until first load.
+static THEME: RwLock<Option<Theme>> = RwLock::new(None);
 
-/// The loaded theme. Loads lazily on first call (and writes defaults if absent).
-pub fn get() -> &'static Theme {
-    THEME.get_or_init(load)
+/// A snapshot of the loaded theme. Loads lazily on first call (and writes defaults if absent).
+/// Returns by value (cheap — `Theme: Copy`), so `theme::get().primary` and
+/// `let t = theme::get();` both work unchanged.
+pub fn get() -> Theme {
+    if let Some(t) = *THEME.read().unwrap() {
+        return t;
+    }
+    let loaded = load();
+    *THEME.write().unwrap() = Some(loaded);
+    loaded
+}
+
+/// Mutate the live theme and persist it to `theme.json`. The change is visible to the next
+/// `get()` immediately, so the UI reflects it on the next frame (no restart).
+pub fn update(f: impl FnOnce(&mut Theme)) {
+    let mut guard = THEME.write().unwrap();
+    let mut t = (*guard).unwrap_or_else(load);
+    f(&mut t);
+    *guard = Some(t);
+    t.save();
 }
 
 /// Corner radius of the island panels (tree / editor), and the frame gap between them.
