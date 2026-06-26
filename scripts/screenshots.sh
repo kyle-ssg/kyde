@@ -210,7 +210,7 @@ shoot_until() {
             echo "    !! gave up after $n tries"
             return 1
         fi
-        echo "    retry $n/$MAX_TRIES…"
+        echo "    retry $n/${MAX_TRIES}..."
         sleep 1
     done
 }

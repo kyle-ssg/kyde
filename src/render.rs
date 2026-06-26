@@ -98,23 +98,7 @@ impl Render for Kyde {
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| {
-                        // A maximized terminal covers the whole right column; switching view
-                        // restores the layout so the chosen mode is actually visible.
-                        #[cfg(feature = "terminal")]
-                        {
-                            this.term_panel.maximized = false;
-                        }
-                        match to {
-                            Mode::Commit => this.enter_commit(cx),
-                            Mode::History => this.enter_history(cx),
-                            Mode::Browse => {
-                                this.mode = Mode::Browse;
-                                this.diff_view_open = false;
-                                cx.notify();
-                            }
-                        }
-                    }),
+                    cx.listener(move |this, _e, _w, cx| this.switch_mode(to, cx)),
                 )
         };
 

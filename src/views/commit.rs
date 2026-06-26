@@ -677,7 +677,7 @@ impl Kyde {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.enter_commit(cx);
+        self.switch_mode(Mode::Commit, cx);
     }
 
     /// Switch to Commit mode: re-read git status (so edits made in Browse show up) and

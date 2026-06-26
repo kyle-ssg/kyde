@@ -394,6 +394,25 @@ pub fn update(f: impl FnOnce(&mut Theme)) {
     t.save();
 }
 
+/// Apply a palette to the live theme **without persisting** to `theme.json` (preserving the
+/// user's font sizes / row height, like [`apply_palette`]). Used by the screenshot harness: a
+/// one-off light-theme shot must NOT leave a `theme.json` that taints the later dark shots,
+/// which share its throwaway config dir and reload the theme on each launch.
+pub fn set_palette_ephemeral(palette: Theme) {
+    let mut guard = THEME.write().unwrap();
+    let (ef, uf, rh) = (*guard)
+        .map(|t| (t.editor_font_size, t.ui_font_size, t.tree_row_height))
+        .unwrap_or_else(|| {
+            let d = load();
+            (d.editor_font_size, d.ui_font_size, d.tree_row_height)
+        });
+    let mut t = palette;
+    t.editor_font_size = ef;
+    t.ui_font_size = uf;
+    t.tree_row_height = rh;
+    *guard = Some(t);
+}
+
 /// Corner radius of the island panels (tree / editor), and the frame gap between them.
 pub const ISLAND_RADIUS: f32 = 10.0;
 pub const FRAME_GAP: f32 = 8.0;

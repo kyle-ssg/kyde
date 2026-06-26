@@ -645,9 +645,28 @@ impl Kyde {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.mode = Mode::Browse;
-        self.diff_view_open = false;
-        cx.notify();
+        self.switch_mode(Mode::Browse, cx);
+    }
+
+    /// The single path EVERY top-level view switch goes through — the activity-rail buttons and
+    /// the ⌘ shortcuts. Un-maximizes the terminal first: a maximized terminal fills the whole
+    /// right column, so without this, switching to Browse/Commit/History would do nothing
+    /// visible (the chosen view stays hidden behind the terminal). Centralised so the reset is
+    /// consistent across triggers and unit-testable.
+    pub(crate) fn switch_mode(&mut self, to: Mode, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        {
+            self.term_panel.maximized = false;
+        }
+        match to {
+            Mode::Commit => self.enter_commit(cx),
+            Mode::History => self.enter_history(cx),
+            Mode::Browse => {
+                self.mode = Mode::Browse;
+                self.diff_view_open = false;
+                cx.notify();
+            }
+        }
     }
 }
 

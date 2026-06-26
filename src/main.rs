@@ -1617,7 +1617,9 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // Same side-by-side diff as `git-diff`, but with the "Kyde Light" palette applied first
         // so the README can show the light theme. Switches the live theme before any render.
         "light" => {
-            theme::apply_palette(theme::Theme::light());
+            // Ephemeral (no save): the shots share one throwaway config dir, so persisting the
+            // light palette here would make every later (dark) shot launch in light mode.
+            theme::set_palette_ephemeral(theme::Theme::light());
             set_packs(view, &["rust"]);
             if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
                 view.open_project(PathBuf::from(repo), cx);
@@ -2280,6 +2282,34 @@ mod gpui_smoke_tests {
                     1,
                     "child exit (CloseRequested) closes the tab"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Switching view (rail folder/git/history icon, or ⌘ shortcut) while the terminal is
+    /// maximized must un-maximize it — otherwise the full-column terminal hides the chosen
+    /// view and the click looks like a no-op (the original feedback item).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn switching_view_unmaximizes_terminal(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+                k.term_panel.maximized = true;
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| k.switch_mode(Mode::Browse, cx))
+            .unwrap();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    !k.term_panel.maximized,
+                    "switching view un-maximizes the terminal"
+                );
+                assert!(k.mode == Mode::Browse);
             })
             .unwrap();
     }
