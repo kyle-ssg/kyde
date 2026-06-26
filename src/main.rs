@@ -82,7 +82,8 @@ actions!(
         NewTerminalTab,
         CloseTerminalTab,
         ClearTerminal,
-        TerminalConsume,
+        TerminalBackspace,
+        TerminalEscape,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -232,16 +233,16 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         // ⌘W closes the active terminal tab when the terminal is focused (iTerm-style);
         // scoped to "Terminal" so it shadows the editor-tab ⌘W (`CloseTab`).
         KeyBinding::new("cmd-w", CloseTerminalTab, Some("Terminal")),
-        // ⌘K clears the terminal; scoped to its context so it overrides the commit binding.
+        // ⌘K clears the terminal; "Terminal" context (depth) beats the "Kyde"-scoped commit.
         KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
-        // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). The
-        // terminal eats both as raw PTY input (0x7f / 0x1b) via on_key_down — but that handler
-        // does NOT stop the action system, so without a deeper binding the "Kyde" action ALSO
-        // fired (backspace deleted the selected Browse file, escape closed modals). Bind both to
-        // a no-op in "Terminal": gpui resolves the deepest-context binding, so this shadows the
-        // "Kyde" ones while the raw on_key_down still relays the byte to the shell.
-        KeyBinding::new("backspace", TerminalConsume, Some("Terminal")),
-        KeyBinding::new("escape", TerminalConsume, Some("Terminal")),
+        // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). gpui
+        // dispatches binding ACTIONS *before* on_key_down and an action stops propagation by
+        // default, so on_key_down never runs once a binding matches — meaning a no-op here would
+        // swallow the key (nothing reaches the PTY). So these route to actions whose handlers
+        // (on TerminalView) write the raw byte to the shell, exactly like the editor binds
+        // backspace to its own buffer action. The "Terminal" context (depth) shadows "Kyde".
+        KeyBinding::new("backspace", TerminalBackspace, Some("Terminal")),
+        KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys).
     cx.bind_keys([
@@ -257,7 +258,12 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
 
 fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
     if let Some(k) = km.key_for(name) {
-        cx.bind_keys([KeyBinding::new(&k, action, None)]);
+        // Scope to the "Kyde" root context (NOT global/None) so a deeper widget context —
+        // "Terminal", "CodeEditor" — cleanly overrides the same key by dispatch depth. A
+        // context-less binding gets *max* depth and would tie with (and sometimes beat) the
+        // widget binding (e.g. ⌘K commit shadowing the terminal's Clear). "Kyde" is always in
+        // the focus stack (the root carries it), so these still fire everywhere else.
+        cx.bind_keys([KeyBinding::new(&k, action, Some("Kyde"))]);
     }
 }
 

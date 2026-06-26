@@ -337,8 +337,7 @@ impl Render for Kyde {
             root = root
                 .on_action(cx.listener(Self::act_toggle_terminal))
                 .on_action(cx.listener(Self::act_new_terminal_tab))
-                .on_action(cx.listener(Self::act_close_terminal_tab))
-                .on_action(cx.listener(Self::act_terminal_consume));
+                .on_action(cx.listener(Self::act_close_terminal_tab));
         }
         let root = root
             .on_mouse_move(

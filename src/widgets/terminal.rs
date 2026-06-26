@@ -209,6 +209,14 @@ impl TerminalView {
         self.write(text.as_bytes().to_vec());
     }
 
+    /// Relay a key's raw bytes to the PTY from an action handler (backspace / escape): jump to
+    /// the live screen, write, repaint — the same steps `on_key` does for typed keys.
+    fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.term.lock().scroll_display(Scroll::Bottom);
+        self.write(bytes);
+        cx.notify();
+    }
+
     /// Re-size the grid + PTY when the panel geometry changes. No-op if unchanged.
     fn resize(&mut self, cols: u16, rows: u16, cell_w: f32, cell_h: f32) {
         self.cell = (cell_w, cell_h);
@@ -248,38 +256,7 @@ impl TerminalView {
             return;
         }
 
-        // Ctrl + letter → control byte (Ctrl-C = 0x03, etc.). The shell + foreground
-        // program rely on these (SIGINT, EOF, …).
-        if m.control && key.len() == 1 {
-            if let Some(c) = key.chars().next() {
-                let lc = c.to_ascii_lowercase();
-                if lc.is_ascii_alphabetic() {
-                    self.write(vec![(lc as u8 - b'a') + 1]);
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-
-        let bytes: Option<Vec<u8>> = match key {
-            "enter" => Some(b"\r".to_vec()),
-            "backspace" => Some(vec![0x7f]),
-            "tab" => Some(b"\t".to_vec()),
-            "escape" => Some(vec![0x1b]),
-            // Arrows drive shell history (Up/Down) + line editing (Left/Right).
-            "up" => Some(b"\x1b[A".to_vec()),
-            "down" => Some(b"\x1b[B".to_vec()),
-            "right" => Some(b"\x1b[C".to_vec()),
-            "left" => Some(b"\x1b[D".to_vec()),
-            "home" => Some(b"\x1b[H".to_vec()),
-            "end" => Some(b"\x1b[F".to_vec()),
-            "delete" => Some(b"\x1b[3~".to_vec()),
-            "pageup" => Some(b"\x1b[5~".to_vec()),
-            "pagedown" => Some(b"\x1b[6~".to_vec()),
-            _ => ks.key_char.as_ref().map(|s| s.clone().into_bytes()),
-        };
-
-        if let Some(bytes) = bytes {
+        if let Some(bytes) = key_bytes(key, m.control, ks.key_char.as_deref()) {
             if !bytes.is_empty() {
                 // Any keystroke jumps back to the live screen (out of scrollback).
                 self.term.lock().scroll_display(Scroll::Bottom);
@@ -478,6 +455,18 @@ impl Render for TerminalView {
             .bg(theme::get().main_bg)
             // ⌘K clears the terminal — overrides the global commit binding in this context.
             .on_action(cx.listener(|this, _: &crate::ClearTerminal, _w, cx| this.clear(cx)))
+            // Backspace / Escape are also app shortcuts (DeleteFile / EscapeKey). gpui dispatches
+            // binding actions before on_key_down and consumes the key, so we relay the PTY byte
+            // here rather than let it fall through to the app action (which deleted the selected
+            // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
+            .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
+                this.send_key(vec![0x7f], cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
+                    this.send_key(vec![0x1b], cx)
+                }),
+            )
             // Pin the mono font + editor size so the cell metrics the element measures (the
             // `M` advance) match the glyphs it actually shapes — otherwise the cursor, placed
             // at `col × cell_w`, drifts off the text (it inherits a proportional UI font).
@@ -931,6 +920,40 @@ fn default_indexed(i: u8) -> Rgb {
     }
 }
 
+/// Translate a (non-⌘) key press to the bytes to write to the PTY, or `None` if the key
+/// produces nothing. Pure (no gpui / no PTY) so the mapping is unit-testable:
+/// - Ctrl + letter → its control byte (Ctrl-A = 0x01 … Ctrl-Z = 0x1a; Ctrl-C = 0x03 = SIGINT).
+/// - Named keys → their terminal escape sequences (arrows = shell history / line editing,
+///   Backspace = DEL 0x7f, Enter = CR, Tab, Esc, Home/End/Delete/PageUp/PageDown).
+/// - Anything else → the key's typed character (`key_char`), e.g. plain letters / symbols.
+pub(crate) fn key_bytes(key: &str, control: bool, key_char: Option<&str>) -> Option<Vec<u8>> {
+    if control && key.len() == 1 {
+        if let Some(c) = key.chars().next() {
+            let lc = c.to_ascii_lowercase();
+            if lc.is_ascii_alphabetic() {
+                return Some(vec![(lc as u8 - b'a') + 1]);
+            }
+        }
+    }
+    match key {
+        "enter" => Some(b"\r".to_vec()),
+        "backspace" => Some(vec![0x7f]),
+        "tab" => Some(b"\t".to_vec()),
+        "escape" => Some(vec![0x1b]),
+        // Arrows drive shell history (Up/Down) + line editing (Left/Right).
+        "up" => Some(b"\x1b[A".to_vec()),
+        "down" => Some(b"\x1b[B".to_vec()),
+        "right" => Some(b"\x1b[C".to_vec()),
+        "left" => Some(b"\x1b[D".to_vec()),
+        "home" => Some(b"\x1b[H".to_vec()),
+        "end" => Some(b"\x1b[F".to_vec()),
+        "delete" => Some(b"\x1b[3~".to_vec()),
+        "pageup" => Some(b"\x1b[5~".to_vec()),
+        "pagedown" => Some(b"\x1b[6~".to_vec()),
+        _ => key_char.map(|s| s.as_bytes().to_vec()),
+    }
+}
+
 /// 16-color ANSI palette (a balanced dark-theme set tuned to match Kyde's chrome).
 const ANSI_PALETTE: [Rgb; 16] = [
     Rgb {
@@ -1066,5 +1089,26 @@ mod tests {
         );
         // Default background resolves to None (not painted).
         assert!(resolve_opt(AnsiColor::Named(NamedColor::Background), &colors).is_none());
+    }
+
+    #[test]
+    fn key_bytes_translates_named_keys_and_control() {
+        // Backspace = DEL (0x7f) — the byte a Unix shell expects (the thing the user hit).
+        assert_eq!(key_bytes("backspace", false, None), Some(vec![0x7f]));
+        assert_eq!(key_bytes("enter", false, None), Some(b"\r".to_vec()));
+        assert_eq!(key_bytes("tab", false, None), Some(b"\t".to_vec()));
+        assert_eq!(key_bytes("escape", false, None), Some(vec![0x1b]));
+        // Arrows = CSI sequences (Up/Down drive shell history).
+        assert_eq!(key_bytes("up", false, None), Some(b"\x1b[A".to_vec()));
+        assert_eq!(key_bytes("down", false, None), Some(b"\x1b[B".to_vec()));
+        assert_eq!(key_bytes("left", false, None), Some(b"\x1b[D".to_vec()));
+        assert_eq!(key_bytes("right", false, None), Some(b"\x1b[C".to_vec()));
+        // Ctrl-C = 0x03 (SIGINT), Ctrl-D = 0x04 (EOF → shell exits → tab closes), Ctrl-A = 0x01.
+        assert_eq!(key_bytes("c", true, Some("c")), Some(vec![0x03]));
+        assert_eq!(key_bytes("d", true, Some("d")), Some(vec![0x04]));
+        assert_eq!(key_bytes("a", true, Some("a")), Some(vec![0x01]));
+        // Plain typed char falls through to key_char; an unknown key with no char → None.
+        assert_eq!(key_bytes("a", false, Some("a")), Some(b"a".to_vec()));
+        assert_eq!(key_bytes("f5", false, None), None);
     }
 }

@@ -178,6 +178,104 @@ impl Default for Theme {
     }
 }
 
+impl Theme {
+    /// **Kyde Light** — light counterpart to the default dark palette. Surfaces per spec
+    /// (`#F6F6F7` frame, white islands, `#1D1D1F` text); accents/status/syntax take their
+    /// cues from the Hoxton Mix account-app palette (action blue `#1977EC`, brand purple
+    /// `#A42F89`, success/danger, the `light*`/`dark*` greys). On-white-readable variants of
+    /// each colour (darkened greens/reds, grey gutter) so contrast holds.
+    pub fn light() -> Self {
+        Self {
+            // Surfaces
+            frame_bg: c(0xF6F6F7),
+            main_bg: c(0xFFFFFF),
+            panel_bg: c(0xFFFFFF),
+            bg_mid: c(0xEDEDEF),   // light300 — hover
+            bg_light: c(0xE4E4E6), // light400
+            divider: c(0xDBDBDE),  // light500
+
+            // Text
+            text: c(0x1D1D1F),           // dark500
+            secondary_text: c(0x6E6E73), // text-muted
+            line_number: c(0xA5A5A5),    // dark200 — gutter / inactive icons
+
+            // Editor
+            caret: c(0x1D1D1F),
+            caret_row: c(0xF5F5F6),   // subtle current-line tint on white
+            selected_bg: c(0xD1E4FB), // action100 — selected row
+
+            // Buttons
+            primary: c(0x1977EC), // action
+            primary_text: c(0xFFFFFF),
+
+            // Git status (darkened for contrast on white)
+            status_added: c(0x21A848),
+            status_modified: c(0x1977EC),
+            status_deleted: c(0x777779), // dark300
+            status_untracked: c(0x21A848),
+            status_conflict: c(0xD70015), // danger900
+
+            // Diff hunk backgrounds (faint tints on white)
+            diff_inserted_bg: c(0xE3F6E9),
+            diff_deleted_bg: c(0xECECEE),
+            diff_modified_bg: c(0xE1ECFC),
+            diff_separator_bg: c(0xF0F0F2),
+            // Word-level emphasis — same both sides, a stronger blue (mirrors the dark theme).
+            diff_word_old_bg: c(0xADCFF7),
+            diff_word_new_bg: c(0xADCFF7),
+
+            // Syntax (Hoxton-tinted, dark enough to read on white)
+            syn_keyword: c(0xA42F89),  // brand purple
+            syn_string: c(0x138A3E),   // dark green
+            syn_number: c(0x1B7FA8),   // dark teal (info)
+            syn_comment: c(0x8B8B8F),  // light800 grey
+            syn_function: c(0x1559B8), // dark action blue
+            syn_field: c(0xA42F89),
+            syn_constant: c(0xA42F89),
+            syn_identifier: c(0x1D1D1F),
+            syn_operator: c(0x1D1D1F),
+
+            // Sizes inherited from the dark default; callers preserve the user's live values.
+            editor_font_size: 14.0,
+            ui_font_size: 13.0,
+            tree_row_height: 30.0,
+        }
+    }
+
+    /// Built-in named palettes for the Settings theme picker. Colours only — callers apply a
+    /// preset with [`apply_palette`], which preserves the user's font sizes / row height.
+    pub fn presets() -> [(&'static str, Theme); 2] {
+        [
+            ("Kyde Dark", Theme::default()),
+            ("Kyde Light", Theme::light()),
+        ]
+    }
+
+    /// True if `self`'s colours match `other`'s (ignores font sizes / row height). Used to
+    /// mark the active preset in Settings.
+    pub fn same_palette(&self, other: &Theme) -> bool {
+        let sizes_off = |t: &Theme| Theme {
+            editor_font_size: 0.0,
+            ui_font_size: 0.0,
+            tree_row_height: 0.0,
+            ..*t
+        };
+        serde_json::to_value(sizes_off(self)).ok() == serde_json::to_value(sizes_off(other)).ok()
+    }
+}
+
+/// Switch to a named palette, preserving the user's font sizes / tree-row height. Applies live
+/// (next `get()` sees it) and persists to `theme.json`, like [`update`].
+pub fn apply_palette(palette: Theme) {
+    update(|t| {
+        let (ef, uf, rh) = (t.editor_font_size, t.ui_font_size, t.tree_row_height);
+        *t = palette;
+        t.editor_font_size = ef;
+        t.ui_font_size = uf;
+        t.tree_row_height = rh;
+    });
+}
+
 fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -206,7 +304,7 @@ fn valid_size(v: &serde_json::Value) -> bool {
 /// for testing.
 fn merge(file: Option<&str>) -> (Theme, bool) {
     let default = Theme::default();
-    let default_val = serde_json::to_value(&default).expect("theme serializes");
+    let default_val = serde_json::to_value(default).expect("theme serializes");
     let mut obj = default_val.as_object().expect("theme is an object").clone();
 
     let mut repaired = true; // assume repair unless we read a clean, complete file

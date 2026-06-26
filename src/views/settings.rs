@@ -80,7 +80,8 @@ impl Kyde {
             .gap_4()
             .p_4()
             .child(settings_heading("Appearance"))
-            // Theme picker — one palette for now ("Dark"); presets land here later.
+            // Theme picker — named palettes (Kyde Dark / Kyde Light). Switching preserves the
+            // user's font sizes / tree-row height (only colours swap).
             .child(
                 div()
                     .flex()
@@ -93,16 +94,36 @@ impl Kyde {
                             .text_color(t.secondary_text)
                             .child("Theme"),
                     )
-                    .child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(t.divider)
-                            .text_color(t.text)
-                            .child("Dark"),
-                    ),
+                    .child(div().flex().flex_row().gap_2().children(
+                        theme::Theme::presets().into_iter().map(|(label, palette)| {
+                            let selected = t.same_palette(&palette);
+                            div()
+                                .id(label)
+                                .px_3()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .cursor_pointer()
+                                .when(selected, |d| {
+                                    d.bg(t.selected_bg)
+                                        .border_color(t.primary)
+                                        .text_color(t.text)
+                                })
+                                .when(!selected, |d| {
+                                    d.border_color(t.divider)
+                                        .text_color(t.secondary_text)
+                                        .hover(|d| d.bg(t.bg_mid))
+                                })
+                                .child(SharedString::from(label))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_this, _e, _w, cx| {
+                                        theme::apply_palette(palette);
+                                        cx.notify();
+                                    }),
+                                )
+                        }),
+                    )),
             )
             .child(self.size_row(
                 cx,

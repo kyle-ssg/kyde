@@ -257,19 +257,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// No-op handler for the backspace/escape keys while the terminal is focused. The terminal
-    /// relays the raw byte to the PTY in `on_key_down`; this exists only so the bound
-    /// `TerminalConsume` action is actually *consumed* — without a handler, gpui treats the
-    /// action as unhandled and falls through to the shallower "Kyde" binding (`DeleteFile` /
-    /// `EscapeKey`), which is why backspace was still deleting the selected file.
-    pub(crate) fn act_terminal_consume(
-        &mut self,
-        _: &crate::TerminalConsume,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-    }
-
     /// Whether the active terminal tab currently owns keyboard focus.
     pub(crate) fn terminal_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         self.term_tabs
@@ -333,16 +320,19 @@ impl Kyde {
 
     /// Close a terminal tab; closing the last one hides the panel.
     pub(crate) fn close_terminal_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx >= self.term_tabs.len() {
+        let len = self.term_tabs.len();
+        if idx >= len {
             return;
         }
         self.term_tabs.remove(idx);
-        if self.term_tabs.is_empty() {
-            self.term_open = false;
-            self.term_maximized = false;
-            self.term_active = 0;
-        } else if self.term_active >= self.term_tabs.len() {
-            self.term_active = self.term_tabs.len() - 1;
+        match active_after_close(len, idx, self.term_active) {
+            // Last tab closed → hide the panel.
+            None => {
+                self.term_open = false;
+                self.term_maximized = false;
+                self.term_active = 0;
+            }
+            Some(a) => self.term_active = a,
         }
         // Closing the focused tab (mouse × or ^D `exit`) leaves focus orphaned on the destroyed
         // widget, so typing needs a mouse click. Flag the next paint to re-home focus — onto the
@@ -362,5 +352,55 @@ impl Kyde {
             window.focus(&handle);
             window.defer(cx, move |window, _cx| window.focus(&handle));
         }
+    }
+}
+
+/// Which tab is active after closing tab `closed` (a valid index into the `len` tabs before
+/// removal), given the previously-active index. `None` = no tabs left (panel should hide).
+///
+/// Closing the active tab (e.g. the focused shell exiting on ^D) lands on the tab that slides
+/// into its slot — the "next" tab, or the new last one if it was rightmost. Closing a tab
+/// *before* the active one shifts the selection left so it stays on the same logical tab.
+/// Pure so the selection rule is unit-testable without a window/PTY.
+fn active_after_close(len: usize, closed: usize, active: usize) -> Option<usize> {
+    let new_len = len.saturating_sub(1);
+    if new_len == 0 {
+        return None;
+    }
+    let a = if closed < active { active - 1 } else { active };
+    Some(a.min(new_len - 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::active_after_close;
+
+    #[test]
+    fn closing_last_remaining_tab_hides_panel() {
+        assert_eq!(active_after_close(1, 0, 0), None);
+    }
+
+    #[test]
+    fn closing_active_tab_lands_on_next() {
+        // [A,B,C] active=C(2), ^D closes C → lands on the new last (B).
+        assert_eq!(active_after_close(3, 2, 2), Some(1));
+        // [A,B,C] active=A(0), close A → B slides into slot 0.
+        assert_eq!(active_after_close(3, 0, 0), Some(0));
+        // [A,B,C] active=B(1), close B → C slides into slot 1.
+        assert_eq!(active_after_close(3, 1, 1), Some(1));
+    }
+
+    #[test]
+    fn closing_tab_before_active_shifts_selection_left() {
+        // [A,B,C] active=C(2), close A(0) → C is now at index 1; stay on it.
+        assert_eq!(active_after_close(3, 0, 2), Some(1));
+        // [A,B,C] active=B(1), close A(0) → B is now at index 0; stay on it.
+        assert_eq!(active_after_close(3, 0, 1), Some(0));
+    }
+
+    #[test]
+    fn closing_tab_after_active_keeps_selection() {
+        // [A,B,C] active=A(0), close C(2) → A unchanged.
+        assert_eq!(active_after_close(3, 2, 0), Some(0));
     }
 }
