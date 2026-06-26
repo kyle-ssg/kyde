@@ -24,7 +24,10 @@ pub fn select<V: 'static>(
     on_pick: impl Fn(&mut V, usize, &mut Context<V>) + 'static,
 ) -> gpui::AnyElement {
     let t = theme::get();
-    let label = selected.and_then(|i| options.get(i)).copied().unwrap_or("Custom");
+    let label = selected
+        .and_then(|i| options.get(i))
+        .copied()
+        .unwrap_or("Custom");
 
     let control = div()
         .id(id)
