@@ -258,7 +258,8 @@ impl Render for Kyde {
             .relative();
         // Maximized terminal hides the body (tree + editor) and fills the whole right column.
         #[cfg(feature = "terminal")]
-        let term_max = self.term_panel.open && self.repo_root.is_some() && self.term_panel.maximized;
+        let term_max =
+            self.term_panel.open && self.repo_root.is_some() && self.term_panel.maximized;
         #[cfg(not(feature = "terminal"))]
         let term_max = false;
         let right_col = right_col.when(!term_max, |c| c.child(body));

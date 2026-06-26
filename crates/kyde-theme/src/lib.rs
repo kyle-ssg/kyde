@@ -38,6 +38,11 @@ pub struct Theme {
     /// General divider / hr / border colour.
     #[serde(with = "hex")]
     pub divider: Rgba,
+    /// Native title strip behind the macOS traffic lights. Distinct from `frame_bg` so a
+    /// light theme can give the (system-drawn) inactive traffic lights a grey backing —
+    /// gpui can't force the window's NSAppearance, so on a near-white strip they wash out.
+    #[serde(with = "hex")]
+    pub titlebar_bg: Rgba,
 
     // Text
     /// General text colour (everything except the primary button).
@@ -132,6 +137,7 @@ impl Default for Theme {
             bg_mid: c(0x26282B),
             bg_light: c(0x323438),
             divider: c(0x26272B),
+            titlebar_bg: c(0x262729), // = frame_bg (no visual change in dark)
 
             text: c(0xD1D3D9),
             secondary_text: c(0xD1D3D9),
@@ -190,9 +196,10 @@ impl Theme {
             frame_bg: c(0xF6F6F7),
             main_bg: c(0xFFFFFF),
             panel_bg: c(0xFFFFFF),
-            bg_mid: c(0xEDEDEF),   // light300 — hover
-            bg_light: c(0xE4E4E6), // light400
-            divider: c(0xDBDBDE),  // light500
+            bg_mid: c(0xEDEDEF),      // light300 — hover
+            bg_light: c(0xE4E4E6),    // light400
+            divider: c(0xDBDBDE),     // light500
+            titlebar_bg: c(0xE4E4E6), // grey strip so the inactive traffic lights read
 
             // Text
             text: c(0x1D1D1F),           // dark500

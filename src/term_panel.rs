@@ -156,9 +156,15 @@ mod tests {
     fn toggle_decision_table() {
         let hidden = TermPanel::default();
         // Hidden, no tabs → open + spawn the first.
-        assert_eq!(hidden.toggle(false, false), ToggleAction::Open { spawn: true });
+        assert_eq!(
+            hidden.toggle(false, false),
+            ToggleAction::Open { spawn: true }
+        );
         // Hidden, tabs already exist → open, no spawn.
-        assert_eq!(hidden.toggle(false, true), ToggleAction::Open { spawn: false });
+        assert_eq!(
+            hidden.toggle(false, true),
+            ToggleAction::Open { spawn: false }
+        );
         let open = TermPanel {
             open: true,
             ..Default::default()

@@ -2200,6 +2200,89 @@ mod gpui_smoke_tests {
         assert!(url.contains("&body="));
         assert!(url.contains("boom") || url.contains("Crash"));
     }
+
+    /// ⌃` opens the panel + spawns the first tab, and ⌘W (`act_close_terminal_tab`) closes the
+    /// active tab — the last one hides the panel. Exercises the real gpui wiring (window +
+    /// PTY-backed `TerminalView`s + the `TermPanel` state), not just the pure state machine.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_toggle_opens_and_cmd_w_closes(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.term_panel.open, "⌃` opens the panel");
+                assert_eq!(k.term_tabs.len(), 1, "first tab spawned on open");
+            })
+            .unwrap();
+        // A second tab, then ⌘W closes the active one → one remains, panel stays open.
+        handle
+            .update(cx, |k, _w, cx| k.new_terminal_tab(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, window, cx| {
+                assert_eq!(k.term_tabs.len(), 2);
+                k.act_close_terminal_tab(&CloseTerminalTab, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.term_tabs.len(), 1, "⌘W closes the active tab");
+                assert!(k.term_panel.open, "panel stays open while a tab remains");
+            })
+            .unwrap();
+        // ⌘W the last tab → the panel hides.
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_close_terminal_tab(&CloseTerminalTab, window, cx)
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.term_tabs.is_empty());
+                assert!(!k.term_panel.open, "closing the last tab hides the panel");
+            })
+            .unwrap();
+    }
+
+    /// The shell exiting (`^D` / `exit`) makes the IO thread emit `CloseRequested`; the Kyde
+    /// subscription must close that tab (the "stuck on exited" item). Simulate the event.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_child_exit_closes_its_tab(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.new_terminal_tab(cx);
+                k.new_terminal_tab(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let view = handle
+            .update(cx, |k, _w, _cx| k.term_tabs[k.term_panel.active].clone())
+            .unwrap();
+        view.update(cx, |_v, cx| {
+            cx.emit(terminal::TerminalEvent::CloseRequested)
+        });
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(
+                    k.term_tabs.len(),
+                    1,
+                    "child exit (CloseRequested) closes the tab"
+                );
+            })
+            .unwrap();
+    }
 }
 
 /// A full-window dimmed overlay that centers its child. When `dismissable`, clicking the
