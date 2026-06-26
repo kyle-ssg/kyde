@@ -57,10 +57,9 @@ render.rs     `impl Render for Kyde` (dispatch) + shared shell helpers (with_scr
               editor_island_w, render_context_menu).
 divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 
-# ── ui/ — reusable, Kyde-agnostic toolkit (one component per file) ──
-ui/button.rs tab.rs badge.rs checkbox.rs overlay.rs menu.rs color.rs scrollbar.rs
-ui/tree.rs    file-tree row, GENERIC over the view (`ui::tree::item<V>`) — knows nothing
-              about Kyde; callers pass row data + 3 handlers + suppress_hover.
+# ── overlay ──
+# `overlay()` (the dismiss-backdrop) lives in main.rs — it pokes Kyde fields, so it's app
+# glue, not a reusable component. Everything else reusable is the kyde-ui crate (below).
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
 browse  tabs  commit  diff_view  push  branch  history  finder  find  rollback
@@ -81,6 +80,10 @@ kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap. (anyhow, serde_json)
 kyde-config   keymap + plugins + projects: config/persistence (JSON, XDG). (serde)
 kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (gpui Rgba, serde)
+kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
+              file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, and the file-tree
+              row `tree::item<V>` (generic over the view). Aliased back as `ui` in main.rs.
+              (gpui, kyde-theme)
 kyde-syntax   tree-sitter highlight() + fold_regions(); OWNS every grammar crate behind
               per-pack features. Binary depends with default-features=false and forwards
               its own packs (`rust` → `kyde-syntax/rust`); kyde-syntax's own default is
@@ -407,10 +410,12 @@ Opening a project lands in **Browse (code) view**, not git — `open_project`/`n
 - Plain Rust, tested, now **own workspace crates** (`crates/<name>`): `kyde-git`,
   `kyde-diff`, `kyde-tree`, `kyde-markdown`, `kyde-update`, `kyde-config` (keymap/plugins/
   projects), `kyde-theme`, `kyde-syntax` (highlight + grammars).
+- gpui but **Kyde-agnostic**, its own crate: `kyde-ui` (the reusable toolkit — buttons, badge,
+  tree row, …; depends only on gpui + kyde-theme).
 - Plain Rust, still in the binary (small OS utils, not yet crated): `platform/{scratch,
   shellcmd,clipboard}.rs`.
-- gpui UI in the binary: core shell `main.rs`/`app.rs`/`render.rs`/`divider.rs`; the `ui/`
-  toolkit; the `views/` feature modules; the `widgets/` (editor, mdview, terminal, remote_img).
+- gpui UI in the binary: core shell `main.rs`/`app.rs`/`render.rs`/`divider.rs`; the `views/`
+  feature modules; the `widgets/` (editor, mdview, terminal, remote_img).
   Compile on gpui 0.2.2. NEXT (optional, not done): the deeper "best practice" step —
   decompose the `Kyde` god struct (~80 fields) into feature-owned sub-state / gpui entities so
   features are encapsulated, not just filed separately. Today every `views/` module still
