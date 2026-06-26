@@ -8,6 +8,7 @@ use gpui::FontWeight;
 impl Kyde {
     /// Open (or focus) the Settings window. Bound to ⌘, and the native Settings… menu.
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.settings_theme_open = false;
         self.open_modal_window(ModalKind::Settings, "Settings", 660.0, 480.0, cx);
     }
 
@@ -71,6 +72,47 @@ impl Kyde {
             .into_any_element()
     }
 
+    /// Theme select — the reusable `ui::select` over the named palettes. The dropdown floats
+    /// over the content (deferred absolute overlay), so it doesn't shove the size rows down.
+    /// Picking a palette applies it live (preserving the user's font sizes / row height).
+    fn theme_select(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        let presets = theme::Theme::presets();
+        let labels: Vec<&'static str> = presets.iter().map(|(l, _)| *l).collect();
+        let selected = presets.iter().position(|(_, p)| t.same_palette(p));
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(140.0))
+                    .pt_1p5()
+                    .text_color(t.secondary_text)
+                    .child("Theme"),
+            )
+            .child(ui::select(
+                cx,
+                "theme-select",
+                240.0,
+                &labels,
+                selected,
+                self.settings_theme_open,
+                |this, cx| {
+                    this.settings_theme_open = !this.settings_theme_open;
+                    cx.notify();
+                },
+                |this, i, cx| {
+                    if let Some((_, palette)) = theme::Theme::presets().get(i) {
+                        theme::apply_palette(*palette);
+                    }
+                    this.settings_theme_open = false;
+                    cx.notify();
+                },
+            ))
+    }
+
     /// Appearance section: theme + the three px size controls (live-applied).
     fn settings_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
@@ -80,51 +122,11 @@ impl Kyde {
             .gap_4()
             .p_4()
             .child(settings_heading("Appearance"))
-            // Theme picker — named palettes (Kyde Dark / Kyde Light). Switching preserves the
-            // user's font sizes / tree-row height (only colours swap).
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w(px(140.0))
-                            .text_color(t.secondary_text)
-                            .child("Theme"),
-                    )
-                    .child(div().flex().flex_row().flex_wrap().gap_2().children(
-                        theme::Theme::presets().into_iter().map(|(label, palette)| {
-                            let selected = t.same_palette(&palette);
-                            div()
-                                .id(label)
-                                .px_3()
-                                .py_1()
-                                .rounded_md()
-                                .border_1()
-                                .cursor_pointer()
-                                .when(selected, |d| {
-                                    d.bg(t.selected_bg)
-                                        .border_color(t.primary)
-                                        .text_color(t.text)
-                                })
-                                .when(!selected, |d| {
-                                    d.border_color(t.divider)
-                                        .text_color(t.secondary_text)
-                                        .hover(|d| d.bg(t.bg_mid))
-                                })
-                                .child(SharedString::from(label))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |_this, _e, _w, cx| {
-                                        theme::apply_palette(palette);
-                                        cx.notify();
-                                    }),
-                                )
-                        }),
-                    )),
-            )
+            // Theme picker — a select dropdown over the named palettes (Kyde Dark/Light + the
+            // colour-vision-deficiency variants). Too many for inline pills, so it's a
+            // click-to-expand select. Switching preserves the user's font sizes / tree-row
+            // height (only colours swap).
+            .child(self.theme_select(cx))
             .child(self.size_row(
                 cx,
                 "ui",

@@ -309,6 +309,7 @@ impl Kyde {
             clear_data_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
+            settings_theme_open: false,
             font_preview: None,
             welcome_frame: 0,
             onboarding_choice: keymap_preset,

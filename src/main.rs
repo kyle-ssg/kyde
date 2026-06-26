@@ -678,6 +678,8 @@ struct Kyde {
     settings_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Which Settings category the sidebar has selected.
     settings_section: SettingsSection,
+    /// Whether the Appearance → Theme select dropdown is expanded.
+    settings_theme_open: bool,
     /// Cached `(path, registered family name)` for the open font file's preview.
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
