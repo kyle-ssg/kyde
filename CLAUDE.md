@@ -312,14 +312,17 @@ Remaining: undo/redo, soft-wrap, caret-follow scrolling, rope buffer for huge fi
   (mono font, trimmed/capped 200ch) + `path:line`. Enter/click → `open_file_at_line` (opens
   in Browse, selects the line, scrolls it ~3 rows below the top via `file_scroll.set_offset`).
   Also reachable from the ⌘⇧A palette ("Find in Files").
-- Onboarding overlay = keymap picker. On first run it's **forced** (`onboarding_forced`):
-  no Close button, non-dismissable backdrop (`overlay(cx, dismissable)`) — a keymap MUST be
-  chosen. Preset cards select on click (highlight = thick `border_2` accent + a same-family
-  `linear_gradient`); `onboarding_choice` holds the pending pick; the bottom-right primary
-  **Continue** button confirms via `choose_preset` (saves, re-applies, clears forced).
-- Reopen any time via the **native menu**: Kyde → Settings… (`cx.set_menus`, dispatches
-  `OpenKeymap`; also bound to ⌘,). Quit = `Quit` action → `cx.quit()`. No in-app toolbar
-  button (settings is native-menu-only).
+- Onboarding overlay = **first-run keymap picker only**. On first run it's **forced**
+  (`onboarding_forced`): no Close button, non-dismissable backdrop (`overlay(cx, dismissable)`)
+  — a keymap MUST be chosen. Preset cards select on click; `onboarding_choice` holds the
+  pending pick; the **Continue** button confirms via `choose_preset` (saves, re-applies).
+- **Settings window** (`src/views/settings.rs`, `ModalKind::Settings`): Kyde → Settings… / ⌘,
+  (`OpenKeymap` → `open_keymap` → `open_settings`) opens a native `ModalWindow` with an
+  IntelliJ-style sidebar (`SettingsSection`: Appearance / Keymap / Language Packs) + content
+  pane. **Appearance** = theme (Dark; presets later) + live px steppers for `ui_font_size` /
+  `editor_font_size` / `tree_row_height` (`theme::update(|t| …)` mutates the RwLock-backed live
+  theme + saves + repaints, no restart — see `kyde-theme`). **Keymap** = preset picker
+  (`choose_preset`). **Language Packs** = `render_plugins_body`. Quit = `Quit` → `cx.quit()`.
 - **Shell-command checkbox** (`render_shell_command_row`, shown in the picker on both first
   run and reopened Settings). Ticked + Continue → `shellcmd::install()` symlinks our
   `current_exe()` into `~/.local/bin/ky` (or `kyde` if `ky` is taken), VSCode-style — no
