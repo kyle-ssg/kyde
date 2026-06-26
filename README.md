@@ -35,7 +35,12 @@ Built from scratch on gpui, borrowing patterns from existing editors but not the
 
 ## Theme
 
-A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.json`.
+A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.json`. A
+built-in **Kyde Light** palette ships too — switch in Settings.
+
+<p align="center">
+  <img src="assets/screenshots/light.png" alt="Kyde Light theme — the same side-by-side diff rendered in the built-in light palette" width="900">
+</p>
 
 ## Features
 

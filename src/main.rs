@@ -8,6 +8,12 @@
 // ── core shell ──
 mod app;
 mod divider;
+// Always compiled (so its unit tests run in any feature set), but only *used* behind the
+// `terminal` feature — allow dead code when that's off.
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+mod term_panel;
+#[cfg(feature = "terminal")]
+use term_panel::{TermPanel, ToggleAction};
 mod render;
 pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
 // Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
@@ -812,22 +818,13 @@ struct Kyde {
     /// One `TerminalView` entity per tab, left→right in open order.
     #[cfg(feature = "terminal")]
     term_tabs: Vec<Entity<terminal::TerminalView>>,
-    /// Active terminal tab index into `term_tabs`.
+    /// Control state of the panel — open / active / maximized / focus-pending. The pure,
+    /// unit-tested state machine (open/close/toggle/focus); see `src/term_panel.rs`.
     #[cfg(feature = "terminal")]
-    term_active: usize,
-    /// Whether the bottom terminal panel is visible.
-    #[cfg(feature = "terminal")]
-    term_open: bool,
+    term_panel: TermPanel,
     /// Height (px) of the terminal panel, drag-resizable via its top divider.
     #[cfg(feature = "terminal")]
     term_height: f32,
-    /// When true the terminal fills the whole right column (tree + editor hidden).
-    #[cfg(feature = "terminal")]
-    term_maximized: bool,
-    /// Set when a tab closes (e.g. ^D) so the next paint re-focuses the new active tab —
-    /// the close happens in a window-less subscription, so focus is deferred to `render`.
-    #[cfg(feature = "terminal")]
-    term_focus_pending: bool,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -1617,6 +1614,24 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.select_with(i, Some(cx));
             }
         }
+        // Same side-by-side diff as `git-diff`, but with the "Kyde Light" palette applied first
+        // so the README can show the light theme. Switches the live theme before any render.
+        "light" => {
+            theme::apply_palette(theme::Theme::light());
+            set_packs(view, &["rust"]);
+            if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                view.open_project(PathBuf::from(repo), cx);
+            }
+            view.enter_commit(cx);
+            let pick = view
+                .files
+                .iter()
+                .position(|f| f.path.as_path() == std::path::Path::new("README.md"))
+                .or(if view.files.is_empty() { None } else { Some(0) });
+            if let Some(i) = pick {
+                view.select_with(i, Some(cx));
+            }
+        }
         // Browse a Rust file with the pack uninstalled → "Install Rust support?" banner.
         "plugins" => {
             set_packs(view, &[]);
@@ -1687,7 +1702,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         "terminal" => {
             set_packs(view, &["rust"]);
             view.open_file(PathBuf::from("src/terminal.rs"), cx);
-            view.term_open = true;
+            view.term_panel.open = true;
             view.new_terminal_tab(cx);
             if let Some(t) = view.term_tabs.last() {
                 t.read(cx).send_input("git status && ls src\n");

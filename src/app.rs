@@ -376,17 +376,12 @@ impl Kyde {
             history_commit_frac: 2.0 / 3.0,
             #[cfg(feature = "terminal")]
             term_tabs: Vec::new(),
+            // Starts closed; the persisted "maximized" preference is restored when it opens
+            // (act_toggle_terminal), so the default (all-false) is correct here.
             #[cfg(feature = "terminal")]
-            term_active: 0,
-            #[cfg(feature = "terminal")]
-            term_open: false,
+            term_panel: TermPanel::default(),
             #[cfg(feature = "terminal")]
             term_height: 260.0,
-            // Restore the user's persisted "maximized terminal" preference.
-            #[cfg(feature = "terminal")]
-            term_maximized: crate::load_ui_bool("terminal_maximized", false),
-            #[cfg(feature = "terminal")]
-            term_focus_pending: false,
         };
         me.refresh();
         // Background: ask GitHub if there's a newer release, then surface the update banner.

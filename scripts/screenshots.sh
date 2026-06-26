@@ -195,7 +195,7 @@ shoot() {
 # `fps` is intentionally NOT in the automated set — every other shot hides the FPS counter,
 # and the dedicated `fps` shot (the only one that still shows it) is run manually on demand:
 #   ./scripts/screenshots.sh fps
-declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -218,6 +218,7 @@ shoot_until() {
 run_one() {
     case "$1" in
         git-diff)         shoot_until git-diff         git-diff.png         window KYDE_SHOT_REPO="$DIFF_REPO" ;;
+        light)            shoot_until light            light.png            window KYDE_SHOT_REPO="$DIFF_REPO" ;;
         plugins)          shoot_until plugins          plugins.png          window ;;
         plugins-window)   shoot_until plugins-window   plugins-window.png   region ;;
         markdown-support) shoot_until markdown-support markdown-support.png window ;;

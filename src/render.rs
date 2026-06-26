@@ -34,9 +34,9 @@ impl Render for Kyde {
         // A terminal tab closed last frame (^D / × on the focused tab) → focus the new active
         // tab now that it's in the window tree, so typing works without a mouse click.
         #[cfg(feature = "terminal")]
-        if self.term_focus_pending {
-            self.term_focus_pending = false;
-            if self.term_open {
+        if self.term_panel.focus_pending {
+            self.term_panel.focus_pending = false;
+            if self.term_panel.open {
                 self.focus_active_terminal(window, cx);
             } else {
                 // Last tab closed → panel hid; return focus to the app root so editor/tree
@@ -103,7 +103,7 @@ impl Render for Kyde {
                         // restores the layout so the chosen mode is actually visible.
                         #[cfg(feature = "terminal")]
                         {
-                            this.term_maximized = false;
+                            this.term_panel.maximized = false;
                         }
                         match to {
                             Mode::Commit => this.enter_commit(cx),
@@ -127,7 +127,7 @@ impl Render for Kyde {
             .h(px(40.0))
             .pl(px(84.0))
             .gap_2()
-            .bg(theme::get().frame_bg)
+            .bg(theme::get().titlebar_bg)
             // With ≤1 project open there's no tab strip, so show the project title (chip +
             // name + chevron) right of the traffic lights.
             .when(self.open_projects.len() <= 1, |d| {
@@ -192,7 +192,7 @@ impl Render for Kyde {
         #[cfg(feature = "terminal")]
         let rail = if self.repo_root.is_some() {
             let t = theme::get();
-            let active = self.term_open;
+            let active = self.term_panel.open;
             rail.child(div().flex_1().min_h_0()).child(
                 div()
                     .id("rail-terminal")
@@ -258,12 +258,12 @@ impl Render for Kyde {
             .relative();
         // Maximized terminal hides the body (tree + editor) and fills the whole right column.
         #[cfg(feature = "terminal")]
-        let term_max = self.term_open && self.repo_root.is_some() && self.term_maximized;
+        let term_max = self.term_panel.open && self.repo_root.is_some() && self.term_panel.maximized;
         #[cfg(not(feature = "terminal"))]
         let term_max = false;
         let right_col = right_col.when(!term_max, |c| c.child(body));
         #[cfg(feature = "terminal")]
-        let right_col = if self.term_open && self.repo_root.is_some() {
+        let right_col = if self.term_panel.open && self.repo_root.is_some() {
             right_col.child(self.render_terminal_panel(ui, cx))
         } else {
             right_col
@@ -434,7 +434,9 @@ impl Render for Kyde {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .bg(gpui::rgba(0x000000CC))
+                    .bg(t.panel_bg)
+                    .border_1()
+                    .border_color(t.divider)
                     .text_color(t.text)
                     .font_family(theme::font::FAMILY)
                     .text_size(px(11.0))

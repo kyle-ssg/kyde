@@ -173,7 +173,7 @@ impl Default for Theme {
 
             editor_font_size: 14.0,
             ui_font_size: 13.0,
-            tree_row_height: 30.0,
+            tree_row_height: 26.0,
         }
     }
 }
@@ -238,7 +238,7 @@ impl Theme {
             // Sizes inherited from the dark default; callers preserve the user's live values.
             editor_font_size: 14.0,
             ui_font_size: 13.0,
-            tree_row_height: 30.0,
+            tree_row_height: 26.0,
         }
     }
 
