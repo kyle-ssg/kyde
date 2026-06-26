@@ -235,18 +235,53 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.term_open = !self.term_open;
-        if self.term_open {
+        if !self.term_open {
+            // Closed → open, spawn a tab if needed, restore maximized state, focus it.
+            self.term_open = true;
             if self.term_tabs.is_empty() {
                 self.new_terminal_tab(cx);
             }
-            // Open in the user's persisted maximized state.
             self.term_maximized = crate::load_ui_bool("terminal_maximized", false);
             self.focus_active_terminal(window, cx);
-        } else {
+        } else if self.terminal_is_focused(window, cx) {
+            // Open AND focused → hide it, returning focus to the app root so the editor /
+            // tree shortcuts (backspace = delete, etc.) work again.
+            self.term_open = false;
             self.term_maximized = false;
+            window.focus(&self.focus_handle);
+        } else {
+            // Open but focus is elsewhere (editor/tree) → just focus the terminal. This is the
+            // VSCode behaviour: ⌃` brings focus back to a visible terminal instead of hiding it.
+            self.focus_active_terminal(window, cx);
         }
         cx.notify();
+    }
+
+    /// Whether the active terminal tab currently owns keyboard focus.
+    pub(crate) fn terminal_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.term_tabs
+            .get(self.term_active)
+            .is_some_and(|v| v.read(cx).handle().is_focused(window))
+    }
+
+    /// ⌘W while the terminal is focused: close the active tab (iTerm-style — unconditional).
+    /// Scoped to the "Terminal" key context so it shadows the editor-tab ⌘W (`CloseTab`).
+    pub(crate) fn act_close_terminal_tab(
+        &mut self,
+        _: &crate::CloseTerminalTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.term_open && !self.term_tabs.is_empty() {
+            self.close_terminal_tab(self.term_active, cx);
+            // Keep focus on the terminal if any tab remains; otherwise the panel hid itself, so
+            // hand focus back to the app root.
+            if self.term_open {
+                self.focus_active_terminal(window, cx);
+            } else {
+                window.focus(&self.focus_handle);
+            }
+        }
     }
 
     /// ⌘T while the terminal is focused: open a fresh tab (panel already open) and focus it.
@@ -296,6 +331,11 @@ impl Kyde {
         } else if self.term_active >= self.term_tabs.len() {
             self.term_active = self.term_tabs.len() - 1;
         }
+        // Closing the focused tab (mouse × or ^D `exit`) leaves focus orphaned on the destroyed
+        // widget, so typing needs a mouse click. Flag the next paint to re-home focus — onto the
+        // new active tab if one remains, else the app root. The ^D path runs in a window-less
+        // subscription, so we can't focus here.
+        self.term_focus_pending = true;
         cx.notify();
     }
 

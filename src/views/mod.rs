@@ -15,6 +15,7 @@ mod onboarding;
 mod projects_view;
 mod push;
 mod rollback;
+mod settings;
 mod tabs;
 #[cfg(feature = "terminal")]
 mod terminal_panel;

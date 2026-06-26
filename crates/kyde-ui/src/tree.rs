@@ -107,7 +107,7 @@ pub fn item<V: 'static>(
         .flex()
         .flex_row()
         .items_center()
-        .h(px(38.0))
+        .h(px(theme::get().tree_row_height))
         .text_size(px(theme::get().ui_font_size + 3.0))
         .flex_none()
         .mx(px(6.0))

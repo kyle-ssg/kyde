@@ -307,6 +307,8 @@ impl Kyde {
             plugins_query,
             fonts_win: None,
             clear_data_win: None,
+            settings_win: None,
+            settings_section: SettingsSection::Appearance,
             font_preview: None,
             welcome_frame: 0,
             onboarding_choice: keymap_preset,
@@ -383,6 +385,8 @@ impl Kyde {
             // Restore the user's persisted "maximized terminal" preference.
             #[cfg(feature = "terminal")]
             term_maximized: crate::load_ui_bool("terminal_maximized", false),
+            #[cfg(feature = "terminal")]
+            term_focus_pending: false,
         };
         me.refresh();
         // Background: ask GitHub if there's a newer release, then surface the update banner.

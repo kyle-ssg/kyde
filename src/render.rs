@@ -31,6 +31,20 @@ impl Render for Kyde {
         // A project is open → re-arm the landing auto-focus for next time it's shown.
         self.projects_search_focused = false;
 
+        // A terminal tab closed last frame (^D / × on the focused tab) → focus the new active
+        // tab now that it's in the window tree, so typing works without a mouse click.
+        #[cfg(feature = "terminal")]
+        if self.term_focus_pending {
+            self.term_focus_pending = false;
+            if self.term_open {
+                self.focus_active_terminal(window, cx);
+            } else {
+                // Last tab closed → panel hid; return focus to the app root so editor/tree
+                // shortcuts work without a click.
+                window.focus(&self.focus_handle);
+            }
+        }
+
         // FPS monitor: drive a continuous repaint so the number reflects the real frame cost
         // (catches drops), and measure the gap between renders.
         if self.show_fps {
@@ -84,13 +98,21 @@ impl Render for Kyde {
                 }))
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| match to {
-                        Mode::Commit => this.enter_commit(cx),
-                        Mode::History => this.enter_history(cx),
-                        Mode::Browse => {
-                            this.mode = Mode::Browse;
-                            this.diff_view_open = false;
-                            cx.notify();
+                    cx.listener(move |this, _e, _w, cx| {
+                        // A maximized terminal covers the whole right column; switching view
+                        // restores the layout so the chosen mode is actually visible.
+                        #[cfg(feature = "terminal")]
+                        {
+                            this.term_maximized = false;
+                        }
+                        match to {
+                            Mode::Commit => this.enter_commit(cx),
+                            Mode::History => this.enter_history(cx),
+                            Mode::Browse => {
+                                this.mode = Mode::Browse;
+                                this.diff_view_open = false;
+                                cx.notify();
+                            }
                         }
                     }),
                 )
@@ -289,7 +311,8 @@ impl Render for Kyde {
         {
             root = root
                 .on_action(cx.listener(Self::act_toggle_terminal))
-                .on_action(cx.listener(Self::act_new_terminal_tab));
+                .on_action(cx.listener(Self::act_new_terminal_tab))
+                .on_action(cx.listener(Self::act_close_terminal_tab));
         }
         let root = root
             .on_mouse_move(

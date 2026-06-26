@@ -422,6 +422,7 @@ impl Kyde {
             ModalKind::Plugins => &mut self.plugins_win,
             ModalKind::Fonts => &mut self.fonts_win,
             ModalKind::ClearData => &mut self.clear_data_win,
+            ModalKind::Settings => &mut self.settings_win,
         }
     }
 

@@ -80,6 +80,7 @@ actions!(
         EscapeKey,
         ToggleTerminal,
         NewTerminalTab,
+        CloseTerminalTab,
         ClearTerminal,
         TerminalConsume,
         DeleteFile,
@@ -228,6 +229,9 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.bind_keys([
         KeyBinding::new("ctrl-`", ToggleTerminal, None),
         KeyBinding::new("cmd-t", NewTerminalTab, Some("Terminal")),
+        // ⌘W closes the active terminal tab when the terminal is focused (iTerm-style);
+        // scoped to "Terminal" so it shadows the editor-tab ⌘W (`CloseTab`).
+        KeyBinding::new("cmd-w", CloseTerminalTab, Some("Terminal")),
         // ⌘K clears the terminal; scoped to its context so it overrides the commit binding.
         KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
         // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). The
@@ -658,6 +662,10 @@ struct Kyde {
     fonts_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Data & Restart" confirmation — a native modal window (native-menu action).
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Settings — a native modal window with a category sidebar (Appearance/Keymap/…).
+    settings_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Which Settings category the sidebar has selected.
+    settings_section: SettingsSection,
     /// Cached `(path, registered family name)` for the open font file's preview.
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
@@ -810,6 +818,10 @@ struct Kyde {
     /// When true the terminal fills the whole right column (tree + editor hidden).
     #[cfg(feature = "terminal")]
     term_maximized: bool,
+    /// Set when a tab closes (e.g. ^D) so the next paint re-focuses the new active tab —
+    /// the close happens in a window-less subscription, so focus is deferred to `render`.
+    #[cfg(feature = "terminal")]
+    term_focus_pending: bool,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -823,6 +835,25 @@ enum ModalKind {
     Plugins,
     Fonts,
     ClearData,
+    Settings,
+}
+
+/// Which category the Settings window's sidebar has selected. Drives `render_settings_body`'s
+/// content pane.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Appearance,
+    Keymap,
+    LanguagePacks,
+}
+
+impl SettingsSection {
+    /// Sidebar order + labels.
+    pub(crate) const ALL: &'static [(SettingsSection, &'static str)] = &[
+        (SettingsSection::Appearance, "Appearance"),
+        (SettingsSection::Keymap, "Keymap"),
+        (SettingsSection::LanguagePacks, "Language Packs"),
+    ];
 }
 
 /// A separate native OS window hosting one of Kyde's modals (Rollback / Push / Diff). It holds
@@ -878,6 +909,7 @@ impl Render for ModalWindow {
             ModalKind::Plugins => k.render_plugins_body(kcx),
             ModalKind::Fonts => k.render_fonts_body(kcx),
             ModalKind::ClearData => k.render_clear_data_body(kcx),
+            ModalKind::Settings => k.render_settings_body(kcx),
         });
         div()
             .track_focus(&self.focus)

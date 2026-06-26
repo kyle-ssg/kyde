@@ -238,10 +238,10 @@ impl Kyde {
     }
 
     // ── keymap / onboarding ───────────────────────────────────────
+    /// ⌘, / the native Settings… menu → open the Settings window. (First-run keymap selection
+    /// still uses the forced onboarding overlay, opened from `new()`, not this path.)
     pub(crate) fn open_keymap(&mut self, _: &OpenKeymap, _: &mut Window, cx: &mut Context<Self>) {
-        self.onboarding_choice = self.keymap.preset;
-        self.onboarding_open = true;
-        cx.notify();
+        self.open_settings(cx);
     }
 
     pub(crate) fn choose_preset(&mut self, preset: Preset, cx: &mut Context<Self>) {
