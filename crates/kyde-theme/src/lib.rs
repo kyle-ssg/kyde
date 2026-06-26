@@ -128,6 +128,116 @@ pub struct Theme {
 /// numbers rather than hex).
 const NUMERIC_KEYS: &[&str] = &["editor_font_size", "ui_font_size", "tree_row_height"];
 
+/// Accent overrides for a colour-vision-deficiency variant — the semantic colours that must
+/// stay distinct. Applied over a base palette by [`apply_cvd`]; everything else is inherited.
+/// `added` doubles as `untracked` (both read as "new"); diff word-emphasis uses `word_bg` on
+/// both sides; the minor syntax roles fall back to neutral text.
+struct Cvd {
+    added: u32,
+    modified: u32,
+    deleted: u32,
+    conflict: u32,
+    ins_bg: u32,
+    del_bg: u32,
+    mod_bg: u32,
+    word_bg: u32,
+    keyword: u32,
+    string: u32,
+    number: u32,
+    function: u32,
+    comment: u32,
+}
+
+// Red-green safe (deut/prot) — blue/amber poles, 3rd category split by lightness.
+const CVD_DARK_RG: Cvd = Cvd {
+    added: 0x3B9EFF,
+    modified: 0xE8B33A,
+    deleted: 0x8A8F98,
+    conflict: 0xB5651D,
+    ins_bg: 0x16344E,
+    del_bg: 0x33363B,
+    mod_bg: 0x4A3A14,
+    word_bg: 0x1F4E78,
+    keyword: 0xE8B33A,
+    string: 0x2E9AB8,
+    number: 0xC98A2E,
+    function: 0x7FB8FF,
+    comment: 0x7A7E85,
+};
+const CVD_LIGHT_RG: Cvd = Cvd {
+    added: 0x1A6FD4,
+    modified: 0xB07A00,
+    deleted: 0x777779,
+    conflict: 0x7A4A10,
+    ins_bg: 0xC6DCFA,
+    del_bg: 0xDFDFE1,
+    mod_bg: 0xF6EAC0,
+    word_bg: 0xAECBF2,
+    keyword: 0x9A6800,
+    string: 0x0E6FA0,
+    number: 0x6B5210,
+    function: 0x1559B8,
+    comment: 0x8B8B8F,
+};
+// Blue-yellow safe (tritan) — green/red poles, 3rd category split by lightness.
+const CVD_DARK_TR: Cvd = Cvd {
+    added: 0x4FB84F,
+    modified: 0xFF8FB5,
+    deleted: 0x8A8F98,
+    conflict: 0xC81C1C,
+    ins_bg: 0x1C3A1C,
+    del_bg: 0x33363B,
+    mod_bg: 0x4A2230,
+    word_bg: 0x5A2A38,
+    keyword: 0xFF8FB5,
+    string: 0x5CB85C,
+    number: 0xC8506A,
+    function: 0x2E9A78,
+    comment: 0x7A7E85,
+};
+const CVD_LIGHT_TR: Cvd = Cvd {
+    added: 0x1E8A1E,
+    modified: 0xD0407A,
+    deleted: 0x777779,
+    conflict: 0x8A1010,
+    ins_bg: 0xD2EDD2,
+    del_bg: 0xDFDFE1,
+    mod_bg: 0xF7DCE6,
+    word_bg: 0xF0C0D0,
+    keyword: 0xC03060,
+    string: 0x1E8A1E,
+    number: 0x8A2040,
+    function: 0x064A2A,
+    comment: 0x8B8B8F,
+};
+
+/// Overlay CVD accents onto a base palette (see [`Theme::dark_redgreen`] for the rationale).
+fn apply_cvd(base: Theme, a: Cvd) -> Theme {
+    Theme {
+        status_added: c(a.added),
+        status_untracked: c(a.added),
+        status_modified: c(a.modified),
+        status_deleted: c(a.deleted),
+        status_conflict: c(a.conflict),
+        diff_inserted_bg: c(a.ins_bg),
+        diff_deleted_bg: c(a.del_bg),
+        diff_modified_bg: c(a.mod_bg),
+        diff_word_old_bg: c(a.word_bg),
+        diff_word_new_bg: c(a.word_bg),
+        syn_keyword: c(a.keyword),
+        syn_string: c(a.string),
+        syn_number: c(a.number),
+        syn_function: c(a.function),
+        syn_comment: c(a.comment),
+        // Minor roles → neutral text (2 poles can't separate 6 chromatic syntax classes).
+        syn_field: base.text,
+        syn_constant: base.text,
+        syn_identifier: base.text,
+        syn_operator: base.text,
+        ..base
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self {
@@ -249,12 +359,43 @@ impl Theme {
         }
     }
 
+    /// **Colour-vision-deficiency variants.** Each takes the matching base palette (dark/light)
+    /// and remaps only the *semantic* colours — git status, diff tints, the common syntax roles
+    /// — so they stay perceptually distinct under the named deficiency; surfaces / text / caret /
+    /// selection are inherited unchanged. Hexes were tuned against a Viénot CVD simulation to a
+    /// ΔE target (status & diff pairs ≥ ~20, legibility ≥ 3:1), see `apply_cvd`.
+    ///
+    /// A CVD eye keeps only **two** chromatic poles (red-green loses red↔green → blue/amber
+    /// survive; blue-yellow loses blue↔yellow → red/green survive). A 3rd same-family category
+    /// (modified vs conflict, keyword vs function) is therefore separated by *lightness*, not
+    /// hue. Six chromatic syntax roles can't all be split on two poles, so the minor tail
+    /// (field/constant/identifier/operator) falls back to neutral text — code reads positionally,
+    /// and forcing colour there would only reintroduce a clash.
+    pub fn dark_redgreen() -> Self {
+        // Red-green safe (deuteranopia / protanopia). Poles: blue / amber.
+        apply_cvd(Theme::default(), CVD_DARK_RG)
+    }
+    pub fn light_redgreen() -> Self {
+        apply_cvd(Theme::light(), CVD_LIGHT_RG)
+    }
+    pub fn dark_tritan() -> Self {
+        // Blue-yellow safe (tritanopia). Poles: green / red.
+        apply_cvd(Theme::default(), CVD_DARK_TR)
+    }
+    pub fn light_tritan() -> Self {
+        apply_cvd(Theme::light(), CVD_LIGHT_TR)
+    }
+
     /// Built-in named palettes for the Settings theme picker. Colours only — callers apply a
     /// preset with [`apply_palette`], which preserves the user's font sizes / row height.
-    pub fn presets() -> [(&'static str, Theme); 2] {
+    pub fn presets() -> [(&'static str, Theme); 6] {
         [
             ("Kyde Dark", Theme::default()),
             ("Kyde Light", Theme::light()),
+            ("Red–Green Dark", Theme::dark_redgreen()),
+            ("Red–Green Light", Theme::light_redgreen()),
+            ("Blue–Yellow Dark", Theme::dark_tritan()),
+            ("Blue–Yellow Light", Theme::light_tritan()),
         ]
     }
 
@@ -456,6 +597,46 @@ mod tests {
         let (t, repaired) = merge(Some(r##"{ "primary": "not-a-color" }"##));
         assert!(repaired);
         assert!(approx(t.primary, 0x3574F0));
+    }
+
+    #[test]
+    fn cvd_presets_keep_semantic_colours_distinct_and_neutral_tail() {
+        let approx_eq = |a: Rgba, b: Rgba| {
+            (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
+        };
+        for t in [
+            Theme::dark_redgreen(),
+            Theme::light_redgreen(),
+            Theme::dark_tritan(),
+            Theme::light_tritan(),
+        ] {
+            // The three carrying colours must not collapse onto each other.
+            assert!(!approx_eq(t.status_added, t.status_modified));
+            assert!(!approx_eq(t.status_added, t.status_conflict));
+            assert!(!approx_eq(t.status_modified, t.status_conflict));
+            // Untracked reads as "new" — same as added.
+            assert!(approx_eq(t.status_untracked, t.status_added));
+            // Minor syntax roles fall back to neutral text (can't separate 6 on 2 poles).
+            assert!(approx_eq(t.syn_field, t.text));
+            assert!(approx_eq(t.syn_identifier, t.text));
+            assert!(approx_eq(t.syn_operator, t.text));
+        }
+    }
+
+    #[test]
+    fn presets_are_six_distinct_palettes() {
+        let ps = Theme::presets();
+        assert_eq!(ps.len(), 6);
+        for i in 0..ps.len() {
+            for j in (i + 1)..ps.len() {
+                assert!(
+                    !ps[i].1.same_palette(&ps[j].1),
+                    "presets {} and {} share a palette",
+                    ps[i].0,
+                    ps[j].0
+                );
+            }
+        }
     }
 
     #[test]

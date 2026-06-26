@@ -94,7 +94,7 @@ impl Kyde {
                             .text_color(t.secondary_text)
                             .child("Theme"),
                     )
-                    .child(div().flex().flex_row().gap_2().children(
+                    .child(div().flex().flex_row().flex_wrap().gap_2().children(
                         theme::Theme::presets().into_iter().map(|(label, palette)| {
                             let selected = t.same_palette(&palette);
                             div()

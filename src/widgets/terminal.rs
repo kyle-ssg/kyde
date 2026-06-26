@@ -284,13 +284,25 @@ impl TerminalView {
 
     /// Clear the terminal (⌘K): drop the scrollback buffer, then send the shell Ctrl-L so it
     /// wipes the visible screen and redraws its prompt at the top — matching iTerm's "clear".
-    fn clear(&mut self, cx: &mut Context<Self>) {
+    /// Clear the scrollback + screen (iTerm "Clear Buffer"): drop history, scroll to the live
+    /// region, and send Ctrl-L so the shell redraws a fresh prompt (keeping any typed input).
+    fn clear_screen(&mut self, cx: &mut Context<Self>) {
         {
             let mut t = self.term.lock();
             t.grid_mut().clear_history();
             t.scroll_display(Scroll::Bottom);
         }
         self.write(b"\x0c".to_vec());
+        cx.notify();
+    }
+
+    /// Clear the current (unsubmitted) command-line input — the shell's "kill whole line".
+    /// Sends Ctrl-E (→ end of line) then Ctrl-U (kill line) so the entire input is wiped in
+    /// both zsh (Ctrl-U = kill-whole-line) and bash (Ctrl-U = kill-to-start, hence Ctrl-E
+    /// first), regardless of cursor position. A no-op at an empty prompt. The shell echoes the
+    /// erase, so no manual repaint of the grid is needed.
+    fn clear_input(&mut self, cx: &mut Context<Self>) {
+        self.write(vec![0x05, 0x15]); // Ctrl-E, Ctrl-U
         cx.notify();
     }
 
@@ -453,8 +465,9 @@ impl Render for TerminalView {
             .relative()
             .size_full()
             .bg(theme::get().main_bg)
-            // ⌘K clears the terminal — overrides the global commit binding in this context.
-            .on_action(cx.listener(|this, _: &crate::ClearTerminal, _w, cx| this.clear(cx)))
+            // ⌘K clears the current (unsubmitted) input line — overrides the global commit
+            // binding in this context.
+            .on_action(cx.listener(|this, _: &crate::ClearTerminal, _w, cx| this.clear_input(cx)))
             // Backspace / Escape are also app shortcuts (DeleteFile / EscapeKey). gpui dispatches
             // binding actions before on_key_down and consumes the key, so we relay the PTY byte
             // here rather than let it fall through to the app action (which deleted the selected
@@ -584,12 +597,12 @@ impl TerminalView {
                             this.paste(cx);
                         }),
                     ))
-                    .child(item("Clear").on_mouse_down(
+                    .child(item("Clear Screen").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
                             cx.stop_propagation();
                             this.menu_at = None;
-                            this.clear(cx);
+                            this.clear_screen(cx);
                         }),
                     ))
                     .child(item("Close").on_mouse_down(
