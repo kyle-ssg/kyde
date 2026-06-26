@@ -6,7 +6,11 @@ use crate::*;
 impl Kyde {
     /// Left column of the Push tab: a flat list of the files a push would send (click → diff)
     /// + a footer with the Push button. No checkboxes — a push is all-or-nothing.
-    pub(crate) fn render_push_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_push_left(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let n = self.push_files.len();
         let rows: Vec<gpui::AnyElement> = self
@@ -421,5 +425,4 @@ impl Kyde {
         })
         .detach();
     }
-
 }

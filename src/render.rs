@@ -405,24 +405,6 @@ impl Render for Kyde {
 }
 
 impl Kyde {
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     /// Width of the editor island = window − rail − body right-pad − (tree + divider, or the
     /// collapsed strip + gap). Used to size the browse editor and the markdown split.
     pub(crate) fn editor_island_w(&self, window: &Window) -> f32 {
@@ -591,22 +573,6 @@ impl Kyde {
             .children(h_gutter)
             .into_any_element()
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     /// Right-click menu, positioned at the cursor. Transparent backdrop closes it.
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -908,13 +874,4 @@ impl Kyde {
             )
             .into_any_element()
     }
-
-
-
-
-
-
-
-
-
 }

@@ -9,7 +9,7 @@
 /// `f32::clamp` PANICS when `min > max`, and `track - 2*end` drops below 28 once the window is
 /// shrunk past ~44px — so resizing tiny aborted the process (SIGABRT). Pinning the min under
 /// the max here makes it impossible. Pure so it can be unit-tested (below).
-pub(crate) fn scrollbar_thumb(track: f32, max: f32, off: f32, end: f32) -> (f32, f32) {
+pub fn scrollbar_thumb(track: f32, max: f32, off: f32, end: f32) -> (f32, f32) {
     let hi = (track - 2.0 * end).max(8.0);
     let len = if max > 0.0 {
         (track * track / (track + max)).clamp(28.0_f32.min(hi), hi)

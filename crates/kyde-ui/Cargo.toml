@@ -1,0 +1,10 @@
+[package]
+name = "kyde-ui"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Kyde's reusable, app-agnostic UI toolkit (gpui widgets): buttons, tabs, badges, checkboxes, the file-tree row, etc."
+
+[dependencies]
+gpui = "0.2"
+kyde-theme = { path = "../kyde-theme" }

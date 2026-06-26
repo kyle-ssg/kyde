@@ -6,7 +6,11 @@ use crate::*;
 impl Kyde {
     /// Find / replace bar shown atop the editor (cmd-f / cmd-r). Live-highlights matches;
     /// enter / cmd-g cycle, the buttons replace.
-    pub(crate) fn render_find_bar(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_find_bar(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let count = self.find_matches.len();
         let label = if count == 0 {
@@ -292,5 +296,4 @@ impl Kyde {
         });
         self.recompute_find(cx);
     }
-
 }

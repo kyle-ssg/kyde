@@ -818,5 +818,4 @@ impl Kyde {
         self.close_modal_window(ModalKind::Rollback, cx);
         cx.notify();
     }
-
 }

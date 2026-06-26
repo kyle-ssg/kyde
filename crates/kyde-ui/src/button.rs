@@ -1,9 +1,11 @@
 //! Primary / secondary buttons. Caller chains `.on_mouse_down(...)`. See the "Buttons" UI
 //! principle in CLAUDE.md.
-use crate::*;
+use gpui::prelude::*;
+use gpui::{div, SharedString};
+use kyde_theme as theme;
 
 /// Standard **primary** button (accent fill + primary text).
-pub(crate) fn btn_primary(
+pub fn btn_primary(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
@@ -13,7 +15,7 @@ pub(crate) fn btn_primary(
 /// `btn_primary` with an explicit `disabled` state. gpui allows only ONE `.hover()` per
 /// element (a second one panics: "hover style already set"), so the disabled look — dimmed,
 /// and *staying* dimmed on hover — must be baked into the single hover here.
-pub(crate) fn btn_primary_state(
+pub fn btn_primary_state(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     disabled: bool,
@@ -35,7 +37,7 @@ pub(crate) fn btn_primary_state(
 }
 
 /// Standard **secondary** button (transparent fill + divider border + secondary text).
-pub(crate) fn btn_secondary(
+pub fn btn_secondary(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {

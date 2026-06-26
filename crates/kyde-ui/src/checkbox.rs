@@ -1,9 +1,11 @@
 //! Checkbox box primitive (the square tick used in commit/rollback trees).
-use crate::*;
+use gpui::prelude::*;
+use gpui::{div, px, svg};
+use kyde_theme as theme;
 
 /// The app's standard checkbox: a small rounded square, filled with `check.svg` when ticked.
 /// Used by the tree rows and the rollback modal — never an emoji glyph.
-pub(crate) fn checkbox_box(checked: bool) -> gpui::Div {
+pub fn checkbox_box(checked: bool) -> gpui::Div {
     let t = theme::get();
     let b = div()
         .flex_none()

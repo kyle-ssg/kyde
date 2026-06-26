@@ -2,10 +2,13 @@
 //! trees. Kyde-agnostic: generic over the hosting view `V`, so it knows nothing about app
 //! state. The caller passes the row data + three handlers (activate / checkbox / context);
 //! `suppress_hover` lets the caller mute the hover tint (e.g. mid divider-drag).
-use crate::*;
+use crate::{badge_inner, file_badge};
+use gpui::prelude::*;
+use gpui::{div, px, svg, Context, MouseButton, Pixels, SharedString, Window};
+use kyde_theme as theme;
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn item<V: 'static>(
+pub fn item<V: 'static>(
     cx: &mut Context<V>,
     suppress_hover: bool,
     path: &std::path::Path,
@@ -112,7 +115,9 @@ pub(crate) fn item<V: 'static>(
         .rounded_md()
         .cursor_pointer()
         .when(selected, |d| d.bg(t.selected_bg))
-        .when(!selected && !suppress_hover, |d| d.hover(|d| d.bg(t.bg_mid)))
+        .when(!selected && !suppress_hover, |d| {
+            d.hover(|d| d.bg(t.bg_mid))
+        })
         .child(content)
         .on_mouse_down(
             MouseButton::Left,

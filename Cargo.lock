@@ -2903,6 +2903,7 @@ dependencies = [
  "kyde-syntax",
  "kyde-theme",
  "kyde-tree",
+ "kyde-ui",
  "kyde-update",
  "objc2",
  "objc2-app-kit",
@@ -2980,6 +2981,14 @@ dependencies = [
 [[package]]
 name = "kyde-tree"
 version = "0.1.0"
+
+[[package]]
+name = "kyde-ui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "kyde-theme",
+]
 
 [[package]]
 name = "kyde-update"

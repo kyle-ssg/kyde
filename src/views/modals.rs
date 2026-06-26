@@ -623,7 +623,6 @@ impl Kyde {
         }
         cx.notify();
     }
-
 }
 
 // ── plugin-pack metadata (file extension + approx compiled size) ──

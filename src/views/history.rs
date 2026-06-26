@@ -852,5 +852,4 @@ impl Kyde {
         self.load_diff_panes(file.path.clone(), before, after, lang, !editable, cx);
         cx.notify();
     }
-
 }

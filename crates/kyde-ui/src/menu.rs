@@ -2,7 +2,7 @@
 
 /// Icon path for a context-menu row. Tolerates a leading "✓ " and trailing "…". `None` → no
 /// icon (still reserves the slot so labels line up).
-pub(crate) fn menu_icon(label: &str) -> Option<&'static str> {
+pub fn menu_icon(label: &str) -> Option<&'static str> {
     let l = label.trim_start_matches("✓ ").trim_end_matches('…').trim();
     Some(match l {
         "Commit" => "icons/git-commit.svg",

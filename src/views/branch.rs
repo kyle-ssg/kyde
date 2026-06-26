@@ -5,7 +5,11 @@ use crate::*;
 
 impl Kyde {
     /// Bottom status bar — currently just the branch switcher, anchored bottom-right.
-    pub(crate) fn render_status_bar(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_status_bar(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         // All bottom-bar text is this muted grey; icons keep their own colours.
         let bar_text = gpui::rgb(0x808289);
@@ -259,6 +263,12 @@ impl Kyde {
             .cloned()
             .collect();
         all.sort_by_key(|b| b.to_lowercase());
+        let remotes: Vec<String> = self
+            .branch_remotes
+            .iter()
+            .filter(|b| matches(b))
+            .cloned()
+            .collect();
 
         let nb_label = if ql.is_empty() {
             "+ New Branch".to_string()
@@ -327,7 +337,13 @@ impl Kyde {
 
         // Branch tree: Recent + Local sections as expandable roots; `/` → folders.
         // While searching, force everything open so matches are visible.
-        let rows = branch_rows(&recent, &all, &self.branch_expanded, !ql.is_empty());
+        let rows = branch_rows(
+            &recent,
+            &all,
+            &remotes,
+            &self.branch_expanded,
+            !ql.is_empty(),
+        );
         let tree_rows = self.branch_tree(rows, cx);
         let list = div()
             .id("branch-list")
@@ -476,6 +492,20 @@ impl Kyde {
                 .repo()
                 .and_then(|r| r.branches().ok())
                 .unwrap_or_default();
+            // Remote-tracking branches with no local head yet (e.g. just fetched). Keyed by
+            // short name (drop the remote prefix) so checkout DWIMs a local tracking branch;
+            // skip any that already exist locally and dedupe across remotes (recency order).
+            let local: std::collections::HashSet<&str> =
+                self.branch_list.iter().map(String::as_str).collect();
+            let mut seen = std::collections::HashSet::new();
+            self.branch_remotes = self
+                .repo()
+                .and_then(|r| r.remote_branches().ok())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|r| r.split_once('/').map(|(_, s)| s.to_string()))
+                .filter(|s| !local.contains(s.as_str()) && seen.insert(s.clone()))
+                .collect();
             self.branch_query.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx)
             });
@@ -670,5 +700,4 @@ impl Kyde {
         })
         .detach();
     }
-
 }

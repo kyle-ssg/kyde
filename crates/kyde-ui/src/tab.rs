@@ -1,9 +1,11 @@
 //! Tab pill (the git view's Commit/Push tabs etc.). Caller chains `.on_mouse_down(...)`.
-use crate::*;
+use gpui::prelude::*;
+use gpui::{div, px, SharedString};
+use kyde_theme as theme;
 
 /// One pill of a tab strip, IntelliJ-style: active = subtle filled bg + faint border; inactive
 /// = transparent with a hover bg. A `count` badge shows when > 0 (accent-filled when active).
-pub(crate) fn tab_pill(
+pub fn tab_pill(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
     count: usize,
@@ -38,7 +40,11 @@ pub(crate) fn tab_pill(
                 .rounded_sm()
                 .bg(if active { t.primary } else { t.bg_light })
                 .text_size(px(10.0))
-                .text_color(if active { t.primary_text } else { t.secondary_text })
+                .text_color(if active {
+                    t.primary_text
+                } else {
+                    t.secondary_text
+                })
                 .child(SharedString::from(count.to_string())),
         );
     }

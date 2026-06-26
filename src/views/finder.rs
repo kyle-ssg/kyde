@@ -396,7 +396,12 @@ impl Kyde {
         }
     }
 
-    pub(crate) fn open_finder(&mut self, mode: FinderMode, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_finder(
+        &mut self,
+        mode: FinderMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.finder_mode = mode;
         self.finder_open = true;
         let placeholder = match mode {
@@ -614,5 +619,4 @@ impl Kyde {
             }
         }
     }
-
 }

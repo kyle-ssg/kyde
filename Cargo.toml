@@ -25,6 +25,7 @@ kyde-markdown = { path = "crates/kyde-markdown" }
 kyde-update = { path = "crates/kyde-update" }
 kyde-config = { path = "crates/kyde-config" }
 kyde-theme = { path = "crates/kyde-theme" }
+kyde-ui = { path = "crates/kyde-ui" }
 # Syntax highlighting + all tree-sitter grammars live here; the per-pack features below
 # forward to this crate's features (e.g. binary `rust` → `kyde-syntax/rust`).
 # default-features = false so the binary controls which grammars compile (kyde-syntax's

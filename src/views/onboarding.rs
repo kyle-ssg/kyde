@@ -252,5 +252,4 @@ impl Kyde {
         self.onboarding_forced = false;
         cx.notify();
     }
-
 }

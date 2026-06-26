@@ -283,5 +283,4 @@ impl Kyde {
         self.exit_commit_if_clean();
         cx.notify();
     }
-
 }

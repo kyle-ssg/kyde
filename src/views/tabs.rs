@@ -227,7 +227,11 @@ impl Kyde {
 
     /// Shown in the editor pane when no file is open: the handful of shortcuts that
     /// actually get you somewhere (keys reflect the active keymap).
-    pub(crate) fn render_no_file(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_no_file(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let key = |name: &str| {
             self.keymap
@@ -341,5 +345,4 @@ impl Kyde {
         }
         self.close_menu(cx);
     }
-
 }

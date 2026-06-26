@@ -310,5 +310,4 @@ impl Kyde {
             window.defer(cx, move |window, _cx| window.focus(&handle));
         }
     }
-
 }

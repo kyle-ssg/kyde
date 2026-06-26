@@ -1,8 +1,9 @@
 //! File/language badge: the `Badge` model + its renderer + path→badge mapping.
-use crate::*;
+use gpui::prelude::*;
+use gpui::{div, px, svg, FontWeight};
 
 /// How a file's icon renders in the Browse tree.
-pub(crate) enum Badge {
+pub enum Badge {
     /// A short colored monogram, e.g. "rs", "{}".
     Tag(&'static str, gpui::Rgba),
     /// An SVG icon (path served by `Assets`), tinted with the given color.
@@ -14,7 +15,7 @@ pub(crate) enum Badge {
 /// The inner element for a badge, at a consistent visual size. Callers wrap it in their
 /// own fixed-width box / alignment. `bump` adds 2px (file explorer + bottom bar use it;
 /// the tabs / commit list stay at the base size).
-pub(crate) fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
+pub fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
     let d = grow;
     match b {
         Badge::Tag(label, color) => div()
@@ -46,7 +47,7 @@ pub(crate) fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
     }
 }
 
-pub(crate) fn file_badge(path: &std::path::Path) -> Badge {
+pub fn file_badge(path: &std::path::Path) -> Badge {
     let rgb = |v: u32| gpui::rgb(v);
     // Ignore files (.gitignore, .dockerignore, .prettierignore, …) → a "ban" circle-slash.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {

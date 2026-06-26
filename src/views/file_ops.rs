@@ -4,7 +4,11 @@
 use crate::*;
 
 impl Kyde {
-    pub(crate) fn render_delete_modal(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_delete_modal(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let Some((path, is_dir)) = self.delete_target.clone() else {
             return div().into_any_element();
@@ -78,7 +82,11 @@ impl Kyde {
     /// New-file / rename modal: a single-line name input + Create/Rename & Cancel.
     /// Enter confirms / Esc cancels via the "FileFinder" key context (the input is
     /// single-line, so those keys bubble up to this wrapper).
-    pub(crate) fn render_name_prompt(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_name_prompt(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let Some(prompt) = self.name_prompt.clone() else {
             return div().into_any_element();
@@ -374,5 +382,4 @@ impl Kyde {
         }
         cx.notify();
     }
-
 }

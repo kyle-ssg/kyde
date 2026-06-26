@@ -9,13 +9,15 @@
 mod app;
 mod divider;
 mod render;
-mod ui;
 pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
-pub(crate) use ui::*;
+// Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
+// resolves) and glob-re-exported so call sites use `btn_primary`/`file_badge`/… unqualified.
 pub(crate) use app::{
     CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
     STATUS_REFRESH_DEBOUNCE,
 };
+use kyde_ui as ui;
+pub(crate) use kyde_ui::*;
 
 // ── per-feature views (impl Kyde blocks; see src/views/) ──
 mod views;
@@ -79,6 +81,7 @@ actions!(
         ToggleTerminal,
         NewTerminalTab,
         ClearTerminal,
+        TerminalConsume,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -227,6 +230,14 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("cmd-t", NewTerminalTab, Some("Terminal")),
         // ⌘K clears the terminal; scoped to its context so it overrides the commit binding.
         KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
+        // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). The
+        // terminal eats both as raw PTY input (0x7f / 0x1b) via on_key_down — but that handler
+        // does NOT stop the action system, so without a deeper binding the "Kyde" action ALSO
+        // fired (backspace deleted the selected Browse file, escape closed modals). Bind both to
+        // a no-op in "Terminal": gpui resolves the deepest-context binding, so this shadows the
+        // "Kyde" ones while the raw on_key_down still relays the byte to the shell.
+        KeyBinding::new("backspace", TerminalConsume, Some("Terminal")),
+        KeyBinding::new("escape", TerminalConsume, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys).
     cx.bind_keys([
@@ -696,6 +707,9 @@ struct Kyde {
     // Branch switcher (bottom-right status bar + popup)
     current_branch: Option<String>,
     branch_list: Vec<String>,
+    /// Remote-only branches (short name, e.g. "feature-x") that have no local head yet —
+    /// shown under a "Remote" section so freshly-fetched branches are checkout-able.
+    branch_remotes: Vec<String>,
     branch_popup_open: bool,
     branch_query: Entity<CodeEditor>,
     /// Expanded nodes in the branch tree (section keys like "sec:recent" and folder
@@ -946,7 +960,6 @@ impl Focusable for Kyde {
     }
 }
 
-
 /// A flattened row of the branch tree.
 struct BranchRow {
     label: String,
@@ -969,6 +982,7 @@ enum BranchNode {
 fn branch_rows(
     recent: &[String],
     all: &[String],
+    remotes: &[String],
     expanded: &std::collections::HashSet<String>,
     force_open: bool,
 ) -> Vec<BranchRow> {
@@ -976,6 +990,7 @@ fn branch_rows(
     for (label, key, list) in [
         ("Recent", "sec:recent", recent),
         ("Local", "sec:local", all),
+        ("Remote", "sec:remote", remotes),
     ] {
         if list.is_empty() {
             continue;
@@ -1047,8 +1062,6 @@ fn emit_branch_level(
     }
 }
 
-
-
 /// File-type badge for the Browse tree (approximates IntelliJ's icons). Known types get a
 /// colored monogram; everything else gets the generic lines/document icon.
 /// Raster image types we preview inline (rendered with `img()` instead of the
@@ -1095,7 +1108,6 @@ fn font_family_name(bytes: &[u8]) -> Option<String> {
     }
     fallback
 }
-
 
 /// Sentinel path for the virtual "Scratches" tree folder. The leading control char keeps
 /// it from ever matching a real file path (used only for tree grouping + expand state).
@@ -1149,7 +1161,6 @@ fn load_show_fps() -> bool {
 fn save_show_fps(v: bool) {
     save_ui_bool("show_fps", v);
 }
-
 
 /// One visual row of the aligned side-by-side diff. `old`/`new` index into each
 /// side's lines (`None` = filler/blank). `hunk` tags rows belonging to a change;
@@ -1762,7 +1773,7 @@ mod branch_tree_tests {
         let mut exp = HashSet::new();
         exp.insert("sec:local".to_string());
         exp.insert("sec:local/feat".to_string());
-        let rows = branch_rows(&[], &all, &exp, false);
+        let rows = branch_rows(&[], &all, &[], &exp, false);
 
         // Section root present.
         assert!(matches!(
@@ -1785,7 +1796,7 @@ mod branch_tree_tests {
     #[test]
     fn collapsed_section_hides_children() {
         let all = vec!["main".to_string()];
-        let rows = branch_rows(&[], &all, &HashSet::new(), false);
+        let rows = branch_rows(&[], &all, &[], &HashSet::new(), false);
         // Only the collapsed "Local" root, no leaves.
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Local");
@@ -2136,4 +2147,33 @@ mod gpui_smoke_tests {
         assert!(url.contains("&body="));
         assert!(url.contains("boom") || url.contains("Crash"));
     }
+}
+
+/// A full-window dimmed overlay that centers its child. When `dismissable`, clicking the
+/// backdrop closes the open overlays; otherwise the backdrop swallows the click (modal).
+pub(crate) fn overlay(cx: &mut Context<Kyde>, dismissable: bool) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        // A dim scrim, not a blackout — the app stays visible behind the modal.
+        .bg(gpui::rgba(0x00000099))
+        .occlude()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _e, window, cx| {
+                if dismissable {
+                    this.finder_open = false;
+                    this.onboarding_open = false;
+                    this.delete_target = None;
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                }
+            }),
+        )
 }

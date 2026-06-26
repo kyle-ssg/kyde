@@ -8,7 +8,11 @@ impl Kyde {
     /// Top-of-window banner shown only when a newer release exists. The action is
     /// "Update & Relaunch" when running from a `.app` bundle (downloads + swaps in place),
     /// else "Download" (opens the release page) — see `do_update`.
-    pub(crate) fn render_update_banner(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_update_banner(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let Some(rel) = self.update_available.as_ref() else {
             return div().into_any_element();
@@ -280,5 +284,4 @@ impl Kyde {
             )
             .into_any_element()
     }
-
 }

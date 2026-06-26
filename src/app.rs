@@ -11,10 +11,12 @@ pub(crate) const SCROLL_CONTEXT_ROWS: usize = 3;
 /// `git status` + re-diff all shell out, so bursts of typing are coalesced).
 const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Debounce before a Browse edit triggers a background `git status` refresh.
-pub(crate) const STATUS_REFRESH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const STATUS_REFRESH_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(400);
 /// Debounce before a Find-in-Files keystroke fires the background `git grep` (coalesces
 /// bursts of typing — a full-repo grep is far too expensive to run per keystroke).
-pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(200);
+pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(200);
 /// Minimum query length before Find-in-Files runs. 1-char queries match almost every line
 /// in the repo (tens of MB of hits), so we wait until the query is specific enough.
 pub(crate) const CONTENT_MIN_QUERY: usize = 2;
@@ -331,6 +333,7 @@ impl Kyde {
             rollback_delete_added: false,
             current_branch: None,
             branch_list: Vec::new(),
+            branch_remotes: Vec::new(),
             branch_popup_open: false,
             branch_query,
             branch_expanded: std::collections::HashSet::new(),
@@ -405,13 +408,6 @@ impl Kyde {
         Repo::discover(self.repo_root.as_ref()?).ok()
     }
 
-
-
-
-
-
-
-
     pub(crate) fn refresh(&mut self) {
         if let Some(repo) = self.repo() {
             // `git status` failing means we can't trust the file list — surface it rather
@@ -459,17 +455,6 @@ impl Kyde {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
-
     /// Re-read git + the open file from disk. Triggered when the window regains focus,
     /// since an external tool (another editor, a branch switch, a rebase, etc.) may have
     /// changed files behind our back.
@@ -515,55 +500,6 @@ impl Kyde {
         cx.notify();
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
     /// silent no-op. `ctx` is a short human label ("Commit", "Push", …); the error is
     /// stringified after it. Still logs to stderr for debugging.
@@ -571,8 +507,6 @@ impl Kyde {
         eprintln!("{ctx} failed: {e:#}");
         self.op_error = Some(format!("{ctx} failed: {e}"));
     }
-
-
 
     /// Reset the editor to nothing-open.
     pub(crate) fn clear_open(&mut self, cx: &mut Context<Self>) {
@@ -593,9 +527,6 @@ impl Kyde {
             _ => lang,
         }
     }
-
-
-
 
     /// Persist `rel`'s `text` to disk: through the repo's working tree in a git repo, else
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
@@ -641,7 +572,6 @@ impl Kyde {
         self.schedule_status_refresh(cx);
     }
 
-
     fn save_open(&mut self, cx: &mut Context<Self>) {
         let (Some(rel), text) = (
             self.open_path.clone(),
@@ -653,9 +583,6 @@ impl Kyde {
         self.file_editor.update(cx, |e, _| e.dirty = false);
         self.refresh();
     }
-
-
-
 
     // ── in-editor find / replace ──────────────────────────────────
     pub(crate) fn act_toggle_fps(
@@ -669,8 +596,6 @@ impl Kyde {
         save_show_fps(self.show_fps); // remember across launches
         cx.notify();
     }
-
-
 
     pub(crate) fn act_escape(
         &mut self,
@@ -700,14 +625,6 @@ impl Kyde {
         cx.notify();
     }
 
-
-
-
-
-
-
-
-
     // ── configurable action handlers ──────────────────────────────
     pub(crate) fn act_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
         self.save_open(cx);
@@ -733,25 +650,7 @@ impl Kyde {
         self.diff_view_open = false;
         cx.notify();
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 #[cfg(feature = "terminal")]
-impl Kyde {
-
-
-
-
-}
+impl Kyde {}

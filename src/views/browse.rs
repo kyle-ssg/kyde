@@ -4,7 +4,6 @@
 use crate::*;
 
 impl Kyde {
-
     /// The flattened Browse tree rows: the repo root, its expanded descendants (only when
     /// the root is open), then a virtual "Scratches" folder + its files at the bottom.
     /// Depths are offset by one so everything nests under the root row. The "Scratches"
@@ -873,5 +872,4 @@ impl Kyde {
             .add_fonts(vec![std::borrow::Cow::Owned(bytes)]);
         self.font_preview = Some((rel, SharedString::from(family)));
     }
-
 }

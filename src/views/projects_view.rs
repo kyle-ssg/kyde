@@ -312,7 +312,11 @@ impl Kyde {
     /// the `×` closes, right-click opens the tab context menu (close / others / to the right).
     /// Project tabs strip: one pill per open project, above all other UI (under the title
     /// bar). Click switches projects; the `×` closes one. Rendered only when >1 is open.
-    pub(crate) fn render_project_tabs(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_project_tabs(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let tabs = self.open_projects.iter().enumerate().map(|(i, root)| {
             let active = self.repo_root.as_ref() == Some(root);
@@ -531,5 +535,4 @@ impl Kyde {
         })
         .detach();
     }
-
 }
