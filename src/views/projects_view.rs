@@ -310,6 +310,61 @@ impl Kyde {
 
     /// Editor tab strip: one tab per open file, left→right in open order. Click activates,
     /// the `×` closes, right-click opens the tab context menu (close / others / to the right).
+    /// The single-project title shown in the title bar, just right of the traffic lights
+    /// (only when ≤1 project is open — with more, the project-tabs strip takes over). Colored
+    /// initials chip + name + a chevron; clicking opens another project (`pick_folder`).
+    pub(crate) fn render_titlebar_project(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(root) = self.repo_root.as_ref() else {
+            return div().into_any_element();
+        };
+        let t = theme::get();
+        let name = projects::name_of(root);
+        let chip_color = gpui::rgb(projects::color_for(&name));
+        div()
+            .id("titlebar-project")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(t.bg_mid))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(22.0))
+                    .flex_none()
+                    .rounded_md()
+                    .bg(chip_color)
+                    .text_color(gpui::white())
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(SharedString::from(projects::initials(&name))),
+            )
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.text)
+                    .child(SharedString::from(name)),
+            )
+            .child(
+                div()
+                    .text_color(t.line_number)
+                    .text_size(px(10.0))
+                    .child("▾"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
+            )
+            .into_any_element()
+    }
+
     /// Project tabs strip: one pill per open project, above all other UI (under the title
     /// bar). Click switches projects; the `×` closes one. Rendered only when >1 is open.
     pub(crate) fn render_project_tabs(

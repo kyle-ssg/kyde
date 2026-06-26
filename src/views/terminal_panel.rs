@@ -257,6 +257,19 @@ impl Kyde {
         cx.notify();
     }
 
+    /// No-op handler for the backspace/escape keys while the terminal is focused. The terminal
+    /// relays the raw byte to the PTY in `on_key_down`; this exists only so the bound
+    /// `TerminalConsume` action is actually *consumed* — without a handler, gpui treats the
+    /// action as unhandled and falls through to the shallower "Kyde" binding (`DeleteFile` /
+    /// `EscapeKey`), which is why backspace was still deleting the selected file.
+    pub(crate) fn act_terminal_consume(
+        &mut self,
+        _: &crate::TerminalConsume,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
     /// Whether the active terminal tab currently owns keyboard focus.
     pub(crate) fn terminal_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         self.term_tabs

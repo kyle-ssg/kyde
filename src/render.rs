@@ -126,7 +126,13 @@ impl Render for Kyde {
             .items_center()
             .h(px(40.0))
             .pl(px(84.0))
+            .gap_2()
             .bg(theme::get().frame_bg)
+            // With ≤1 project open there's no tab strip, so show the project title (chip +
+            // name + chevron) right of the traffic lights.
+            .when(self.open_projects.len() <= 1, |d| {
+                d.child(self.render_titlebar_project(cx))
+            })
             .child(
                 div()
                     .flex_1()
@@ -241,7 +247,15 @@ impl Render for Kyde {
         // Right column = body (fills) with the terminal panel docked at its bottom. Keeping
         // the panel here (NOT a sibling of the full-height rail) means the rail spans the whole
         // window height, so its bottom-pinned terminal toggle stays put when the panel opens.
-        let right_col = div().flex().flex_col().flex_1().min_w_0().min_h_0();
+        // `relative` so the tab-overflow button (added below) anchors to the body region — it
+        // sits BELOW any banners (which are flex-laid-out above main_row), so it tracks them.
+        let right_col = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .relative();
         // Maximized terminal hides the body (tree + editor) and fills the whole right column.
         #[cfg(feature = "terminal")]
         let term_max = self.term_open && self.repo_root.is_some() && self.term_maximized;
@@ -251,6 +265,17 @@ impl Render for Kyde {
         #[cfg(feature = "terminal")]
         let right_col = if self.term_open && self.repo_root.is_some() {
             right_col.child(self.render_terminal_panel(ui, cx))
+        } else {
+            right_col
+        };
+        // Tab chooser: floated over the body's top-right so it paints above the tab strip's
+        // scroll layer. As a child of `right_col` (laid out below the banners) its `top` is
+        // relative to the body, so an update/project-tabs banner can't misalign it.
+        let right_col = if self.repo_root.is_some()
+            && self.mode == Mode::Browse
+            && !self.open_tabs.is_empty()
+        {
+            right_col.child(self.render_tab_overflow_button(cx))
         } else {
             right_col
         };
@@ -312,7 +337,8 @@ impl Render for Kyde {
             root = root
                 .on_action(cx.listener(Self::act_toggle_terminal))
                 .on_action(cx.listener(Self::act_new_terminal_tab))
-                .on_action(cx.listener(Self::act_close_terminal_tab));
+                .on_action(cx.listener(Self::act_close_terminal_tab))
+                .on_action(cx.listener(Self::act_terminal_consume));
         }
         let root = root
             .on_mouse_move(
@@ -377,13 +403,6 @@ impl Render for Kyde {
             })
             .child(self.render_status_bar(ui, cx));
 
-        // Tab chooser: floated at root so it paints above the tab strip's scroll layer.
-        // Shown whenever tabs are open. (True overflow-only gating isn't reliable here —
-        // gpui's `max_offset` is measured during the scroll element's paint, but this runs
-        // before that paint, so it's always a frame stale and the button never appears.)
-        if self.repo_root.is_some() && self.mode == Mode::Browse && !self.open_tabs.is_empty() {
-            root = root.child(self.render_tab_overflow_button(cx));
-        }
         if self.branch_popup_open {
             root = root.child(self.render_branch_popup(ui, fs, cx));
         }

@@ -67,8 +67,6 @@ impl Kyde {
                     .child(badge)
                     .child(msg),
             )
-            // Spacer pushes the actions to the right.
-            .child(div().flex_1().min_w_0())
             .child(
                 btn_primary("update-now", action_label)
                     .when(updating, |d| d.opacity(0.6))

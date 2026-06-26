@@ -87,7 +87,12 @@ impl Kyde {
                     .flex_row()
                     .items_center()
                     .gap_3()
-                    .child(div().w(px(140.0)).text_color(t.secondary_text).child("Theme"))
+                    .child(
+                        div()
+                            .w(px(140.0))
+                            .text_color(t.secondary_text)
+                            .child("Theme"),
+                    )
                     .child(
                         div()
                             .px_3()
@@ -99,9 +104,16 @@ impl Kyde {
                             .child("Dark"),
                     ),
             )
-            .child(self.size_row(cx, "ui", "UI font size", t.ui_font_size, 8.0, 40.0, 1.0, |th, v| {
-                th.ui_font_size = v
-            }))
+            .child(self.size_row(
+                cx,
+                "ui",
+                "UI font size",
+                t.ui_font_size,
+                8.0,
+                40.0,
+                1.0,
+                |th, v| th.ui_font_size = v,
+            ))
             .child(self.size_row(
                 cx,
                 "editor",
@@ -141,28 +153,29 @@ impl Kyde {
         apply: fn(&mut theme::Theme, f32),
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let step_btn = |bid: SharedString, sym: &'static str, delta: f32, cx: &mut Context<Self>| {
-            div()
-                .id(bid)
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .border_1()
-                .border_color(t.divider)
-                .text_color(t.text)
-                .cursor_pointer()
-                .hover(|d| d.bg(t.bg_mid))
-                .child(sym)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |_this, _e, _w, cx| {
-                        theme::update(|th| apply(th, (value + delta).clamp(lo, hi)));
-                        cx.notify();
-                    }),
-                )
-        };
+        let step_btn =
+            |bid: SharedString, sym: &'static str, delta: f32, cx: &mut Context<Self>| {
+                div()
+                    .id(bid)
+                    .size(px(24.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.divider)
+                    .text_color(t.text)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.bg_mid))
+                    .child(sym)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |_this, _e, _w, cx| {
+                            theme::update(|th| apply(th, (value + delta).clamp(lo, hi)));
+                            cx.notify();
+                        }),
+                    )
+            };
         div()
             .flex()
             .flex_row()

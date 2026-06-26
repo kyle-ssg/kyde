@@ -170,13 +170,14 @@ impl Kyde {
             a: 0.0,
             ..t.panel_bg
         };
-        // Positioned at the ROOT level (not inside the editor island) so it paints ABOVE the
-        // tab strip's scroll layer — a child of the island was drawn *under* the scrolling
-        // tabs and vanished once they filled the right edge. Coords match the tab bar: y =
-        // titlebar(40) + body top pad(FRAME_GAP); x = body right pad(FRAME_GAP).
+        // A child of `right_col` (relative), painted above the tab strip's scroll layer — a
+        // child of the island itself was drawn *under* the scrolling tabs and vanished once
+        // they filled the right edge. Anchored to the body region, so `top` is just the body's
+        // top pad (FRAME_GAP) and any banner above main_row shifts it correctly; x = body right
+        // pad (FRAME_GAP).
         div()
             .absolute()
-            .top(px(40.0 + theme::FRAME_GAP))
+            .top(px(theme::FRAME_GAP))
             .right(px(theme::FRAME_GAP))
             // Above the tab bar's 1px bottom border; match its rounded top-right corner.
             .h(px(37.0))
