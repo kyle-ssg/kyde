@@ -210,8 +210,12 @@ expected; use `--workspace` or `-p kyde-syntax` (full grammars) for a true green
 
 ## Code-quality policy (enforced, CI fails otherwise)
 Lints live centrally in **`[workspace.lints]`** (root `Cargo.toml`); every member opts in with
-`[lints] workspace = true`. CI runs `clippy --all-targets -- -D warnings`, so a warning = a
-failure. Rules:
+`[lints] workspace = true`. CI's `check` job runs **`cargo clippy --workspace --all-targets
+--all-features -- -D warnings`** (the `--workspace` lints all ten crates, not just the binary;
+`--all-features` reaches the cfg-gated grammar/terminal/remote-images paths) on **both
+ubuntu-latest AND macos-15** (Kyde ships macOS-only, so the `#[cfg(target_os="macos")]` code
+must be gated — a Linux-only gate can't see it). `RUSTFLAGS: "-D warnings"` is workspace-wide,
+so plain rustc warnings fail every step, not just clippy. Rules:
 - **No `unwrap()`/`expect()` in non-test code** — `clippy::{unwrap_used,expect_used}` are
   `deny` (tests exempt via `clippy.toml`). A genuinely-infallible call is restructured away or,
   rarely, kept as `expect()` under a narrowest-scope `#[allow(clippy::expect_used)]` with a

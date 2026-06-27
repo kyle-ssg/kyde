@@ -12,13 +12,23 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Deny warnings for EVERY compile in the workflow (build/test/trim), not just the clippy
+  # step — a plain rustc warning (e.g. a feature-gated `unused_mut`) would otherwise pass.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   # Fast quality gate: format, lint, tests (incl. perf_* guards), and a proof
   # that the advertised trim build (a minimal feature set) still compiles.
+  # Runs on BOTH Linux and macOS: Kyde ships macOS-only (see release.yml), and the
+  # `#[cfg(target_os = "macos")]` code (objc2 dock icon, pasteboard) is invisible to a
+  # Linux-only gate — a break there would surface only at release time. macos-15 closes that.
   check:
-    name: fmt + clippy + test
-    runs-on: ubuntu-latest
+    name: fmt + clippy + test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
     steps:
       - uses: actions/checkout@v7
 
@@ -30,8 +40,10 @@ jobs:
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
 
-      # gpui's Linux backend (blade/Vulkan + wayland/x11/xkb + fontconfig).
+      # gpui's Linux backend (blade/Vulkan + wayland/x11/xkb + fontconfig). macOS uses system
+      # frameworks (Metal/AppKit) — nothing to install.
       - name: Install Linux deps
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -44,16 +56,20 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
+      # --workspace lints all ten member crates (without it, only the `kyde` binary is linted
+      # and the libs' `unwrap_used`/`expect_used` denies never run). --all-features also lints
+      # the #[cfg(feature)]-gated paths (grammars, terminal, remote-images).
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Test (includes perf_* regression guards)
         run: cargo test --all
 
       # We advertise that builds can ship only the grammars they want
-      # (see Cargo.toml [features]); prove a minimal set still compiles.
+      # (see Cargo.toml [features]); prove a minimal set still compiles. --workspace so a
+      # feature-gated member crate can't rot.
       - name: Trim build compiles
-        run: cargo build --no-default-features --features rust,json,toml
+        run: cargo build --workspace --no-default-features --features rust,json,toml
 
   # MSRV gate: prove the whole workspace still builds on the pinned minimum Rust
   # (Cargo.toml `rust-version` / rust-toolchain.toml). Catches accidental use of a

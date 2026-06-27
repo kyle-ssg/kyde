@@ -273,6 +273,10 @@ impl Render for Kyde {
             .child(rail)
             .child(right_col);
 
+        // `root` is reassigned only under the `terminal` feature (the panel's actions); without
+        // it the `mut` is unused — allow that precisely, so `RUSTFLAGS=-D warnings` stays green
+        // in trim builds.
+        #[cfg_attr(not(feature = "terminal"), allow(unused_mut))]
         let mut root = div()
             .key_context("Kyde")
             .track_focus(&self.focus_handle)

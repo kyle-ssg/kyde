@@ -5,7 +5,7 @@
 //! a Cargo feature). Local-file images need none of this and always work.
 //!
 //! gpui's image asset loader calls `HttpClient::get` for `Resource::Uri` sources;
-//! the default `NullHttpClient` bails with "No HttpClient available", so without a
+//! the default `NullHttpClient` bails with `No HttpClient available`, so without a
 //! real client a remote `<img>` simply renders nothing (no panic). This supplies
 //! one: a thin async wrapper over blocking `ureq`, run on a scratch thread so it
 //! never blocks gpui's executor.
