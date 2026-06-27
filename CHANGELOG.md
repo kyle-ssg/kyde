@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [2.0.0](https://github.com/kyle-ssg/kyde/compare/kyde-v1.3.0...kyde-v2.0.0) (2026-06-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* cargo workspace and UX improvements ([#23](https://github.com/kyle-ssg/kyde/issues/23))
+
+### Features
+
+* cargo workspace and UX improvements ([#23](https://github.com/kyle-ssg/kyde/issues/23)) ([dafd38b](https://github.com/kyle-ssg/kyde/commit/dafd38b18b5894a3c1a2dd5e85e0b94f82a4253a))
+
+
+### Bug Fixes
+
+* unblock release-please on the Cargo workspace refactor ([416eb0f](https://github.com/kyle-ssg/kyde/commit/416eb0fe8af48b424accc4431a9e61c7cc05d4fe))
+
 ## [1.3.0](https://github.com/kyle-ssg/kyde/compare/kyde-v1.2.0...kyde-v1.3.0) (2026-06-24)
 
 
