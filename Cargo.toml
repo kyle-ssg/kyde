@@ -1,65 +1,121 @@
 [package]
 name = "kyde"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Cargo workspace: the binary (this package, root) + the extracted library crates under
+# crates/. Pure-logic crates (git, diff, tree, …) live there so the compiler enforces their
+# boundaries, they get real test targets, and touching one doesn't recompile the others.
+[workspace]
+members = ["crates/*"]
+
+# Shared package metadata — every member inherits via `version.workspace = true`, etc., so the
+# version/edition/MSRV/license live in exactly one place. release-please (release-type "rust")
+# bumps `version` here.
+[workspace.package]
 version = "1.3.0"
 edition = "2021"
-description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
+rust-version = "1.96"
 license = "Apache-2.0"
 repository = "https://github.com/kyle-ssg/Kyde"
 
+# Shared dependency versions — anything used by 2+ members (plus the macOS objc2 stack, kept in
+# lockstep with gpui's own objc2 ABI). Members reference these with `<dep>.workspace = true`,
+# adding crate-specific features locally. gpui is pinned EXACTLY (`=0.2.2`) + Cargo.lock is
+# committed → reproducible builds.
+[workspace.dependencies]
+gpui = "=0.2.2"
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+
+# Centralized lints for every workspace member (each opts in with `[lints] workspace = true`).
+# `priority = -1` lets the specific allows below override the pedantic group.
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Panicking accessors are banned in shipping code; tests are exempt via clippy.toml.
+unwrap_used = "deny"
+expect_used = "deny"
+# Curated pedantic opt-outs — noise / false-positives for this codebase, not real smells:
+module_name_repetitions = "allow" # `tree::tree_item` etc. read fine in context
+cast_precision_loss = "allow"     # f32 pixel/colour maths: sub-pixel loss is irrelevant
+cast_possible_truncation = "allow" # deliberate usize→u32/f32 in layout/grid maths
+cast_sign_loss = "allow"          # guarded non-negative casts in layout maths
+must_use_candidate = "allow"      # not worth annotating every getter in an app binary
+missing_panics_doc = "allow"      # blessed expects are documented inline already
+missing_errors_doc = "allow"      # error types are self-describing (thiserror messages)
+similar_names = "allow"           # `old`/`new`, `src`/`dst`, `fg`/`bg` are clear pairs
+struct_excessive_bools = "allow"  # UI view-state flags are genuinely independent toggles
+unreadable_literal = "allow"      # `0x3574F0` hex colours read better WITHOUT separators
+unnecessary_debug_formatting = "allow" # `{path:?}` in errors is deliberate (quotes/escapes)
+too_many_lines = "allow"          # gpui render fns are one long declarative element tree
+items_after_statements = "allow"  # local helper fns/consts read fine next to their use
+unused_self = "allow"             # `pub(crate) fn`s on Kyde stay methods for call-site uniformity
+needless_pass_by_value = "allow"  # gpui closures frequently need owned captures
+cast_possible_wrap = "allow"      # usize→i64/i32 in layout maths stays well within range
+match_same_arms = "allow"         # arms kept separate when they document distinct cases
+default_trait_access = "allow"    # `Default::default()` in struct-update position reads fine
+assigning_clones = "allow"        # `clone_from` micro-opt isn't worth the readability hit
+format_push_string = "allow"      # `s.push_str(&format!(..))` is clearer than `write!` here
+large_types_passed_by_value = "allow" # `Theme` is `Copy`; by-value snapshots are intended
+fn_params_excessive_bools = "allow"   # a few git ops take checkout/overwrite/... flags
+format_collect = "allow"          # one-off `map(format!).collect()` is clear enough
+needless_raw_string_hashes = "allow" # grammar query strings keep `r#"…"#` for consistency
+
 [dependencies]
-# GUI — Zed's framework. Apache-2.0. API moves fast; pin once it builds.
-gpui = "0.2"
+# GUI — Zed's framework. Apache-2.0. Pinned + Cargo.lock committed (see [workspace.dependencies]).
+gpui.workspace = true
 
-# Diff computation — word/char/line, Apache-2.0. (Swap to imara-diff later if big files lag.)
-similar = { version = "3", features = ["unicode", "inline"] }
+# Extracted workspace crates (pure logic, no gpui). Aliased back to their old module names
+# in main.rs (`use kyde_git as git;`) so existing call sites are untouched.
+kyde-git = { path = "crates/kyde-git" }
+kyde-diff = { path = "crates/kyde-diff" }
+kyde-tree = { path = "crates/kyde-tree" }
+kyde-markdown = { path = "crates/kyde-markdown" }
+kyde-update = { path = "crates/kyde-update" }
+kyde-config = { path = "crates/kyde-config" }
+kyde-theme = { path = "crates/kyde-theme" }
+kyde-ui = { path = "crates/kyde-ui" }
+# Theme/syntax colours are `kyde_color::Color`; the `gpui` feature gives `Color → gpui` so the
+# binary's `.bg()/.text_color()` calls take theme colours unchanged.
+kyde-color = { path = "crates/kyde-color", features = ["gpui"] }
+# Syntax highlighting + all tree-sitter grammars live here; the per-pack features below
+# forward to this crate's features (e.g. binary `rust` → `kyde-syntax/rust`).
+# default-features = false so the binary controls which grammars compile (kyde-syntax's
+# own default is `full`, for standalone testing).
+kyde-syntax = { path = "crates/kyde-syntax", default-features = false }
 
-# Syntax highlighting — tree-sitter, like Zed. Grammar crate versions must align
-# with the tree-sitter core version; if cargo complains, bump them together.
-# Each grammar is OPTIONAL and gated behind a per-pack feature (see [features]),
-# so a build can ship only the grammars it wants — an absent grammar's parse
-# tables leave the binary entirely (real size/RAM win), and at runtime its lang
-# collapses to the existing "no pack → PlainText" path. `default = ["full"]`
-# keeps the normal `cargo build` shipping everything, exactly as before.
-tree-sitter = "0.25"
-tree-sitter-highlight = "0.25"
-tree-sitter-typescript = { version = "0.23", optional = true }
-tree-sitter-javascript = { version = "0.25", optional = true }
-tree-sitter-rust = { version = "0.24", optional = true }
-tree-sitter-json = { version = "0.24", optional = true }
-tree-sitter-md = { version = "0.5", optional = true }
-tree-sitter-bash = { version = "0.25", optional = true }
-tree-sitter-css = { version = "0.25", optional = true }
+# Syntax highlighting + the tree-sitter grammars now live in the `kyde-syntax` crate
+# (above); diff in `kyde-diff`, markdown parsing in `kyde-markdown`. The per-pack Cargo
+# features below forward grammars to `kyde-syntax`.
 
 # Fuzzy file search (Go to File)
 fuzzy-matcher = "0.3"
 
 # Misc
-anyhow = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 unicode-segmentation = "1"
 # Parse a .ttf/.otf's family name so opened font files preview in their own typeface.
 ttf-parser = "0.25"
-# Markdown → rendered side-by-side preview (the markdown plugin).
-pulldown-cmark = { version = "0.13", default-features = false }
 # Remote (http/https) images in the Markdown preview — OFF by default. Pulls a
 # blocking HTTP+TLS stack (ureq → rustls), kept out of the default build to
 # protect the footprint (see CONTRIBUTING.md). Local-file images need neither.
 ureq = { version = "3", optional = true }
-futures = { version = "0.3", optional = true }
-tree-sitter-yaml = { version = "0.7", optional = true }
-tree-sitter-toml-ng = { version = "0.7.0", optional = true }
-tree-sitter-python = { version = "0.25.0", optional = true }
-tree-sitter-html = { version = "0.23.2", optional = true }
-tree-sitter-go = { version = "0.25.0", optional = true }
-tree-sitter-r = { version = "1.3.0", optional = true }
-# The official `tree-sitter-latex` 0.1.0 is unusable — it references an external
-# scanner but ships no scanner.c, so it fails to link. Use latex-lsp's grammar
-# (republished as `codebook-tree-sitter-latex`, MIT, ships scanner.c + tracks
-# tree-sitter 0.25), aliased back to `tree_sitter_latex` for the code path. It
-# bundles no highlights query either, so the pack uses LATEX_HIGHLIGHTS in
-# highlight.rs.
-tree-sitter-latex = { package = "codebook-tree-sitter-latex", version = "0.6.1", optional = true }
+futures = { workspace = true, optional = true }
 # Embedded terminal — alacritty's VTE/grid/PTY engine (Apache-2.0), same crate Zed uses.
 # Gated behind the `terminal` Cargo feature so a build can drop it entirely: an off
 # feature sheds the grammar-sized ~2MB of `.rodata` parse tables + the read-loop code,
@@ -76,9 +132,9 @@ alacritty_terminal = { version = "0.26.0", optional = true }
 # macOS dock icon at runtime (no .app bundle) — set via NSApplication. Versions match
 # gpui's own objc2 deps so the ABI lines up.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSData", "NSProcessInfo"] }
-objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSPasteboard", "NSPasteboardItem"] }
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSData", "NSProcessInfo"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSImage", "NSResponder", "NSPasteboard", "NSPasteboardItem"] }
 
 # Embeds the app icon + version into kyde.exe at build time (see build.rs).
 # Windows-only; nothing to compile on macOS/Linux.
@@ -89,7 +145,7 @@ winresource = "0.1"
 # (windows, entities, render cycle) in `cargo test` — the only way to catch runtime
 # panics like re-entrant entity updates. Test build only.
 [dev-dependencies]
-gpui = { version = "0.2", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 
 [features]
 default = ["full", "terminal"]
@@ -105,25 +161,23 @@ terminal = ["dep:alacritty_terminal", "dep:futures"]
 # it's a networking concern, not a language pack, and adds a TLS stack. Local-file
 # images work without it. Build with: `cargo build --features remote-images`.
 remote-images = ["dep:ureq", "dep:futures"]
-rust = ["dep:tree-sitter-rust"]
-# TS/TSX highlighting inherits the base ECMAScript rules from the JS grammar's
-# query (tree-sitter-typescript ships only TS-specific additions), so the
-# typescript pack pulls in the javascript grammar too.
-typescript = ["dep:tree-sitter-typescript", "dep:tree-sitter-javascript"]
-javascript = ["dep:tree-sitter-javascript"]
-json = ["dep:tree-sitter-json"]
-markdown = ["dep:tree-sitter-md"]
-shell = ["dep:tree-sitter-bash"]
-css = ["dep:tree-sitter-css"]
-yaml = ["dep:tree-sitter-yaml"]
-toml = ["dep:tree-sitter-toml-ng"]
-python = ["dep:tree-sitter-python"]
-html = ["dep:tree-sitter-html"]
-go = ["dep:tree-sitter-go"]
-r = ["dep:tree-sitter-r"]
-# tree-sitter-latex ships no bundled highlights query, so the latex pack uses a
-# small hand-written query (LATEX_HIGHLIGHTS in highlight.rs).
-latex = ["dep:tree-sitter-latex"]
+# Per-pack language features now forward to the `kyde-syntax` crate, which owns the
+# grammar crates + the `#[cfg(feature=…)]` arms. Same names + behaviour as before;
+# `typescript` still pulls `javascript` (TS inherits the base ECMAScript query).
+rust = ["kyde-syntax/rust"]
+typescript = ["kyde-syntax/typescript"]
+javascript = ["kyde-syntax/javascript"]
+json = ["kyde-syntax/json"]
+markdown = ["kyde-syntax/markdown"]
+shell = ["kyde-syntax/shell"]
+css = ["kyde-syntax/css"]
+yaml = ["kyde-syntax/yaml"]
+toml = ["kyde-syntax/toml"]
+python = ["kyde-syntax/python"]
+html = ["kyde-syntax/html"]
+go = ["kyde-syntax/go"]
+r = ["kyde-syntax/r"]
+latex = ["kyde-syntax/latex"]
 
 [profile.release]
 opt-level = 3
@@ -132,3 +186,9 @@ codegen-units = 1
 
 [profile.dev]
 opt-level = 1   # keep edit-rebuild snappy but not molasses
+
+# Our crates stay at opt-level 1 (fast incremental rebuilds), but optimize all *dependencies*
+# fully — gpui/alacritty/tree-sitter run far better in debug at no rebuild cost (deps rarely
+# recompile). Big win for debug-build interaction latency.
+[profile.dev.package."*"]
+opt-level = 3

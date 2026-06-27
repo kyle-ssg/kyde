@@ -1,0 +1,15 @@
+[package]
+name = "kyde-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kyde config + persistence: keymap, language-pack list, recent projects. Pure, no GUI."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

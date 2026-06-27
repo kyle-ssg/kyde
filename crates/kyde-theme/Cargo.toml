@@ -1,0 +1,17 @@
+[package]
+name = "kyde-theme"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kyde's runtime theme (hand-editable JSON, auto-repairing). gpui-free — colours are kyde-color's POD."
+
+[dependencies]
+# Colours are `kyde_color::Color` (a POD), so the theme model carries no GUI dependency.
+kyde-color = { path = "../kyde-color" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

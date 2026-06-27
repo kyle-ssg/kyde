@@ -81,47 +81,37 @@ if [ "${1:-all}" = fps ]; then
     LOCK_REL="${LOCK#$ROOT/}"
 fi
 
-# git-diff fixture: a throwaway repo with one committed Rust file, then a working-tree edit,
-# so the git-diff shot always has a real side-by-side diff to render (the live repo is often
-# clean). Passed to the shot via KYDE_SHOT_REPO; apply_shot opens it before entering commit.
-echo "==> generating git-diff fixture repo"
-DIFF_REPO="$FIX/diff-repo"
-rm -rf "$DIFF_REPO"
-mkdir -p "$DIFF_REPO/src"
-git -C "$DIFF_REPO" init -q
-git -C "$DIFF_REPO" config user.email shot@kyde.local
-git -C "$DIFF_REPO" config user.name "Kyde Shots"
-cat > "$DIFF_REPO/src/main.rs" <<'EOF'
-fn main() {
-    let name = "world";
-    println!("Hello, {}!", name);
-    let total = add(2, 3);
-    println!("sum = {}", total);
-}
+# git-diff fixture: a CLONE of this real Kyde repo (committed HEAD → full real tree + history),
+# with a working-tree diff so the git-diff / light shots render a genuine Kyde side-by-side diff
+# — real paths, real Rust, syntax-highlighted — instead of a toy hello-world. Two changes:
+#   1. a curated edit to crates/kyde-ui/src/color.rs (the showcase the diff pane opens — one
+#      in-place word change + one added line → exercises word-level highlight + the gutter), and
+#   2. select.rs reverted to the commit before its last change → a second, real, zero-maintenance
+#      diff so the changed-files list reads like real WIP.
+# Passed to the shot via KYDE_SHOT_REPO; apply_shot opens it + selects color.rs.
+case "${1:-all}" in
+all | git-diff | light)
+    echo "==> generating git-diff fixture (clone of this repo)"
+    # Clone into a dir literally named `kyde` so the commit tree's root row reads authentically.
+    DIFF_REPO="$FIX/kyde"
+    rm -rf "$DIFF_REPO"
+    mkdir -p "$FIX"
+    git clone --quiet --no-hardlinks "$ROOT" "$DIFF_REPO"
 
-fn add(a: i32, b: i32) -> i32 {
-    a + b
-}
-EOF
-git -C "$DIFF_REPO" add -A
-git -C "$DIFF_REPO" commit -qm "baseline" >/dev/null
-cat > "$DIFF_REPO/src/main.rs" <<'EOF'
-fn main() {
-    let name = "Kyde";
-    println!("Hello, {}!", name);
-    let total = add(2, 3) + add(4, 5);
-    println!("total = {}", total);
-    log("done");
-}
+    # 1. Curated showcase edit on a real, stable file.
+    COLOR="$DIFF_REPO/crates/kyde-ui/src/color.rs"
+    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$COLOR"
+    perl -0pi -e 's/(\n    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    let t = t * t * (3.0 - 2.0 * t); \/\/ smoothstep so the shimmer eases\n/' "$COLOR"
+    if git -C "$DIFF_REPO" diff --quiet -- crates/kyde-ui/src/color.rs; then
+        echo "    !! color.rs showcase edit did not apply (anchors moved?) — fix screenshots.sh" >&2
+        exit 1
+    fi
 
-fn add(a: i32, b: i32) -> i32 {
-    a + b
-}
-
-fn log(msg: &str) {
-    eprintln!("[kyde] {}", msg);
-}
-EOF
+    # 2. A second, real diff: reproduce select.rs's most recent change as a working-tree edit.
+    PREV_SELECT="$(git -C "$DIFF_REPO" log -n1 --skip=1 --format=%H -- crates/kyde-ui/src/select.rs)"
+    [ -n "$PREV_SELECT" ] && git -C "$DIFF_REPO" checkout -q "$PREV_SELECT" -- crates/kyde-ui/src/select.rs
+    ;;
+esac
 
 # shoot <shot-name> <output-file> <capture-mode> [extra env KEY=VAL ...]
 #   capture-mode: window  → screencapture -l<frontmost window>   (full-bleed window)
@@ -191,11 +181,57 @@ shoot() {
     [ -f "$out" ] && echo "    wrote $out ($(du -h "$out" | awk '{print $1}'))"
 }
 
+# shoot_welcome_gif — the README hero. Launches Kyde with NO repo arg (→ Projects landing) in
+# the welcome state (animated 3D KYDE logo + diagonal shimmer), then grabs a rapid burst of
+# window frames and assembles them into a looping GIF with ImageMagick `convert`. The shimmer
+# is driven by `request_animation_frame`, so consecutive grabs catch successive phases.
+# Output: assets/screenshots/welcome.gif. Run manually (like `fps`):  ./scripts/screenshots.sh welcome-gif
+shoot_welcome_gif() {
+    local out="$OUT/welcome.gif"
+    local tmp; tmp="$(mktemp -d)"
+    local frames="${GIF_FRAMES:-40}" delay="${GIF_DELAY:-5}" width="${GIF_WIDTH:-960}"
+    echo "==> welcome-gif → welcome.gif (${frames} frames)"
+
+    env XDG_CONFIG_HOME="$CFG" KYDE_SHOT=welcome "$BIN" >/dev/null 2>&1 &
+    local pid=$!
+
+    local tries=0 count=0
+    while [ $tries -lt 80 ]; do
+        count=$(swift "$WINID" "$pid" 2>/dev/null | grep -c . || true)
+        [ "$count" -ge 1 ] && break
+        sleep 0.25; tries=$((tries + 1))
+    done
+    if [ "$count" -lt 1 ]; then
+        echo "    !! window never appeared (pid $pid)"; kill "$pid" 2>/dev/null || true
+        rm -rf "$tmp"; return 1
+    fi
+    focus_only_kyde "$pid"
+    sleep 1
+    local id; id="$(swift "$WINID" "$pid" 2>/dev/null | head -1 | awk '{print $1}')"
+
+    # Burst-capture the shimmer. Zero-padded names so the glob sorts in capture order.
+    local i
+    for i in $(seq -w 1 "$frames"); do
+        screencapture -x -o -l"$id" "$tmp/f$i.png" 2>/dev/null || true
+        sleep 0.05
+    done
+    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+    if ! ls "$tmp"/f*.png >/dev/null 2>&1; then
+        echo "    !! no frames captured (Screen Recording permission?)"; rm -rf "$tmp"; return 1
+    fi
+    # Assemble: infinite loop, downscaled to README width, palette-optimized to keep size down.
+    convert -delay "$delay" -loop 0 "$tmp"/f*.png -resize "${width}x" -layers Optimize -fuzz 4% "$out"
+    rm -rf "$tmp"
+    [ -f "$out" ] && echo "    wrote $out ($(du -h "$out" | awk '{print $1}'))"
+}
+
 # Map each README screenshot to its shot. (file ← state)
-# `fps` is intentionally NOT in the automated set — every other shot hides the FPS counter,
-# and the dedicated `fps` shot (the only one that still shows it) is run manually on demand:
+# `fps` and `welcome-gif` are intentionally NOT in the automated set — they're heavier / special
+# (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
-declare -a ALL=(git-diff plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
+#   ./scripts/screenshots.sh welcome-gif
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -210,7 +246,7 @@ shoot_until() {
             echo "    !! gave up after $n tries"
             return 1
         fi
-        echo "    retry $n/$MAX_TRIES…"
+        echo "    retry $n/${MAX_TRIES}..."
         sleep 1
     done
 }
@@ -218,6 +254,7 @@ shoot_until() {
 run_one() {
     case "$1" in
         git-diff)         shoot_until git-diff         git-diff.png         window KYDE_SHOT_REPO="$DIFF_REPO" ;;
+        light)            shoot_until light            light.png            window KYDE_SHOT_REPO="$DIFF_REPO" ;;
         plugins)          shoot_until plugins          plugins.png          window ;;
         plugins-window)   shoot_until plugins-window   plugins-window.png   region ;;
         markdown-support) shoot_until markdown-support markdown-support.png window ;;
@@ -227,6 +264,7 @@ run_one() {
         history)          shoot_until history          history.png          window ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
+        welcome-gif)      shoot_welcome_gif ;;
         *) echo "unknown shot: $1"; exit 2 ;;
     esac
 }

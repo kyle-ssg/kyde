@@ -2893,17 +2893,73 @@ version = "1.3.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "codebook-tree-sitter-latex",
  "futures",
  "fuzzy-matcher",
  "gpui",
+ "kyde-color",
+ "kyde-config",
+ "kyde-diff",
+ "kyde-git",
+ "kyde-markdown",
+ "kyde-syntax",
+ "kyde-theme",
+ "kyde-tree",
+ "kyde-ui",
+ "kyde-update",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "pulldown-cmark",
  "serde",
  "serde_json",
+ "ttf-parser 0.25.1",
+ "unicode-segmentation",
+ "ureq",
+ "winresource",
+]
+
+[[package]]
+name = "kyde-color"
+version = "1.3.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
+name = "kyde-config"
+version = "1.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kyde-diff"
+version = "1.3.0"
+dependencies = [
  "similar",
+]
+
+[[package]]
+name = "kyde-git"
+version = "1.3.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "kyde-markdown"
+version = "1.3.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
+name = "kyde-syntax"
+version = "1.3.0"
+dependencies = [
+ "codebook-tree-sitter-latex",
+ "kyde-color",
+ "kyde-theme",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-css",
@@ -2919,10 +2975,36 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-yaml",
- "ttf-parser 0.25.1",
- "unicode-segmentation",
- "ureq",
- "winresource",
+]
+
+[[package]]
+name = "kyde-theme"
+version = "1.3.0"
+dependencies = [
+ "kyde-color",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kyde-tree"
+version = "1.3.0"
+
+[[package]]
+name = "kyde-ui"
+version = "1.3.0"
+dependencies = [
+ "gpui",
+ "kyde-color",
+ "kyde-theme",
+]
+
+[[package]]
+name = "kyde-update"
+version = "1.3.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

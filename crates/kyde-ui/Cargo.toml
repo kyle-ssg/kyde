@@ -1,0 +1,17 @@
+[package]
+name = "kyde-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kyde's reusable, app-agnostic UI toolkit (gpui widgets): buttons, tabs, badges, checkboxes, the file-tree row, etc."
+
+[dependencies]
+gpui.workspace = true
+# `gpui` feature → `Color: Into<Rgba/Hsla/Fill>`, so theme colours feed gpui builders directly.
+kyde-color = { path = "../kyde-color", features = ["gpui"] }
+kyde-theme = { path = "../kyde-theme" }
+
+[lints]
+workspace = true

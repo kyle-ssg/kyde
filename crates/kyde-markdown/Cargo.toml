@@ -1,0 +1,14 @@
+[package]
+name = "kyde-markdown"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Markdown block/span model for Kyde (built on pulldown-cmark). Pure, no GUI."
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false }
+
+[lints]
+workspace = true

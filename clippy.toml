@@ -1,0 +1,9 @@
+# Workspace clippy config.
+#
+# `[workspace.lints.clippy]` in the root Cargo.toml sets `unwrap_used = "deny"` /
+# `expect_used = "deny"` (every member opts in via `[lints] workspace = true`), banning
+# panicking accessors in shipping code. Test code is exempt — `.unwrap()`/`.expect()` in a test
+# IS the assertion, and failing loudly is the point — so these two flags scope those lints to
+# non-test code instead of forcing an `#[allow]` onto every test module.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

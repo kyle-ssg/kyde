@@ -1,31 +1,63 @@
-//! Kyde — fast native macOS git commit/diff tool, IntelliJ "Commit Changes" style.
+//! Kyde — fast native macOS git commit/diff tool, `IntelliJ` "Commit Changes" style.
 //!
 //! Features: changed-files tree + side-by-side diff, per-hunk stage/revert chevrons,
 //! editable commit message, folder browse with a real syntax-highlighted editor,
-//! a fuzzy "Go to File" finder (Cmd+Shift+O), a configurable keymap with WebStorm
-//! and VSCode presets, and a re-accessible onboarding / keymap picker.
+//! a fuzzy "Go to File" finder (Cmd+Shift+O), a configurable keymap with `WebStorm`
+//! and `VSCode` presets, and a re-accessible onboarding / keymap picker.
+//!
+//! Lints (unwrap/expect deny, `clippy::pedantic`) are configured centrally in
+//! `[workspace.lints]` (Cargo.toml) and opted into via `[lints] workspace = true`.
 
+// ── core shell ──
 mod app;
-mod clipboard;
-mod diff;
-mod editor;
-mod git;
-mod highlight;
-mod keymap;
-mod markdown;
-mod mdview;
-mod plugins;
-mod projects;
-#[cfg(feature = "remote-images")]
-mod remote_img;
-mod render;
-mod scratch;
-mod shellcmd;
+mod divider;
+// Always compiled (so its unit tests run in any feature set), but only *used* behind the
+// `terminal` feature — allow dead code when that's off.
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+mod term_panel;
 #[cfg(feature = "terminal")]
-mod terminal;
-mod theme;
-mod tree;
-mod update;
+use term_panel::{TermPanel, ToggleAction};
+mod render;
+pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
+// Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
+// resolves) and glob-re-exported so call sites use `btn_primary`/`file_badge`/… unqualified.
+pub(crate) use app::{
+    CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
+    STATUS_REFRESH_DEBOUNCE,
+};
+use kyde_ui as ui;
+pub(crate) use kyde_ui::{
+    badge_inner, btn_primary, btn_primary_state, btn_secondary, checkbox_box, file_badge, lerp_rgb,
+    menu_icon, scrollbar_thumb, tab_pill,
+};
+
+// ── per-feature views (impl Kyde blocks; see src/views/) ──
+mod views;
+
+// ── gpui-coupled widgets; re-aliased so `editor::`/`mdview::`/… paths stay unchanged ──
+mod widgets;
+use widgets::editor;
+use widgets::mdview;
+#[cfg(feature = "remote-images")]
+use widgets::remote_img;
+#[cfg(feature = "terminal")]
+use widgets::terminal;
+
+// ── small OS utilities ──
+mod platform;
+use platform::{scratch, shellcmd};
+
+// ── workspace crates, aliased back to their old module names ──
+use kyde_config::keymap;
+use kyde_config::plugins;
+use kyde_config::projects;
+use kyde_diff as diff;
+use kyde_git as git;
+use kyde_markdown as markdown;
+use kyde_syntax as highlight;
+use kyde_theme as theme;
+use kyde_tree as tree;
+use kyde_update as update;
 
 use diff::{FileDiff, HunkKind};
 use editor::{CodeEditor, EditorEvent};
@@ -60,7 +92,10 @@ actions!(
         EscapeKey,
         ToggleTerminal,
         NewTerminalTab,
+        CloseTerminalTab,
         ClearTerminal,
+        TerminalBackspace,
+        TerminalEscape,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -207,8 +242,19 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.bind_keys([
         KeyBinding::new("ctrl-`", ToggleTerminal, None),
         KeyBinding::new("cmd-t", NewTerminalTab, Some("Terminal")),
-        // ⌘K clears the terminal; scoped to its context so it overrides the commit binding.
+        // ⌘W closes the active terminal tab when the terminal is focused (iTerm-style);
+        // scoped to "Terminal" so it shadows the editor-tab ⌘W (`CloseTab`).
+        KeyBinding::new("cmd-w", CloseTerminalTab, Some("Terminal")),
+        // ⌘K clears the terminal; "Terminal" context (depth) beats the "Kyde"-scoped commit.
         KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
+        // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). gpui
+        // dispatches binding ACTIONS *before* on_key_down and an action stops propagation by
+        // default, so on_key_down never runs once a binding matches — meaning a no-op here would
+        // swallow the key (nothing reaches the PTY). So these route to actions whose handlers
+        // (on TerminalView) write the raw byte to the shell, exactly like the editor binds
+        // backspace to its own buffer action. The "Terminal" context (depth) shadows "Kyde".
+        KeyBinding::new("backspace", TerminalBackspace, Some("Terminal")),
+        KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys).
     cx.bind_keys([
@@ -224,7 +270,12 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
 
 fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
     if let Some(k) = km.key_for(name) {
-        cx.bind_keys([KeyBinding::new(&k, action, None)]);
+        // Scope to the "Kyde" root context (NOT global/None) so a deeper widget context —
+        // "Terminal", "CodeEditor" — cleanly overrides the same key by dispatch depth. A
+        // context-less binding gets *max* depth and would tie with (and sometimes beat) the
+        // widget binding (e.g. ⌘K commit shadowing the terminal's Clear). "Kyde" is always in
+        // the focus stack (the root carries it), so these still fire everywhere else.
+        cx.bind_keys([KeyBinding::new(&k, action, Some("Kyde"))]);
     }
 }
 
@@ -237,6 +288,17 @@ enum Mode {
     Commit,
     Browse,
     History,
+}
+
+/// Which editor the in-editor find/replace bar acts on (set from focus when it opens).
+#[derive(Clone, Copy, PartialEq)]
+enum FindTarget {
+    /// The Browse file editor.
+    File,
+    /// The diff's left (base) pane — read-only, so replace is disabled.
+    DiffLeft,
+    /// The diff's right (working) pane.
+    DiffRight,
 }
 
 /// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
@@ -358,11 +420,11 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
 /// What a right-click context menu was opened on.
 #[derive(Clone)]
 enum MenuTarget {
-    /// A path in the Browse tree (`bool` = is_dir), or the open editor file.
+    /// A path in the Browse tree (`bool` = `is_dir`), or the open editor file.
     BrowseFile(PathBuf, bool),
     /// Right-click inside the editor pane — git commands only (no file ops).
     EditorGit(PathBuf),
-    /// A path (file or folder) in the Commit tree — `bool` = is_dir.
+    /// A path (file or folder) in the Commit tree — `bool` = `is_dir`.
     CommitPath(PathBuf, bool),
     /// A changed file in the Rollback modal, by index into `files` (→ View Diff).
     RollbackFile(usize),
@@ -447,6 +509,7 @@ struct ProjectSession {
     mode: Mode,
     open_path: Option<PathBuf>,
     open_tabs: Vec<PathBuf>,
+    preview_tab: Option<PathBuf>,
     selected: Option<usize>,
     expanded: std::collections::HashSet<PathBuf>,
 }
@@ -512,8 +575,10 @@ struct Kyde {
     diff_scroll: ScrollHandle,
     /// Left pane's fraction of the diff island width (the draggable center divider sets it).
     diff_split: f32,
-    /// True while dragging the center divider to resize the two diff panes.
-    diff_pane_resizing: bool,
+    /// The single in-flight divider drag, if any: which divider + the grab offset captured at
+    /// mouse-down (cursor coord minus the divider's position). One field for every divider —
+    /// see `Divider` and `Kyde::drag_divider`.
+    divider_drag: Option<(Divider, f32)>,
     /// Scroll handle for the Browse editor pane — drives the hover scrollbars.
     file_scroll: ScrollHandle,
     /// Active scrollbar-thumb drag (which scroll handle, axis, grab cursor, grab offset).
@@ -534,7 +599,6 @@ struct Kyde {
     projects_search_focused: bool,
     /// Editor pane width (px) of the markdown side-by-side split (drag-resizable).
     md_editor_w: f32,
-    diff_resizing: bool,
 
     // Browse mode
     all_files: Vec<PathBuf>,
@@ -548,17 +612,13 @@ struct Kyde {
     /// True when the commit view's changed-files panel is minimized to a thin strip (its `−`
     /// button), giving the side-by-side diff the full width. Independent of `tree_collapsed`.
     commit_collapsed: bool,
-    /// True while the user is dragging the tree/editor divider.
-    tree_resizing: bool,
-    /// Cursor-x minus the divider edge at drag start, so the first mouse-move doesn't jolt
-    /// the divider under the pointer.
-    tree_drag_offset: f32,
-    /// Same grab-offset trick for the diff-pane center divider and the markdown split — the
-    /// cursor-x minus the divider's pixel position at drag start.
-    diff_drag_offset: f32,
     open_path: Option<PathBuf>,
     /// Open editor tabs, left→right in open order. `open_path` = the active one.
     open_tabs: Vec<PathBuf>,
+    /// VS Code-style *preview* tab: at most one tab is temporary, shown in italics. A
+    /// single-click in the tree opens here, reusing this same slot for the next single-click;
+    /// a double-click (or editing the file) promotes it to a permanent tab (`= None`).
+    preview_tab: Option<PathBuf>,
     /// Project-scoped scratch files (absolute paths, outside the repo), shown in the tree.
     scratches: Vec<PathBuf>,
     /// Scroll position of the (horizontally scrollable) tab strip, so opening a
@@ -572,9 +632,11 @@ struct Kyde {
     tree_scroll: ScrollHandle,
     file_editor: Entity<CodeEditor>,
 
-    // In-editor find / replace bar (operates on `file_editor`).
+    // In-editor find / replace bar. Targets whichever editor was focused when it opened
+    // (`find_target`) — the Browse file editor, or a diff pane in the Show-Diff view.
     find_open: bool,
     find_replace: bool,
+    find_target: FindTarget,
     find_query: Entity<CodeEditor>,
     replace_query: Entity<CodeEditor>,
     find_matches: Vec<std::ops::Range<usize>>,
@@ -618,6 +680,12 @@ struct Kyde {
     fonts_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Data & Restart" confirmation — a native modal window (native-menu action).
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Settings — a native modal window with a category sidebar (Appearance/Keymap/…).
+    settings_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Which Settings category the sidebar has selected.
+    settings_section: SettingsSection,
+    /// Whether the Appearance → Theme select dropdown is expanded.
+    settings_theme_open: bool,
     /// Cached `(path, registered family name)` for the open font file's preview.
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
@@ -639,6 +707,16 @@ struct Kyde {
     context_menu: Option<ContextMenu>,
     /// Show-Diff viewer — its own native OS window (`None` when closed).
     diff_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// True while the Show-Diff modal window is open. The modal renders the shared
+    /// `diff_left`/`diff_right` editors, so the inline diff is suppressed meanwhile (rendering
+    /// one editor in two windows desyncs scroll). Set on open, cleared on the window's release.
+    diff_modal_open: bool,
+    /// The main window's bounds, refreshed each frame in `impl Render for Kyde`.
+    main_window_bounds: Option<gpui::WindowBounds>,
+    /// True when the main window is showing the full-screen Show-Diff view (rollback/push diff).
+    /// It replaces the normal mode content and reuses the inline `render_diff`, so it inherits
+    /// all editor functionality (find, divider drag, scroll). Escape / the Back button exits.
+    diff_view_open: bool,
     /// Rollback — its own native OS window (real titlebar + traffic lights). `None` closed.
     rollback_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Create New Branch" dialog — its own native window. The name is typed into
@@ -648,7 +726,7 @@ struct Kyde {
     new_branch_overwrite: bool,
     rollback_checked: std::collections::HashSet<PathBuf>,
     rollback_delete_added: bool,
-    /// Delete-confirmation modal: the (path, is_dir) pending deletion.
+    /// Delete-confirmation modal: the (path, `is_dir`) pending deletion.
     delete_target: Option<(PathBuf, bool)>,
     /// New-file / rename modal state + its single-line name input.
     name_prompt: Option<NamePrompt>,
@@ -657,6 +735,9 @@ struct Kyde {
     // Branch switcher (bottom-right status bar + popup)
     current_branch: Option<String>,
     branch_list: Vec<String>,
+    /// Remote-only branches (short name, e.g. "feature-x") that have no local head yet —
+    /// shown under a "Remote" section so freshly-fetched branches are checkout-able.
+    branch_remotes: Vec<String>,
     branch_popup_open: bool,
     branch_query: Entity<CodeEditor>,
     /// Expanded nodes in the branch tree (section keys like "sec:recent" and folder
@@ -721,11 +802,6 @@ struct Kyde {
     /// When true the history bottom panel is minimised to just its toolbar (the header
     /// chevron toggles it), giving the diff the full height.
     history_panel_collapsed: bool,
-    /// True while dragging the history panel's top (vertical) divider.
-    history_v_resizing: bool,
-    /// Cursor-to-divider gap captured at drag start, so the panel doesn't jolt to the
-    /// cursor on the first mouse-move (mirrors `diff_drag_offset` for the vertical axis).
-    history_v_drag_offset: f32,
     /// What the selected commit is diffed against.
     history_compare: CompareMode,
     /// Compare-mode dropdown open in the history view.
@@ -742,31 +818,21 @@ struct Kyde {
     history_commit_query: Entity<CodeEditor>,
     /// Scroll position of the commit list.
     history_scroll: ScrollHandle,
-    /// Width (px) of the commit-list pane on the left of the history panel (resizable);
-    /// the changed-files pane fills the rest on the right.
-    history_commit_w: f32,
-    /// True while dragging the commit/files divider in the history panel.
-    history_resizing: bool,
+    /// Fraction (0..1) of the history panel width given to the commit-list pane on the left
+    /// (resizable); the changed-files pane fills the rest on the right. Defaults to 2/3.
+    history_commit_frac: f32,
 
     // Bottom terminal panel (gated behind the `terminal` Cargo feature).
     /// One `TerminalView` entity per tab, left→right in open order.
     #[cfg(feature = "terminal")]
     term_tabs: Vec<Entity<terminal::TerminalView>>,
-    /// Active terminal tab index into `term_tabs`.
+    /// Control state of the panel — open / active / maximized / focus-pending. The pure,
+    /// unit-tested state machine (open/close/toggle/focus); see `src/term_panel.rs`.
     #[cfg(feature = "terminal")]
-    term_active: usize,
-    /// Whether the bottom terminal panel is visible.
-    #[cfg(feature = "terminal")]
-    term_open: bool,
+    term_panel: TermPanel,
     /// Height (px) of the terminal panel, drag-resizable via its top divider.
     #[cfg(feature = "terminal")]
     term_height: f32,
-    /// True while dragging the terminal panel's top divider.
-    #[cfg(feature = "terminal")]
-    term_resizing: bool,
-    /// When true the terminal fills the whole right column (tree + editor hidden).
-    #[cfg(feature = "terminal")]
-    term_maximized: bool,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -780,6 +846,25 @@ enum ModalKind {
     Plugins,
     Fonts,
     ClearData,
+    Settings,
+}
+
+/// Which category the Settings window's sidebar has selected. Drives `render_settings_body`'s
+/// content pane.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    Appearance,
+    Keymap,
+    LanguagePacks,
+}
+
+impl SettingsSection {
+    /// Sidebar order + labels.
+    pub(crate) const ALL: &'static [(SettingsSection, &'static str)] = &[
+        (SettingsSection::Appearance, "Appearance"),
+        (SettingsSection::Keymap, "Keymap"),
+        (SettingsSection::LanguagePacks, "Language Packs"),
+    ];
 }
 
 /// A separate native OS window hosting one of Kyde's modals (Rollback / Push / Diff). It holds
@@ -795,6 +880,20 @@ struct ModalWindow {
 impl ModalWindow {
     fn new(kyde: Entity<Kyde>, kind: ModalKind, cx: &mut Context<Self>) -> Self {
         cx.observe(&kyde, |_, _, cx| cx.notify()).detach();
+        // The Diff modal renders the SAME `diff_left`/`diff_right` editors as the inline diff;
+        // rendering one editor entity in two windows desyncs scroll + garbles layout. So while
+        // this window lives, the main view suppresses its inline diff (`diff_modal_open`). Clear
+        // the flag when the window closes (manual or programmatic) so the inline diff returns.
+        if kind == ModalKind::Diff {
+            let kyde = kyde.clone();
+            cx.on_release(move |_, cx| {
+                kyde.update(cx, |k, kcx| {
+                    k.diff_modal_open = false;
+                    kcx.notify();
+                });
+            })
+            .detach();
+        }
         Self {
             kyde,
             kind,
@@ -821,6 +920,7 @@ impl Render for ModalWindow {
             ModalKind::Plugins => k.render_plugins_body(kcx),
             ModalKind::Fonts => k.render_fonts_body(kcx),
             ModalKind::ClearData => k.render_clear_data_body(kcx),
+            ModalKind::Settings => k.render_settings_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -836,7 +936,7 @@ impl Render for ModalWindow {
                     match ev.keystroke.key.as_str() {
                         "escape" => window.remove_window(),
                         "enter" if kind == ModalKind::NewBranch => {
-                            this.kyde.update(cx, |k, kcx| k.do_create_branch(kcx));
+                            this.kyde.update(cx, Kyde::do_create_branch);
                         }
                         _ => {}
                     }
@@ -887,7 +987,7 @@ fn slugify_branch(name: &str) -> String {
     s
 }
 
-fn status_color(s: FileStatus) -> gpui::Rgba {
+fn status_color(s: FileStatus) -> kyde_color::Color {
     match s {
         FileStatus::Added => theme::get().status_added,
         FileStatus::Modified | FileStatus::Renamed => theme::get().status_modified,
@@ -901,35 +1001,6 @@ impl Focusable for Kyde {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
-}
-
-/// A full-window dimmed overlay that centers its child. When `dismissable`, clicking the
-/// backdrop closes the open overlays; otherwise the backdrop swallows the click (modal).
-fn overlay(cx: &mut Context<Kyde>, dismissable: bool) -> gpui::Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        // A dim scrim, not a blackout — the app stays visible behind the modal.
-        .bg(gpui::rgba(0x00000099))
-        .occlude()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _e, window, cx| {
-                if dismissable {
-                    this.finder_open = false;
-                    this.onboarding_open = false;
-                    this.delete_target = None;
-                    window.focus(&this.focus_handle);
-                    cx.notify();
-                }
-            }),
-        )
 }
 
 /// A flattened row of the branch tree.
@@ -954,6 +1025,7 @@ enum BranchNode {
 fn branch_rows(
     recent: &[String],
     all: &[String],
+    remotes: &[String],
     expanded: &std::collections::HashSet<String>,
     force_open: bool,
 ) -> Vec<BranchRow> {
@@ -961,6 +1033,7 @@ fn branch_rows(
     for (label, key, list) in [
         ("Recent", "sec:recent", recent),
         ("Local", "sec:local", all),
+        ("Remote", "sec:remote", remotes),
     ] {
         if list.is_empty() {
             continue;
@@ -1032,52 +1105,7 @@ fn emit_branch_level(
     }
 }
 
-/// How a file's icon renders in the Browse tree.
-enum Badge {
-    /// A short colored monogram, e.g. "rs", "{}".
-    Tag(&'static str, gpui::Rgba),
-    /// An SVG icon (path served by `Assets`), tinted with the given color.
-    Icon(&'static str, gpui::Rgba),
-    /// A filled rounded "brand" box with bold letters (TS/JS-style), `(text, fg, bg)`.
-    Mono(&'static str, gpui::Rgba, gpui::Rgba),
-}
-
-/// The inner element for a badge, at a consistent visual size. Callers wrap it in their
-/// own fixed-width box / alignment. `bump` adds 2px (file explorer + bottom bar use it;
-/// the tabs / commit list stay at the base size).
-fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
-    let d = grow;
-    match b {
-        Badge::Tag(label, color) => div()
-            .text_size(px(10.0 + d))
-            .text_color(color)
-            .child(label)
-            .into_any_element(),
-        Badge::Icon(path, color) => svg()
-            .path(path)
-            .size(px(14.0 + d))
-            .text_color(color)
-            .into_any_element(),
-        Badge::Mono(text, fg, bg) => div()
-            .w(px(16.0 + d))
-            .h(px(14.0 + d))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_sm()
-            .bg(bg)
-            .child(
-                div()
-                    .text_size(px(8.0 + d))
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(fg)
-                    .child(text),
-            )
-            .into_any_element(),
-    }
-}
-
-/// File-type badge for the Browse tree (approximates IntelliJ's icons). Known types get a
+/// File-type badge for the Browse tree (approximates `IntelliJ`'s icons). Known types get a
 /// colored monogram; everything else gets the generic lines/document icon.
 /// Raster image types we preview inline (rendered with `img()` instead of the
 /// text editor). SVG stays a text/icon file — it has its own vector path.
@@ -1124,42 +1152,6 @@ fn font_family_name(bytes: &[u8]) -> Option<String> {
     fallback
 }
 
-fn file_badge(path: &std::path::Path) -> Badge {
-    let rgb = |v: u32| gpui::rgb(v);
-    // Ignore files (.gitignore, .dockerignore, .prettierignore, …) → a "ban" circle-slash.
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name.ends_with("ignore") {
-            return Badge::Icon("icons/ban.svg", rgb(0x9AA0A6));
-        }
-    }
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "rs" => Badge::Tag("rs", rgb(0xDEA584)),
-        // Brand-style filled boxes, like the real-world TS/JS icons.
-        "ts" | "tsx" => Badge::Mono("TS", rgb(0xFFFFFF), rgb(0x3178C6)),
-        "js" | "jsx" | "mjs" | "cjs" => Badge::Mono("JS", rgb(0x1A1A1A), rgb(0xF7DF1E)),
-        // JSON: plain braces, no filled box.
-        "json" => Badge::Tag("{}", rgb(0xCBCB41)),
-        "md" | "markdown" => Badge::Tag("md", rgb(0x7E9BF0)),
-        "css" => Badge::Tag("css", rgb(0x3178C6)),
-        "scss" | "sass" => Badge::Tag("css", rgb(0xCF649A)),
-        "html" | "htm" => Badge::Tag("<>", rgb(0xE44D26)),
-        "sh" | "bash" | "zsh" => Badge::Tag("sh", rgb(0x89E051)),
-        "yml" | "yaml" => Badge::Tag("yml", rgb(0xD46A6A)),
-        "toml" => Badge::Tag("tml", rgb(0x9C4221)),
-        "py" | "pyi" => Badge::Tag("py", rgb(0x3572A5)),
-        "go" => Badge::Tag("go", rgb(0x00ADD8)),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" | "tiff" | "tif"
-        | "svg" => Badge::Icon("icons/image.svg", rgb(0xB180D7)),
-        // Generic file (incl. no extension): IntelliJ-style plain-text lines icon.
-        _ => Badge::Icon("icons/file-lines.svg", rgb(0x9AA0A6)),
-    }
-}
-
 /// Sentinel path for the virtual "Scratches" tree folder. The leading control char keeps
 /// it from ever matching a real file path (used only for tree grouping + expand state).
 fn scratch_group_path() -> PathBuf {
@@ -1170,11 +1162,10 @@ fn scratch_group_path() -> PathBuf {
 /// file: plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the
 /// full "clear data" reset (uninstalls all plugins + drops all cached settings).
 fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
-        });
+    let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"),
+        PathBuf::from,
+    );
     base.join("kyde")
 }
 
@@ -1187,7 +1178,7 @@ fn load_ui_bool(key: &str, default: bool) -> bool {
     std::fs::read_to_string(ui_settings_path())
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
+        .and_then(|v| v.get(key).and_then(serde_json::Value::as_bool))
         .unwrap_or(default)
 }
 /// Set one boolean key in `ui.json`, preserving the file's other keys (read-modify-write so
@@ -1211,30 +1202,6 @@ fn load_show_fps() -> bool {
 }
 fn save_show_fps(v: bool) {
     save_ui_bool("show_fps", v);
-}
-
-/// The app's standard checkbox: a small rounded square, filled with `check.svg` when ticked.
-/// Used by the tree rows and the rollback modal — never an emoji glyph.
-fn checkbox_box(checked: bool) -> gpui::Div {
-    let t = theme::get();
-    let b = div()
-        .flex_none()
-        .size(px(15.0))
-        .rounded_sm()
-        .border_1()
-        .flex()
-        .items_center()
-        .justify_center();
-    if checked {
-        b.bg(t.primary).border_color(t.primary).child(
-            svg()
-                .path("icons/check.svg")
-                .size(px(11.0))
-                .text_color(t.primary_text),
-        )
-    } else {
-        b.border_color(t.line_number)
-    }
 }
 
 /// One visual row of the aligned side-by-side diff. `old`/`new` index into each
@@ -1333,8 +1300,8 @@ fn diff_fillers(
 fn diff_line_bgs(
     d: &FileDiff,
 ) -> (
-    std::collections::HashMap<usize, gpui::Rgba>,
-    std::collections::HashMap<usize, gpui::Rgba>,
+    std::collections::HashMap<usize, kyde_color::Color>,
+    std::collections::HashMap<usize, kyde_color::Color>,
 ) {
     let t = theme::get();
     let (mut old, mut new) = (
@@ -1453,7 +1420,7 @@ impl gpui::AssetSource for Assets {
     }
 }
 
-/// Register the bundled Inter (UI) + JetBrains Mono (code) faces so `font_family` resolves
+/// Register the bundled Inter (UI) + `JetBrains` Mono (code) faces so `font_family` resolves
 /// to them instead of silently falling back to a system font. Both are OFL-licensed.
 fn load_fonts(cx: &mut App) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
@@ -1520,14 +1487,14 @@ fn install_crash_logger() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let bt = std::backtrace::Backtrace::force_capture();
-        let loc = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown".into());
+        let loc = info.location().map_or_else(
+            || "unknown".into(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
         let msg = info
             .payload()
             .downcast_ref::<&str>()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic>".into());
         let entry = format!("\n=== panic at {loc} ===\n{msg}\n{bt}\n");
@@ -1582,8 +1549,8 @@ fn reexec_with_proper_name() {
 fn reexec_with_proper_name() {}
 
 /// Name the running process "Kyde" so the macOS dock tile / menu-bar app menu read "Kyde"
-/// instead of the lowercase executable name. Must run before NSApplication checks in with
-/// LaunchServices, so it's called at the very top of `main`. No-op off macOS.
+/// instead of the lowercase executable name. Must run before `NSApplication` checks in with
+/// `LaunchServices`, so it's called at the very top of `main`. No-op off macOS.
 #[cfg(target_os = "macos")]
 fn set_app_name() {
     use objc2_foundation::{NSProcessInfo, NSString};
@@ -1608,6 +1575,10 @@ fn set_dock_icon() {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: `app` is the shared NSApplication obtained on the main thread (`mtm` proves it),
+    // and `image` is a fully-initialized, objc2-retained NSImage (the `else` above bailed if
+    // init failed). `setApplicationIconImage:` only reads the image and retains it itself, so
+    // passing a valid `&NSImage` upholds every precondition of the AppKit call.
     unsafe { app.setApplicationIconImage(Some(&image)) };
 }
 
@@ -1632,6 +1603,19 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         }
         view.plugins.save();
     };
+    // Pick the changed file to open in the diff pane: prefer the curated `color.rs` showcase
+    // (the screenshot fixture edits it), then any Rust file, else the first change.
+    fn diff_pick(view: &Kyde) -> Option<usize> {
+        view.files
+            .iter()
+            .position(|f| f.path.ends_with("color.rs"))
+            .or_else(|| {
+                view.files
+                    .iter()
+                    .position(|f| f.path.extension().and_then(|e| e.to_str()) == Some("rs"))
+            })
+            .or(if view.files.is_empty() { None } else { Some(0) })
+    }
     match name {
         // Commit view, a changed Rust file selected → side-by-side coloured diff.
         "git-diff" => {
@@ -1643,8 +1627,22 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.open_project(PathBuf::from(repo), cx);
             }
             view.enter_commit(cx);
-            // Click a changed file so the main content shows a side-by-side diff: prefer
-            // README.md, else fall back to the first changed file.
+            // Click a changed file so the main content shows a side-by-side diff.
+            if let Some(i) = diff_pick(view) {
+                view.select_with(i, Some(cx));
+            }
+        }
+        // Same side-by-side diff as `git-diff`, but with the "Kyde Light" palette applied first
+        // so the README can show the light theme. Switches the live theme before any render.
+        "light" => {
+            // Ephemeral (no save): the shots share one throwaway config dir, so persisting the
+            // light palette here would make every later (dark) shot launch in light mode.
+            theme::set_palette_ephemeral(theme::Theme::light());
+            set_packs(view, &["rust"]);
+            if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                view.open_project(PathBuf::from(repo), cx);
+            }
+            view.enter_commit(cx);
             let pick = view
                 .files
                 .iter()
@@ -1678,7 +1676,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_go_to_file(&GoToFile, window, cx);
             view.finder_query.update(cx, |e, cx| {
-                e.set_content("render".to_string(), Lang::PlainText, cx)
+                e.set_content("render".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
         }
@@ -1690,7 +1688,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_find_in_files(&FindInFiles, window, cx);
             view.finder_query.update(cx, |e, cx| {
-                e.set_content("kyde".to_string(), Lang::PlainText, cx)
+                e.set_content("kyde".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
         }
@@ -1724,12 +1722,19 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         "terminal" => {
             set_packs(view, &["rust"]);
             view.open_file(PathBuf::from("src/terminal.rs"), cx);
-            view.term_open = true;
+            view.term_panel.open = true;
             view.new_terminal_tab(cx);
             if let Some(t) = view.term_tabs.last() {
                 t.read(cx).send_input("git status && ls src\n");
             }
             view.focus_active_terminal(window, cx);
+            cx.notify();
+        }
+        // Projects landing welcome hero (the animated 3D KYDE logo + shimmer) — used by the
+        // README welcome GIF. Force no project open so `render` takes the landing path; the
+        // throwaway config has no recents, so it renders the animated hero (not the list).
+        "welcome" => {
+            view.repo_root = None;
             cx.notify();
         }
         other => eprintln!("KYDE_SHOT: unknown state {other:?}"),
@@ -1769,6 +1774,9 @@ fn main() {
         cx.set_dock_menu(dock_menu(&Recents::load()));
 
         let bounds = Bounds::centered(None, gpui::size(px(1280.0), px(820.0)), cx);
+        // Blessed expect: opening the one main window can only fail on a fatal startup condition
+        // (no display / GPU surface), where panicking with a clear message is the right call.
+        #[allow(clippy::expect_used)]
         let window = cx
             .open_window(
                 WindowOptions {
@@ -1848,7 +1856,7 @@ mod branch_tree_tests {
         let mut exp = HashSet::new();
         exp.insert("sec:local".to_string());
         exp.insert("sec:local/feat".to_string());
-        let rows = branch_rows(&[], &all, &exp, false);
+        let rows = branch_rows(&[], &all, &[], &exp, false);
 
         // Section root present.
         assert!(matches!(
@@ -1871,7 +1879,7 @@ mod branch_tree_tests {
     #[test]
     fn collapsed_section_hides_children() {
         let all = vec!["main".to_string()];
-        let rows = branch_rows(&[], &all, &HashSet::new(), false);
+        let rows = branch_rows(&[], &all, &[], &HashSet::new(), false);
         // Only the collapsed "Local" root, no leaves.
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "Local");
@@ -1947,7 +1955,7 @@ mod gpui_smoke_tests {
                 k.open_new_branch(cx);
                 // Type a name with a space — it should be slugified on Create.
                 k.branch_query.update(cx, |e, cx| {
-                    e.set_content("new branch".into(), Lang::PlainText, cx)
+                    e.set_content("new branch".into(), Lang::PlainText, cx);
                 });
             })
             .unwrap();
@@ -2007,7 +2015,7 @@ mod gpui_smoke_tests {
         cx.run_until_parked(); // the window opens + renders on the spawned task
         handle
             .update(cx, |k, _w, _cx| {
-                assert!(k.rollback_win.is_some(), "rollback window should be open")
+                assert!(k.rollback_win.is_some(), "rollback window should be open");
             })
             .unwrap();
     }
@@ -2082,7 +2090,7 @@ mod gpui_smoke_tests {
         // Browse with a file open in the editor.
         handle
             .update(cx, |k, _w, cx| {
-                k.open_file(std::path::PathBuf::from("app.tsx"), cx)
+                k.open_file(std::path::PathBuf::from("app.tsx"), cx);
             })
             .unwrap();
         settle(cx);
@@ -2122,9 +2130,7 @@ mod gpui_smoke_tests {
         settle(cx);
 
         // Branch popup.
-        handle
-            .update(cx, |k, w, cx| k.toggle_branch_popup(w, cx))
-            .unwrap();
+        handle.update(cx, super::Kyde::toggle_branch_popup).unwrap();
         settle(cx);
         handle
             .update(cx, |k, _w, _cx| k.branch_popup_open = false)
@@ -2175,7 +2181,7 @@ mod gpui_smoke_tests {
         settle(cx);
         handle
             .update(cx, |k, _w, cx| {
-                k.close_modal_window(ModalKind::ClearData, cx)
+                k.close_modal_window(ModalKind::ClearData, cx);
             })
             .unwrap();
         settle(cx);
@@ -2187,7 +2193,7 @@ mod gpui_smoke_tests {
         settle(cx);
         handle
             .update(cx, |k, _w, cx| {
-                k.close_modal_window(ModalKind::Rollback, cx)
+                k.close_modal_window(ModalKind::Rollback, cx);
             })
             .unwrap();
         settle(cx);
@@ -2222,4 +2228,144 @@ mod gpui_smoke_tests {
         assert!(url.contains("&body="));
         assert!(url.contains("boom") || url.contains("Crash"));
     }
+
+    /// ⌃` opens the panel + spawns the first tab, and ⌘W (``act_close_terminal_tab``) closes the
+    /// active tab — the last one hides the panel. Exercises the real gpui wiring (window +
+    /// PTY-backed ``TerminalView``s + the ``TermPanel`` state), not just the pure state machine.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_toggle_opens_and_cmd_w_closes(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.term_panel.open, "⌃` opens the panel");
+                assert_eq!(k.term_tabs.len(), 1, "first tab spawned on open");
+            })
+            .unwrap();
+        // A second tab, then ⌘W closes the active one → one remains, panel stays open.
+        handle
+            .update(cx, |k, _w, cx| k.new_terminal_tab(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, window, cx| {
+                assert_eq!(k.term_tabs.len(), 2);
+                k.act_close_terminal_tab(&CloseTerminalTab, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.term_tabs.len(), 1, "⌘W closes the active tab");
+                assert!(k.term_panel.open, "panel stays open while a tab remains");
+            })
+            .unwrap();
+        // ⌘W the last tab → the panel hides.
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_close_terminal_tab(&CloseTerminalTab, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.term_tabs.is_empty());
+                assert!(!k.term_panel.open, "closing the last tab hides the panel");
+            })
+            .unwrap();
+    }
+
+    /// The shell exiting (`^D` / `exit`) makes the IO thread emit `CloseRequested`; the Kyde
+    /// subscription must close that tab (the "stuck on exited" item). Simulate the event.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_child_exit_closes_its_tab(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.new_terminal_tab(cx);
+                k.new_terminal_tab(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let view = handle
+            .update(cx, |k, _w, _cx| k.term_tabs[k.term_panel.active].clone())
+            .unwrap();
+        view.update(cx, |_v, cx| {
+            cx.emit(terminal::TerminalEvent::CloseRequested);
+        });
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(
+                    k.term_tabs.len(),
+                    1,
+                    "child exit (CloseRequested) closes the tab"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Switching view (rail folder/git/history icon, or ⌘ shortcut) while the terminal is
+    /// maximized must un-maximize it — otherwise the full-column terminal hides the chosen
+    /// view and the click looks like a no-op (the original feedback item).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn switching_view_unmaximizes_terminal(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+                k.term_panel.maximized = true;
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| k.switch_mode(Mode::Browse, cx))
+            .unwrap();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    !k.term_panel.maximized,
+                    "switching view un-maximizes the terminal"
+                );
+                assert!(k.mode == Mode::Browse);
+            })
+            .unwrap();
+    }
+}
+
+/// A full-window dimmed overlay that centers its child. When `dismissable`, clicking the
+/// backdrop closes the open overlays; otherwise the backdrop swallows the click (modal).
+pub(crate) fn overlay(cx: &mut Context<Kyde>, dismissable: bool) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        // A dim scrim, not a blackout — the app stays visible behind the modal.
+        .bg(gpui::rgba(0x00000099))
+        .occlude()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _e, window, cx| {
+                if dismissable {
+                    this.finder_open = false;
+                    this.onboarding_open = false;
+                    this.delete_target = None;
+                    window.focus(&this.focus_handle);
+                    cx.notify();
+                }
+            }),
+        )
 }
