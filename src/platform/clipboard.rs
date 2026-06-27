@@ -23,7 +23,7 @@ pub fn read_files() -> Vec<PathBuf> {
         let Some(items) = pb.pasteboardItems() else {
             return out;
         };
-        for item in items.iter() {
+        for item in &items {
             if let Some(s) = item.stringForType(NSPasteboardTypeFileURL) {
                 if let Some(p) = file_url_to_path(&s.to_string()) {
                     out.push(p);

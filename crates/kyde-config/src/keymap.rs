@@ -1,6 +1,6 @@
-//! Configurable keymap with WebStorm and VSCode presets, persisted as JSON.
+//! Configurable keymap with `WebStorm` and `VSCode` presets, persisted as JSON.
 //!
-//! The actual gpui `Action` types live in `main.rs`; this module owns only the
+//! The actual renderer `Action` types live in `main.rs`; this module owns only the
 //! *configuration* (which keystroke triggers which named action) and the preset
 //! defaults. `main::apply_keymap` reads `key_for()` and binds the real actions.
 
@@ -67,22 +67,33 @@ pub const ACTIONS: &[ActionDef] = &[
     },
 ];
 
+/// A configurable action: its stable name, the default keystroke under each preset, and a
+/// human label for the settings UI.
 pub struct ActionDef {
+    /// Stable action id (used as the override-map key + renderer action name).
     pub name: &'static str,
+    /// Default keystroke under the `WebStorm`/`IntelliJ` preset.
     pub webstorm: &'static str,
+    /// Default keystroke under the `VSCode` preset.
     pub vscode: &'static str,
+    /// Human-readable label shown in Settings.
     pub label: &'static str,
 }
 
+/// A keybinding preset (or `Custom` once the user overrides keys).
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "lowercase")]
 pub enum Preset {
+    /// `WebStorm` / `IntelliJ`-style bindings.
     WebStorm,
+    /// `VSCode`-style bindings.
     VSCode,
+    /// A user-customised binding set.
     Custom,
 }
 
 impl Preset {
+    /// Human-readable preset name for the settings UI.
     pub fn label(self) -> &'static str {
         match self {
             Preset::WebStorm => "WebStorm / IntelliJ",
@@ -92,8 +103,10 @@ impl Preset {
     }
 }
 
+/// The persisted keymap: a [`Preset`] plus any per-action overrides.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Keymap {
+    /// The active preset.
     pub preset: Preset,
     /// Per-action keystroke overrides (action name → keystroke). Empty = use preset.
     #[serde(default)]
@@ -129,23 +142,26 @@ impl Keymap {
         self.preset_key(name).map(str::to_string)
     }
 
+    /// Switch to `preset`, clearing any per-action overrides.
     pub fn set_preset(&mut self, preset: Preset) {
         self.preset = preset;
         self.overrides.clear();
     }
 
     // ── persistence ───────────────────────────────────────────────
+    /// Path to `keymap.json` under the XDG config dir.
     pub fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+            |_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 PathBuf::from(home).join(".config")
-            });
+            },
+            PathBuf::from,
+        );
         base.join("kyde").join("keymap.json")
     }
 
-    /// Load from disk. Returns (keymap, first_run) — first_run is true when no
+    /// Load from disk. Returns (keymap, `first_run`) — `first_run` is true when no
     /// config existed yet (used to trigger onboarding).
     pub fn load() -> (Self, bool) {
         let path = Self::config_path();
@@ -158,6 +174,7 @@ impl Keymap {
         }
     }
 
+    /// Persist the keymap to `keymap.json` (best-effort).
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {

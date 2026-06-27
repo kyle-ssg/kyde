@@ -110,9 +110,15 @@ impl TerminalView {
         );
         let term = Arc::new(FairMutex::new(term));
 
-        // SAFETY note: `tty::new` is safe; the PTY fd is owned by the returned Pty.
+        // Blessed expects: spawning the PTY + its event loop can only fail on a fatal OS
+        // condition (exhausted fds / no pty device). The terminal can't exist without them and
+        // this constructor returns `Self`, not `Result`, so a clear panic is the right call.
+        // (Promoting the whole terminal-spawn path to `Result` is a tracked scaffold follow-up.)
+        // `tty::new` is safe; the PTY fd is owned by the returned Pty.
+        #[allow(clippy::expect_used)]
         let pty = tty::new(&options, window_size, 0).expect("failed to spawn PTY");
 
+        #[allow(clippy::expect_used)]
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
             .expect("failed to create terminal event loop");
         let notifier = Notifier(event_loop.channel());
@@ -399,7 +405,7 @@ impl TerminalView {
 }
 
 /// Find an http(s) URL token in `line` that covers char column `col`. Trailing sentence
-/// punctuation is trimmed so "see https://x.com." doesn't capture the period.
+/// punctuation is trimmed so "see <https://x.com>." doesn't capture the period.
 fn url_at(line: &str, col: usize) -> Option<String> {
     let chars: Vec<char> = line.chars().collect();
     let mut i = 0;
@@ -473,13 +479,11 @@ impl Render for TerminalView {
             // here rather than let it fall through to the app action (which deleted the selected
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
-                this.send_key(vec![0x7f], cx)
+                this.send_key(vec![0x7f], cx);
             }))
-            .on_action(
-                cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
-                    this.send_key(vec![0x1b], cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
+                this.send_key(vec![0x1b], cx);
+            }))
             // Pin the mono font + editor size so the cell metrics the element measures (the
             // `M` advance) match the glyphs it actually shapes — otherwise the cursor, placed
             // at `col × cell_w`, drifts off the text (it inherits a proportional UI font).
@@ -669,7 +673,7 @@ impl Element for TerminalElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
@@ -840,7 +844,7 @@ impl Element for TerminalElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         pre: &mut Prepaint,
         window: &mut Window,
         cx: &mut App,
@@ -870,9 +874,9 @@ fn resolve(
 ) -> Hsla {
     match color {
         AnsiColor::Named(NamedColor::Foreground) => default,
-        AnsiColor::Named(n) => named_rgb(n, colors).map(rgb_to_hsla).unwrap_or(default),
+        AnsiColor::Named(n) => named_rgb(n, colors).map_or(default, rgb_to_hsla),
         AnsiColor::Spec(rgb) => rgb_to_hsla(rgb),
-        AnsiColor::Indexed(i) => indexed_rgb(i, colors).map(rgb_to_hsla).unwrap_or(default),
+        AnsiColor::Indexed(i) => rgb_to_hsla(indexed_rgb(i, colors)),
     }
 }
 
@@ -882,12 +886,12 @@ fn resolve_opt(color: AnsiColor, colors: &alacritty_terminal::term::color::Color
         AnsiColor::Named(NamedColor::Background) => None,
         AnsiColor::Named(n) => named_rgb(n, colors).map(rgb_to_hsla),
         AnsiColor::Spec(rgb) => Some(rgb_to_hsla(rgb)),
-        AnsiColor::Indexed(i) => indexed_rgb(i, colors).map(rgb_to_hsla),
+        AnsiColor::Indexed(i) => Some(rgb_to_hsla(indexed_rgb(i, colors))),
     }
 }
 
 fn rgb_to_hsla(rgb: Rgb) -> Hsla {
-    gpui::rgb(((rgb.r as u32) << 16) | ((rgb.g as u32) << 8) | rgb.b as u32).into()
+    gpui::rgb((u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)).into()
 }
 
 /// Named ANSI color → RGB: prefer an OSC-overridden value, else the builtin palette.
@@ -903,11 +907,8 @@ fn named_rgb(n: NamedColor, colors: &alacritty_terminal::term::color::Colors) ->
     }
 }
 
-fn indexed_rgb(i: u8, colors: &alacritty_terminal::term::color::Colors) -> Option<Rgb> {
-    if let Some(c) = colors[i as usize] {
-        return Some(c);
-    }
-    Some(default_indexed(i))
+fn indexed_rgb(i: u8, colors: &alacritty_terminal::term::color::Colors) -> Rgb {
+    colors[i as usize].unwrap_or_else(|| default_indexed(i))
 }
 
 /// The standard 256-color cube + grayscale ramp for indices the program hasn't overridden.

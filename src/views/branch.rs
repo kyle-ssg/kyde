@@ -12,7 +12,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         // All bottom-bar text is this muted grey; icons keep their own colours.
-        let bar_text = gpui::rgb(0x808289);
+        let bar_text = kyde_color::Color::rgb(0x808289);
         let label = self
             .current_branch
             .clone()
@@ -63,8 +63,7 @@ impl Kyde {
             let is_file = self
                 .repo_root
                 .as_ref()
-                .map(|root| root.join(rel).is_file())
-                .unwrap_or(false);
+                .is_some_and(|root| root.join(rel).is_file());
             let repo_name = self
                 .repo_root
                 .as_ref()
@@ -119,8 +118,7 @@ impl Kyde {
         let tip_text: SharedString = self
             .push_msg
             .clone()
-            .map(SharedString::from)
-            .unwrap_or_else(|| "Push to origin".into());
+            .map_or_else(|| "Push to origin".into(), SharedString::from);
         let push_btn = div()
             .id("push-btn")
             .flex()
@@ -438,7 +436,7 @@ impl Kyde {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _e, _w, cx| {
-                                    this.toggle_branch_node(k.clone(), cx)
+                                    this.toggle_branch_node(k.clone(), cx);
                                 }),
                             )
                             .into_any_element()
@@ -472,7 +470,7 @@ impl Kyde {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _e, window, cx| {
-                                    this.checkout_branch(nm.clone(), window, cx)
+                                    this.checkout_branch(nm.clone(), window, cx);
                                 }),
                             )
                             .into_any_element()
@@ -507,7 +505,7 @@ impl Kyde {
                 .filter(|s| !local.contains(s.as_str()) && seen.insert(s.clone()))
                 .collect();
             self.branch_query.update(cx, |e, cx| {
-                e.set_content(String::new(), Lang::PlainText, cx)
+                e.set_content(String::new(), Lang::PlainText, cx);
             });
             // Recent expanded by default; Local collapsed.
             self.branch_expanded.insert("sec:recent".into());
@@ -655,7 +653,7 @@ impl Kyde {
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
-        op: impl FnOnce(&Repo) -> anyhow::Result<()> + Send + 'static,
+        op: impl FnOnce(&Repo) -> kyde_git::Result<()> + Send + 'static,
     ) {
         self.branch_popup_open = false;
         window.focus(&self.focus_handle);

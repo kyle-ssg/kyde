@@ -13,14 +13,14 @@ pub(crate) enum FocusTarget {
     AppRoot,
 }
 
-/// What `⌃\`` should do, given the panel's current visibility + focus.
+/// What the ⌃backtick shortcut should do, given the panel's current visibility + focus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ToggleAction {
     /// Hidden → show it (`spawn` a first tab if there are none yet), then focus it.
     Open { spawn: bool },
     /// Visible AND focused → hide it, returning focus to the app root.
     Hide,
-    /// Visible but unfocused → just focus the active terminal (VSCode `⌃\`` behaviour).
+    /// Visible but unfocused → just focus the active terminal (`VSCode` Ctrl-backtick behaviour).
     FocusTerminal,
 }
 
@@ -65,7 +65,7 @@ impl TermPanel {
         }
     }
 
-    /// What `⌃\`` should do, given whether the terminal currently owns focus and whether any
+    /// What the ⌃backtick shortcut should do, given whether the terminal currently owns focus and whether any
     /// tabs exist. Pure decision — the caller applies the state change + focus.
     pub(crate) fn toggle(&self, focused: bool, has_tabs: bool) -> ToggleAction {
         if !self.open {

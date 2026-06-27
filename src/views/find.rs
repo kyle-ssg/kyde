@@ -229,11 +229,10 @@ impl Kyde {
             std::collections::HashMap::new();
         for r in &self.find_matches {
             let line = content[..r.start].bytes().filter(|&b| b == b'\n').count();
-            let line_start = content[..r.start].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let line_start = content[..r.start].rfind('\n').map_or(0, |i| i + 1);
             let line_end = content[line_start..]
                 .find('\n')
-                .map(|i| line_start + i)
-                .unwrap_or(content.len());
+                .map_or(content.len(), |i| line_start + i);
             let s = r.start - line_start;
             let e = (r.end.min(line_end)) - line_start;
             map.entry(line).or_default().push(s..e);
@@ -244,7 +243,7 @@ impl Kyde {
         if self.find_target == crate::FindTarget::File {
             ed.update(cx, |e, _| {
                 e.word_bg = map;
-                e.word_bg_color = gpui::rgba(0x6E5A1EFF); // amber search highlight
+                e.word_bg_color = kyde_color::Color::rgb(0x6E5A1E); // amber search highlight
             });
         }
         if let Some(r) = self.find_matches.get(self.find_idx).cloned() {

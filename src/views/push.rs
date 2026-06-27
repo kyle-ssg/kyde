@@ -1,7 +1,12 @@
 //! Push view — the Push tab + push confirmation modal (commits ahead of upstream).
 //! Crate-root child module.
 
-use crate::*;
+use crate::{
+    badge_inner, btn_primary_state, btn_secondary, div, file_badge, px, status_color, theme,
+    Context, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde, MenuTarget,
+    ModalKind, Mode, MouseButton, ParentElement, Repo, SharedString, StatefulInteractiveElement,
+    Styled,
+};
 
 impl Kyde {
     /// Left column of the Push tab: a flat list of the files a push would send (click → diff)
@@ -22,8 +27,10 @@ impl Kyde {
                 let name: SharedString = f
                     .path
                     .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| f.path.to_string_lossy().into_owned())
+                    .map_or_else(
+                        || f.path.to_string_lossy().into_owned(),
+                        |s| s.to_string_lossy().into_owned(),
+                    )
                     .into();
                 let dir = f
                     .path
@@ -166,8 +173,10 @@ impl Kyde {
                 let name: SharedString = f
                     .path
                     .file_name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| f.path.to_string_lossy().into_owned())
+                    .map_or_else(
+                        || f.path.to_string_lossy().into_owned(),
+                        |s| s.to_string_lossy().into_owned(),
+                    )
                     .into();
                 let dir = f
                     .path

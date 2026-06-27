@@ -175,11 +175,10 @@ impl Kyde {
             );
 
         // The active terminal widget (entity → element).
-        let body = self
-            .term_tabs
-            .get(self.term_panel.active)
-            .map(|v| v.clone().into_any_element())
-            .unwrap_or_else(|| div().into_any_element());
+        let body = self.term_tabs.get(self.term_panel.active).map_or_else(
+            || div().into_any_element(),
+            |v| v.clone().into_any_element(),
+        );
 
         let island = div()
             .flex()

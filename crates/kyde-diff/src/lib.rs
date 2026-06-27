@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Diff model. Line-level hunks (for the side-by-side render + center-gutter
 //! chevrons) plus word-level ranges inside changed lines (the inline highlight
 //! in image 4). Built on `similar`. Pure Rust — compiles standalone.
@@ -8,40 +9,66 @@
 use similar::{ChangeTag, TextDiff};
 use std::ops::Range;
 
+/// What kind of change a [`Hunk`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkKind {
+    /// Lines present only in the "after" side.
     Added,
+    /// Lines present only in the "before" side.
     Deleted,
+    /// Lines that differ between the two sides (paired old/new).
     Modified,
 }
 
 /// One change region. Line ranges are 0-based, half-open, into each side's lines.
 #[derive(Debug, Clone)]
 pub struct Hunk {
+    /// Whether this region was added, deleted, or modified.
     pub kind: HunkKind,
-    pub old_range: Range<usize>, // lines in "before"
-    pub new_range: Range<usize>, // lines in "after"
-    /// Per-changed-line word ranges to highlight (byte ranges within that line).
-    pub old_word_ranges: Vec<(usize, Range<usize>)>, // (line idx, byte range)
+    /// Line range in the "before" side (half-open).
+    pub old_range: Range<usize>,
+    /// Line range in the "after" side (half-open).
+    pub new_range: Range<usize>,
+    /// Per-changed-line word ranges to highlight on the old side: `(line index, byte range)`.
+    pub old_word_ranges: Vec<(usize, Range<usize>)>,
+    /// Per-changed-line word ranges to highlight on the new side: `(line index, byte range)`.
     pub new_word_ranges: Vec<(usize, Range<usize>)>,
 }
 
+/// A computed diff between two texts: both sides split into lines, plus the change [`Hunk`]s.
 #[derive(Clone)]
 pub struct FileDiff {
+    /// The "before" text, split into lines.
     pub old: Vec<String>,
+    /// The "after" text, split into lines.
     pub new: Vec<String>,
+    /// The change regions between `old` and `new`, in order.
     pub hunks: Vec<Hunk>,
 }
 
 impl FileDiff {
+    /// Compute the line- and word-level diff between `before` and `after`.
+    ///
+    /// ```
+    /// use kyde_diff::FileDiff;
+    /// let d = FileDiff::compute("a\nb\nc\n", "a\nB\nc\n");
+    /// assert_eq!(d.old.len(), d.new.len());
+    /// assert_eq!(d.hunks.len(), 1); // only the middle line changed
+    /// ```
     pub fn compute(before: &str, after: &str) -> Self {
         // Split on '\n' (NOT `.lines()`) so line indices match exactly how the editor
         // renders them — a trailing newline becomes a final empty line on both sides, so
         // identical text never shows a phantom diff and alignment stays in sync.
         let old_refs: Vec<&str> = before.split('\n').collect();
         let new_refs: Vec<&str> = after.split('\n').collect();
-        let old: Vec<String> = old_refs.iter().map(|s| s.to_string()).collect();
-        let new: Vec<String> = new_refs.iter().map(|s| s.to_string()).collect();
+        let old: Vec<String> = old_refs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        let new: Vec<String> = new_refs
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
 
         // Diff over those exact line vectors (consistent with `old`/`new` indices).
         let diff = TextDiff::from_slices(&old_refs, &new_refs);
@@ -127,7 +154,7 @@ impl FileDiff {
 /// `(line_idx, byte_range)` pairs for one diff side's word-level highlights.
 type WordRanges = Vec<(usize, Range<usize>)>;
 
-/// Re-diff changed regions word-by-word; return (line_idx, byte_range) to highlight.
+/// Re-diff changed regions word-by-word; return (`line_idx`, `byte_range`) to highlight.
 fn word_ranges(
     old_lines: &[String],
     new_lines: &[String],

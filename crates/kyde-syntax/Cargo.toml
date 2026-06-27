@@ -1,13 +1,15 @@
 [package]
 name = "kyde-syntax"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Tree-sitter syntax highlighting + fold regions for Kyde. Grammars are per-pack Cargo features."
 
 [dependencies]
-# gpui only for its `Rgba` color type (Span.color) — same as kyde-theme.
-gpui = "0.2"
+# Colours are `kyde_color::Color` (a POD) — this highlighter carries no GUI dependency.
+kyde-color = { path = "../kyde-color" }
 kyde-theme = { path = "../kyde-theme" }
 tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
@@ -50,3 +52,6 @@ html = ["dep:tree-sitter-html"]
 go = ["dep:tree-sitter-go"]
 r = ["dep:tree-sitter-r"]
 latex = ["dep:tree-sitter-latex"]
+
+[lints]
+workspace = true

@@ -1,6 +1,10 @@
 //! First-run onboarding / keymap picker overlay + shell-command install row. Crate-root child.
 
-use crate::*;
+use crate::{
+    apply_keymap, div, keymap, overlay, pretty_key, px, shellcmd, theme, Context, FluentBuilder,
+    FontWeight, InteractiveElement, IntoElement, Kyde, MouseButton, OpenKeymap, ParentElement,
+    Preset, SharedString, Styled, Window,
+};
 
 impl Kyde {
     pub(crate) fn render_onboarding(

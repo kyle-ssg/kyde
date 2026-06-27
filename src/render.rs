@@ -198,7 +198,7 @@ impl Render for Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, window, cx| {
-                            this.act_toggle_terminal(&ToggleTerminal, window, cx)
+                            this.act_toggle_terminal(&ToggleTerminal, window, cx);
                         }),
                     ),
             )
@@ -661,7 +661,7 @@ impl Kyde {
                     panel = panel.child(item("Rollback").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| {
-                            this.open_rollback_path(pr.clone(), cx)
+                            this.open_rollback_path(pr.clone(), cx);
                         }),
                     ));
                 }
@@ -690,12 +690,14 @@ impl Kyde {
                 let new_dir = if is_dir {
                     p.clone()
                 } else {
-                    p.parent().map(|d| d.to_path_buf()).unwrap_or_default()
+                    p.parent()
+                        .map(std::path::Path::to_path_buf)
+                        .unwrap_or_default()
                 };
                 panel = panel.child(item("New File…").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, window, cx| {
-                        this.start_new_file(new_dir.clone(), window, cx)
+                        this.start_new_file(new_dir.clone(), window, cx);
                     }),
                 ));
                 // Rename applies to files (not folders, for now).
@@ -704,7 +706,7 @@ impl Kyde {
                     panel = panel.child(item("Rename…").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
-                            this.start_rename(pn.clone(), window, cx)
+                            this.start_rename(pn.clone(), window, cx);
                         }),
                     ));
                 }
@@ -714,13 +716,13 @@ impl Kyde {
                         .child(item("Commit").on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, _w, cx| {
-                                this.menu_commit_path(pc.clone(), cx)
+                                this.menu_commit_path(pc.clone(), cx);
                             }),
                         ))
                         .child(item("Rollback").on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, _w, cx| {
-                                this.open_rollback_path(pr.clone(), cx)
+                                this.open_rollback_path(pr.clone(), cx);
                             }),
                         ));
                 }
@@ -863,7 +865,7 @@ impl Kyde {
                     panel = panel.child(item_owned(label).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| {
-                            this.history_compare_commit(idx, mode, cx)
+                            this.history_compare_commit(idx, mode, cx);
                         }),
                     ));
                 }

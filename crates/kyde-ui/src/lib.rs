@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! kyde-ui — reusable, app-agnostic UI building blocks (gpui widgets). Knows nothing about
 //! Kyde: buttons, tab pills, badges, checkboxes, context-menu icons, colour + scrollbar maths,
 //! and the file-tree row (`tree::item<V>`, generic over the hosting view). Depends only on

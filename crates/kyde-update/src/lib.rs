@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Self-update. Checks GitHub for a newer release, downloads the notarized `Kyde.app` zip,
 //! swaps it over the running bundle, and the caller relaunches. Network + unzip are shelled
 //! to `curl` / `ditto` (same shell-out philosophy as the git layer — no HTTP crate in the
@@ -8,9 +9,49 @@
 //! - `KYDE_UPDATE_FEED_URL` — fetch the "latest release" JSON from here instead of GitHub. A
 //!   `file://` fixture works, and its asset URL may be `file://` too.
 
-use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Everything self-update can fail with. Each variant carries context — which external command
+/// failed and its stderr, or the I/O operation + underlying error. (Library crate → typed
+/// errors via `thiserror`, never `anyhow`.)
+#[derive(Debug, thiserror::Error)]
+pub enum UpdateError {
+    /// The release has no downloadable `.zip` asset (nothing to install).
+    #[error("release has no downloadable zip")]
+    NoZip,
+    /// The downloaded archive contained no `.app` bundle.
+    #[error("no .app found in the download")]
+    NoAppInDownload,
+    /// An external command (`curl` / `ditto`) ran but failed. `action` names the step.
+    #[error("{action} failed: {stderr}")]
+    Command {
+        /// Which step failed — `"download"`, `"unzip"`, or `"install"`.
+        action: String,
+        /// The external command's captured stderr.
+        stderr: String,
+    },
+    /// An I/O or process-spawn error, tagged with what we were doing.
+    #[error("{operation}: {source}")]
+    Io {
+        /// What we were attempting when the error occurred (e.g. `"creating temp dir"`).
+        operation: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Result alias for every fallible self-update operation.
+pub type Result<T> = std::result::Result<T, UpdateError>;
+
+/// Build an [`UpdateError::Io`] from an operation description + the underlying I/O error.
+fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> UpdateError {
+    move |source| UpdateError::Io {
+        operation: operation.into(),
+        source,
+    }
+}
 
 /// GitHub "latest release" API for this repo.
 const DEFAULT_FEED: &str = "https://api.github.com/repos/kyle-ssg/kyde/releases/latest";
@@ -60,6 +101,11 @@ pub fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// True when `latest` is a strictly higher semantic version than `current`.
+///
+/// ```
+/// assert!(kyde_update::is_newer("v1.0.10", "v1.0.9"));
+/// assert!(!kyde_update::is_newer("v1.0.0", "v1.0.0"));
+/// ```
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(l), Some(c)) => l > c,
@@ -68,9 +114,10 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 }
 
 fn norm(tag: &str) -> String {
-    parse_semver(tag)
-        .map(|(a, b, c)| format!("{a}.{b}.{c}"))
-        .unwrap_or_else(|| tag.trim().to_string())
+    parse_semver(tag).map_or_else(
+        || tag.trim().to_string(),
+        |(a, b, c)| format!("{a}.{b}.{c}"),
+    )
 }
 
 /// The running `.app` bundle, if we were launched from one
@@ -80,7 +127,7 @@ pub fn running_bundle() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     exe.ancestors()
         .find(|a| a.extension().and_then(|e| e.to_str()) == Some("app"))
-        .map(|a| a.to_path_buf())
+        .map(std::path::Path::to_path_buf)
 }
 
 /// Pull the latest-release metadata and return it only when it's newer than what's running.
@@ -161,11 +208,11 @@ pub fn pick_asset_url(urls: &[&str], arch: &str) -> Option<String> {
 /// the caller relaunches (`open <bundle>`) and quits. Runs off the UI thread (blocking I/O).
 pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
     if zip_url.is_empty() {
-        return Err(anyhow!("release has no downloadable zip"));
+        return Err(UpdateError::NoZip);
     }
     let tmp = std::env::temp_dir().join(format!("kyde-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).context("creating temp dir")?;
+    std::fs::create_dir_all(&tmp).map_err(io_err("creating temp dir"))?;
 
     // Download (curl handles `file://` for the dev fixture too).
     let zip = tmp.join("kyde.zip");
@@ -174,31 +221,31 @@ pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
         .arg(&zip)
         .arg(zip_url)
         .output()
-        .context("spawning curl")?;
+        .map_err(io_err("spawning curl"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "download failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(UpdateError::Command {
+            action: "download".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
 
     // Unzip with ditto (preserves bundle symlinks/metadata/signature, unlike `unzip`).
     let extract = tmp.join("extract");
-    std::fs::create_dir_all(&extract)?;
+    std::fs::create_dir_all(&extract).map_err(io_err("creating extract dir"))?;
     let out = Command::new("ditto")
         .args(["-x", "-k"])
         .arg(&zip)
         .arg(&extract)
         .output()
-        .context("spawning ditto")?;
+        .map_err(io_err("spawning ditto"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "unzip failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(UpdateError::Command {
+            action: "unzip".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
 
-    let new_app = find_app(&extract).ok_or_else(|| anyhow!("no .app found in the download"))?;
+    let new_app = find_app(&extract).ok_or(UpdateError::NoAppInDownload)?;
     // Strip the download quarantine so the relaunched copy isn't Gatekeeper-gated (a notarized
     // + stapled app still picks up `com.apple.quarantine` from the zip).
     let _ = Command::new("xattr")
@@ -210,7 +257,7 @@ pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
     // fails, roll the old bundle back so the user is never left with no app.
     let backup = bundle.with_extension("app.bak");
     let _ = std::fs::remove_dir_all(&backup);
-    std::fs::rename(bundle, &backup).with_context(|| format!("moving aside {bundle:?}"))?;
+    std::fs::rename(bundle, &backup).map_err(io_err(format!("moving aside {bundle:?}")))?;
     if let Err(e) = install(&new_app, bundle) {
         let _ = std::fs::rename(&backup, bundle);
         return Err(e);
@@ -224,7 +271,7 @@ pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
 /// (dev binary): we can't swap in place, so just fetch the zip for the user to install.
 pub fn download_zip(zip_url: &str, dir: &Path) -> Result<PathBuf> {
     if zip_url.is_empty() {
-        return Err(anyhow!("release has no downloadable zip"));
+        return Err(UpdateError::NoZip);
     }
     std::fs::create_dir_all(dir).ok();
     let name = zip_url
@@ -238,12 +285,12 @@ pub fn download_zip(zip_url: &str, dir: &Path) -> Result<PathBuf> {
         .arg(&dest)
         .arg(zip_url)
         .output()
-        .context("spawning curl")?;
+        .map_err(io_err("spawning curl"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "download failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(UpdateError::Command {
+            action: "download".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
     Ok(dest)
 }
@@ -257,12 +304,12 @@ fn install(new_app: &Path, bundle: &Path) -> Result<()> {
         .arg(new_app)
         .arg(bundle)
         .output()
-        .context("spawning ditto copy")?;
+        .map_err(io_err("spawning ditto copy"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "install failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(UpdateError::Command {
+            action: "install".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
     Ok(())
 }
@@ -278,12 +325,12 @@ fn curl_text(url: &str) -> Result<String> {
     let out = Command::new("curl")
         .args(["-fsSL", "-H", "User-Agent: kyde-updater", url])
         .output()
-        .context("spawning curl")?;
+        .map_err(io_err("spawning curl"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "curl {url} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(UpdateError::Command {
+            action: format!("curl {url}"),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

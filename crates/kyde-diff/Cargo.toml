@@ -1,9 +1,14 @@
 [package]
 name = "kyde-diff"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Line + word diff for Kyde (built on `similar`). Pure, no GUI."
 
 [dependencies]
 similar = { version = "3", features = ["unicode", "inline"] }
+
+[lints]
+workspace = true

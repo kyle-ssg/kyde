@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// The user's installed language-pack list (persisted to `plugins.json`).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Plugins {
     /// Set of installed pack ids (see `highlight::PACKS`).
@@ -16,31 +17,36 @@ pub struct Plugins {
 }
 
 impl Plugins {
+    /// Whether the pack `pack_id` is installed.
     pub fn is_installed(&self, pack_id: &str) -> bool {
         self.installed.contains(pack_id)
     }
 
+    /// Mark `pack_id` installed (its grammar becomes active for that language).
     pub fn install(&mut self, pack_id: &str) {
         self.installed.insert(pack_id.to_string());
     }
 
     /// Remove a pack from the installed set (its grammar is still compiled in, but the
-    /// editor falls back to PlainText for that language until re-installed).
+    /// editor falls back to `PlainText` for that language until re-installed).
     pub fn uninstall(&mut self, pack_id: &str) {
         self.installed.remove(pack_id);
     }
 
     // ── persistence ───────────────────────────────────────────────
+    /// Path to `plugins.json` under the XDG config dir.
     pub fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+            |_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 PathBuf::from(home).join(".config")
-            });
+            },
+            PathBuf::from,
+        );
         base.join("kyde").join("plugins.json")
     }
 
+    /// Load the installed-pack list from `plugins.json` (missing/invalid → empty).
     pub fn load() -> Self {
         match std::fs::read_to_string(Self::config_path()) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
@@ -48,6 +54,7 @@ impl Plugins {
         }
     }
 
+    /// Persist the installed-pack list to `plugins.json` (best-effort).
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {

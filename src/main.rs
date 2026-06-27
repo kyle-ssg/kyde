@@ -1,9 +1,12 @@
-//! Kyde — fast native macOS git commit/diff tool, IntelliJ "Commit Changes" style.
+//! Kyde — fast native macOS git commit/diff tool, `IntelliJ` "Commit Changes" style.
 //!
 //! Features: changed-files tree + side-by-side diff, per-hunk stage/revert chevrons,
 //! editable commit message, folder browse with a real syntax-highlighted editor,
-//! a fuzzy "Go to File" finder (Cmd+Shift+O), a configurable keymap with WebStorm
-//! and VSCode presets, and a re-accessible onboarding / keymap picker.
+//! a fuzzy "Go to File" finder (Cmd+Shift+O), a configurable keymap with `WebStorm`
+//! and `VSCode` presets, and a re-accessible onboarding / keymap picker.
+//!
+//! Lints (unwrap/expect deny, `clippy::pedantic`) are configured centrally in
+//! `[workspace.lints]` (Cargo.toml) and opted into via `[lints] workspace = true`.
 
 // ── core shell ──
 mod app;
@@ -23,7 +26,10 @@ pub(crate) use app::{
     STATUS_REFRESH_DEBOUNCE,
 };
 use kyde_ui as ui;
-pub(crate) use kyde_ui::*;
+pub(crate) use kyde_ui::{
+    badge_inner, btn_primary, btn_primary_state, btn_secondary, checkbox_box, file_badge, lerp_rgb,
+    menu_icon, scrollbar_thumb, tab_pill,
+};
 
 // ── per-feature views (impl Kyde blocks; see src/views/) ──
 mod views;
@@ -414,11 +420,11 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
 /// What a right-click context menu was opened on.
 #[derive(Clone)]
 enum MenuTarget {
-    /// A path in the Browse tree (`bool` = is_dir), or the open editor file.
+    /// A path in the Browse tree (`bool` = `is_dir`), or the open editor file.
     BrowseFile(PathBuf, bool),
     /// Right-click inside the editor pane — git commands only (no file ops).
     EditorGit(PathBuf),
-    /// A path (file or folder) in the Commit tree — `bool` = is_dir.
+    /// A path (file or folder) in the Commit tree — `bool` = `is_dir`.
     CommitPath(PathBuf, bool),
     /// A changed file in the Rollback modal, by index into `files` (→ View Diff).
     RollbackFile(usize),
@@ -720,7 +726,7 @@ struct Kyde {
     new_branch_overwrite: bool,
     rollback_checked: std::collections::HashSet<PathBuf>,
     rollback_delete_added: bool,
-    /// Delete-confirmation modal: the (path, is_dir) pending deletion.
+    /// Delete-confirmation modal: the (path, `is_dir`) pending deletion.
     delete_target: Option<(PathBuf, bool)>,
     /// New-file / rename modal state + its single-line name input.
     name_prompt: Option<NamePrompt>,
@@ -930,7 +936,7 @@ impl Render for ModalWindow {
                     match ev.keystroke.key.as_str() {
                         "escape" => window.remove_window(),
                         "enter" if kind == ModalKind::NewBranch => {
-                            this.kyde.update(cx, |k, kcx| k.do_create_branch(kcx));
+                            this.kyde.update(cx, Kyde::do_create_branch);
                         }
                         _ => {}
                     }
@@ -981,7 +987,7 @@ fn slugify_branch(name: &str) -> String {
     s
 }
 
-fn status_color(s: FileStatus) -> gpui::Rgba {
+fn status_color(s: FileStatus) -> kyde_color::Color {
     match s {
         FileStatus::Added => theme::get().status_added,
         FileStatus::Modified | FileStatus::Renamed => theme::get().status_modified,
@@ -1099,7 +1105,7 @@ fn emit_branch_level(
     }
 }
 
-/// File-type badge for the Browse tree (approximates IntelliJ's icons). Known types get a
+/// File-type badge for the Browse tree (approximates `IntelliJ`'s icons). Known types get a
 /// colored monogram; everything else gets the generic lines/document icon.
 /// Raster image types we preview inline (rendered with `img()` instead of the
 /// text editor). SVG stays a text/icon file — it has its own vector path.
@@ -1156,11 +1162,10 @@ fn scratch_group_path() -> PathBuf {
 /// file: plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the
 /// full "clear data" reset (uninstalls all plugins + drops all cached settings).
 fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config")
-        });
+    let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"),
+        PathBuf::from,
+    );
     base.join("kyde")
 }
 
@@ -1173,7 +1178,7 @@ fn load_ui_bool(key: &str, default: bool) -> bool {
     std::fs::read_to_string(ui_settings_path())
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get(key).and_then(|b| b.as_bool()))
+        .and_then(|v| v.get(key).and_then(serde_json::Value::as_bool))
         .unwrap_or(default)
 }
 /// Set one boolean key in `ui.json`, preserving the file's other keys (read-modify-write so
@@ -1295,8 +1300,8 @@ fn diff_fillers(
 fn diff_line_bgs(
     d: &FileDiff,
 ) -> (
-    std::collections::HashMap<usize, gpui::Rgba>,
-    std::collections::HashMap<usize, gpui::Rgba>,
+    std::collections::HashMap<usize, kyde_color::Color>,
+    std::collections::HashMap<usize, kyde_color::Color>,
 ) {
     let t = theme::get();
     let (mut old, mut new) = (
@@ -1415,7 +1420,7 @@ impl gpui::AssetSource for Assets {
     }
 }
 
-/// Register the bundled Inter (UI) + JetBrains Mono (code) faces so `font_family` resolves
+/// Register the bundled Inter (UI) + `JetBrains` Mono (code) faces so `font_family` resolves
 /// to them instead of silently falling back to a system font. Both are OFL-licensed.
 fn load_fonts(cx: &mut App) {
     let fonts: Vec<std::borrow::Cow<'static, [u8]>> = vec![
@@ -1482,14 +1487,14 @@ fn install_crash_logger() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let bt = std::backtrace::Backtrace::force_capture();
-        let loc = info
-            .location()
-            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-            .unwrap_or_else(|| "unknown".into());
+        let loc = info.location().map_or_else(
+            || "unknown".into(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
         let msg = info
             .payload()
             .downcast_ref::<&str>()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic>".into());
         let entry = format!("\n=== panic at {loc} ===\n{msg}\n{bt}\n");
@@ -1544,8 +1549,8 @@ fn reexec_with_proper_name() {
 fn reexec_with_proper_name() {}
 
 /// Name the running process "Kyde" so the macOS dock tile / menu-bar app menu read "Kyde"
-/// instead of the lowercase executable name. Must run before NSApplication checks in with
-/// LaunchServices, so it's called at the very top of `main`. No-op off macOS.
+/// instead of the lowercase executable name. Must run before `NSApplication` checks in with
+/// `LaunchServices`, so it's called at the very top of `main`. No-op off macOS.
 #[cfg(target_os = "macos")]
 fn set_app_name() {
     use objc2_foundation::{NSProcessInfo, NSString};
@@ -1570,6 +1575,10 @@ fn set_dock_icon() {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: `app` is the shared NSApplication obtained on the main thread (`mtm` proves it),
+    // and `image` is a fully-initialized, objc2-retained NSImage (the `else` above bailed if
+    // init failed). `setApplicationIconImage:` only reads the image and retains it itself, so
+    // passing a valid `&NSImage` upholds every precondition of the AppKit call.
     unsafe { app.setApplicationIconImage(Some(&image)) };
 }
 
@@ -1667,7 +1676,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_go_to_file(&GoToFile, window, cx);
             view.finder_query.update(cx, |e, cx| {
-                e.set_content("render".to_string(), Lang::PlainText, cx)
+                e.set_content("render".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
         }
@@ -1679,7 +1688,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_find_in_files(&FindInFiles, window, cx);
             view.finder_query.update(cx, |e, cx| {
-                e.set_content("kyde".to_string(), Lang::PlainText, cx)
+                e.set_content("kyde".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
         }
@@ -1765,6 +1774,9 @@ fn main() {
         cx.set_dock_menu(dock_menu(&Recents::load()));
 
         let bounds = Bounds::centered(None, gpui::size(px(1280.0), px(820.0)), cx);
+        // Blessed expect: opening the one main window can only fail on a fatal startup condition
+        // (no display / GPU surface), where panicking with a clear message is the right call.
+        #[allow(clippy::expect_used)]
         let window = cx
             .open_window(
                 WindowOptions {
@@ -1943,7 +1955,7 @@ mod gpui_smoke_tests {
                 k.open_new_branch(cx);
                 // Type a name with a space — it should be slugified on Create.
                 k.branch_query.update(cx, |e, cx| {
-                    e.set_content("new branch".into(), Lang::PlainText, cx)
+                    e.set_content("new branch".into(), Lang::PlainText, cx);
                 });
             })
             .unwrap();
@@ -2003,7 +2015,7 @@ mod gpui_smoke_tests {
         cx.run_until_parked(); // the window opens + renders on the spawned task
         handle
             .update(cx, |k, _w, _cx| {
-                assert!(k.rollback_win.is_some(), "rollback window should be open")
+                assert!(k.rollback_win.is_some(), "rollback window should be open");
             })
             .unwrap();
     }
@@ -2078,7 +2090,7 @@ mod gpui_smoke_tests {
         // Browse with a file open in the editor.
         handle
             .update(cx, |k, _w, cx| {
-                k.open_file(std::path::PathBuf::from("app.tsx"), cx)
+                k.open_file(std::path::PathBuf::from("app.tsx"), cx);
             })
             .unwrap();
         settle(cx);
@@ -2118,9 +2130,7 @@ mod gpui_smoke_tests {
         settle(cx);
 
         // Branch popup.
-        handle
-            .update(cx, |k, w, cx| k.toggle_branch_popup(w, cx))
-            .unwrap();
+        handle.update(cx, super::Kyde::toggle_branch_popup).unwrap();
         settle(cx);
         handle
             .update(cx, |k, _w, _cx| k.branch_popup_open = false)
@@ -2171,7 +2181,7 @@ mod gpui_smoke_tests {
         settle(cx);
         handle
             .update(cx, |k, _w, cx| {
-                k.close_modal_window(ModalKind::ClearData, cx)
+                k.close_modal_window(ModalKind::ClearData, cx);
             })
             .unwrap();
         settle(cx);
@@ -2183,7 +2193,7 @@ mod gpui_smoke_tests {
         settle(cx);
         handle
             .update(cx, |k, _w, cx| {
-                k.close_modal_window(ModalKind::Rollback, cx)
+                k.close_modal_window(ModalKind::Rollback, cx);
             })
             .unwrap();
         settle(cx);
@@ -2219,9 +2229,9 @@ mod gpui_smoke_tests {
         assert!(url.contains("boom") || url.contains("Crash"));
     }
 
-    /// ⌃` opens the panel + spawns the first tab, and ⌘W (`act_close_terminal_tab`) closes the
+    /// ⌃` opens the panel + spawns the first tab, and ⌘W (``act_close_terminal_tab``) closes the
     /// active tab — the last one hides the panel. Exercises the real gpui wiring (window +
-    /// PTY-backed `TerminalView`s + the `TermPanel` state), not just the pure state machine.
+    /// PTY-backed ``TerminalView``s + the ``TermPanel`` state), not just the pure state machine.
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn terminal_toggle_opens_and_cmd_w_closes(cx: &mut TestAppContext) {
@@ -2259,7 +2269,7 @@ mod gpui_smoke_tests {
         // ⌘W the last tab → the panel hides.
         handle
             .update(cx, |k, window, cx| {
-                k.act_close_terminal_tab(&CloseTerminalTab, window, cx)
+                k.act_close_terminal_tab(&CloseTerminalTab, window, cx);
             })
             .unwrap();
         cx.run_until_parked();
@@ -2288,7 +2298,7 @@ mod gpui_smoke_tests {
             .update(cx, |k, _w, _cx| k.term_tabs[k.term_panel.active].clone())
             .unwrap();
         view.update(cx, |_v, cx| {
-            cx.emit(terminal::TerminalEvent::CloseRequested)
+            cx.emit(terminal::TerminalEvent::CloseRequested);
         });
         cx.run_until_parked();
         handle

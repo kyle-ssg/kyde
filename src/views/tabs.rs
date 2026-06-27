@@ -1,6 +1,10 @@
 //! Editor tab strip (tab bar, overflow menu, empty state) + tab close logic. Crate-root child.
 
-use crate::*;
+use crate::{
+    badge_inner, div, file_badge, pretty_key, px, status_color, svg, theme, Context, FluentBuilder,
+    InteractiveElement, IntoElement, Kyde, MenuTarget, MouseButton, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled,
+};
 
 impl Kyde {
     pub(crate) fn render_tab_bar(
@@ -87,7 +91,7 @@ impl Kyde {
                     div()
                         .min_w_0()
                         .truncate()
-                        .when_some(status_col, |d, c| d.text_color(c))
+                        .when_some(status_col, gpui::Styled::text_color)
                         .child(name),
                 )
                 .child(close)
@@ -168,7 +172,7 @@ impl Kyde {
         // into the button instead of a hard bordered box, so it reads as part of the strip.
         let fade_from = gpui::Rgba {
             a: 0.0,
-            ..t.panel_bg
+            ..t.panel_bg.into()
         };
         // A child of `right_col` (relative), painted above the tab strip's scroll layer — a
         // child of the island itself was drawn *under* the scrolling tabs and vanished once

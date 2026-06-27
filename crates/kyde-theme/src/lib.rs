@@ -1,9 +1,14 @@
+#![deny(missing_docs)]
 //! Runtime theme, loaded from `~/.config/kyde/theme.json` (hand-editable hex).
 //! Defaults are an original hand-authored dark palette (Darcula-family style).
 //! Access the loaded theme anywhere via `theme::get()`; it loads lazily on first use
 //! and writes a default file if none exists.
 
-use gpui::Rgba;
+// Colours are `kyde_color::Color` (a UI-framework-free POD). Aliased as `Rgba` so the field
+// types + `c()` helper below read unchanged; a UI consumer that needs the renderer colour type
+// gets `Color: Into<Rgba/Hsla/Fill>` from `kyde-color`'s optional feature (on in the binary +
+// kyde-ui). This crate itself depends on no GUI framework.
+use kyde_color::Color as Rgba;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -27,12 +32,16 @@ pub struct Theme {
     /// Window frame / gaps behind the rounded island panels (darkest surface).
     #[serde(with = "hex")]
     pub frame_bg: Rgba,
+    /// Editor island surface (the main content panel).
     #[serde(with = "hex")]
     pub main_bg: Rgba,
+    /// Side-panel island surface (tree / sidebars).
     #[serde(with = "hex")]
     pub panel_bg: Rgba,
+    /// Mid-tone surface (hover rows, key chips).
     #[serde(with = "hex")]
     pub bg_mid: Rgba,
+    /// Lightest surface (active rail button, pressed states).
     #[serde(with = "hex")]
     pub bg_light: Rgba,
     /// General divider / hr / border colour.
@@ -40,7 +49,7 @@ pub struct Theme {
     pub divider: Rgba,
     /// Native title strip behind the macOS traffic lights. Distinct from `frame_bg` so a
     /// light theme can give the (system-drawn) inactive traffic lights a grey backing —
-    /// gpui can't force the window's NSAppearance, so on a near-white strip they wash out.
+    /// the app can't force the window's `NSAppearance`, so on a near-white strip they wash out.
     #[serde(with = "hex")]
     pub titlebar_bg: Rgba,
 
@@ -48,14 +57,18 @@ pub struct Theme {
     /// General text colour (everything except the primary button).
     #[serde(with = "hex")]
     pub text: Rgba,
+    /// Secondary / less-prominent text.
     #[serde(with = "hex")]
     pub secondary_text: Rgba,
+    /// Line numbers + other dim/tertiary text.
     #[serde(with = "hex")]
     pub line_number: Rgba,
 
     // Editor
+    /// Text caret colour.
     #[serde(with = "hex")]
     pub caret: Rgba,
+    /// Current-line background highlight in the editor.
     #[serde(with = "hex")]
     pub caret_row: Rgba,
     /// Selected sidebar/menu row background.
@@ -63,55 +76,76 @@ pub struct Theme {
     pub selected_bg: Rgba,
 
     // Buttons
+    /// Primary (filled) button background.
     #[serde(with = "hex")]
     pub primary: Rgba,
+    /// Primary button text colour.
     #[serde(with = "hex")]
     pub primary_text: Rgba,
 
     // Git file status
+    /// Added/new file status colour.
     #[serde(with = "hex")]
     pub status_added: Rgba,
+    /// Modified file status colour.
     #[serde(with = "hex")]
     pub status_modified: Rgba,
+    /// Deleted file status colour.
     #[serde(with = "hex")]
     pub status_deleted: Rgba,
+    /// Untracked file status colour.
     #[serde(with = "hex")]
     pub status_untracked: Rgba,
+    /// Merge-conflict file status colour.
     #[serde(with = "hex")]
     pub status_conflict: Rgba,
 
     // Diff hunk backgrounds
+    /// Inserted-line background in the diff.
     #[serde(with = "hex")]
     pub diff_inserted_bg: Rgba,
+    /// Deleted-line background in the diff.
     #[serde(with = "hex")]
     pub diff_deleted_bg: Rgba,
+    /// Modified-line background in the diff.
     #[serde(with = "hex")]
     pub diff_modified_bg: Rgba,
+    /// Background of the center-gutter separator column.
     #[serde(with = "hex")]
     pub diff_separator_bg: Rgba,
-    // Stronger word-level tint inside a modified line (the exact changed words).
+    /// Stronger word-level tint on the OLD side of a modified line (the changed words).
     #[serde(with = "hex")]
     pub diff_word_old_bg: Rgba,
+    /// Stronger word-level tint on the NEW side of a modified line (the changed words).
     #[serde(with = "hex")]
     pub diff_word_new_bg: Rgba,
 
     // Syntax
+    /// Syntax colour for keywords.
     #[serde(with = "hex")]
     pub syn_keyword: Rgba,
+    /// Syntax colour for string literals.
     #[serde(with = "hex")]
     pub syn_string: Rgba,
+    /// Syntax colour for numeric literals.
     #[serde(with = "hex")]
     pub syn_number: Rgba,
+    /// Syntax colour for comments.
     #[serde(with = "hex")]
     pub syn_comment: Rgba,
+    /// Syntax colour for function/method names.
     #[serde(with = "hex")]
     pub syn_function: Rgba,
+    /// Syntax colour for fields / properties / attributes.
     #[serde(with = "hex")]
     pub syn_field: Rgba,
+    /// Syntax colour for constants.
     #[serde(with = "hex")]
     pub syn_constant: Rgba,
+    /// Syntax colour for plain identifiers.
     #[serde(with = "hex")]
     pub syn_identifier: Rgba,
+    /// Syntax colour for operators + punctuation.
     #[serde(with = "hex")]
     pub syn_operator: Rgba,
 
@@ -375,13 +409,16 @@ impl Theme {
         // Red-green safe (deuteranopia / protanopia). Poles: blue / amber.
         apply_cvd(Theme::default(), CVD_DARK_RG)
     }
+    /// Light palette tuned for red-green colour-vision deficiency.
     pub fn light_redgreen() -> Self {
         apply_cvd(Theme::light(), CVD_LIGHT_RG)
     }
+    /// Dark palette tuned for blue-yellow (tritan) colour-vision deficiency.
     pub fn dark_tritan() -> Self {
         // Blue-yellow safe (tritanopia). Poles: green / red.
         apply_cvd(Theme::default(), CVD_DARK_TR)
     }
+    /// Light palette tuned for blue-yellow (tritan) colour-vision deficiency.
     pub fn light_tritan() -> Self {
         apply_cvd(Theme::light(), CVD_LIGHT_TR)
     }
@@ -425,12 +462,13 @@ pub fn apply_palette(palette: Theme) {
 }
 
 fn config_path() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
+    let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".config")
-        });
+        },
+        PathBuf::from,
+    );
     base.join("kyde").join("theme.json")
 }
 
@@ -452,14 +490,21 @@ fn valid_size(v: &serde_json::Value) -> bool {
 /// for testing.
 fn merge(file: Option<&str>) -> (Theme, bool) {
     let default = Theme::default();
-    let default_val = serde_json::to_value(default).expect("theme serializes");
-    let mut obj = default_val.as_object().expect("theme is an object").clone();
+    // Serializing the default theme to a JSON object is infallible by construction (every field
+    // is a plain number or hex string), but we don't `.expect()` it (rule 1): on the impossible
+    // failure, fall back to the in-memory default and request a file rewrite.
+    let Some(mut obj) = serde_json::to_value(default)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+    else {
+        return (default, true);
+    };
 
     let mut repaired = true; // assume repair unless we read a clean, complete file
     if let Some(s) = file {
         if let Ok(serde_json::Value::Object(file)) = serde_json::from_str::<serde_json::Value>(s) {
             let mut clean = true;
-            for (key, slot) in obj.iter_mut() {
+            for (key, slot) in &mut obj {
                 let numeric = NUMERIC_KEYS.contains(&key.as_str());
                 let ok =
                     file.get(key).is_some_and(
@@ -498,6 +543,7 @@ fn load() -> Theme {
 }
 
 impl Theme {
+    /// Serialize this theme to `~/.config/kyde/theme.json` (pretty hex JSON).
     pub fn save(&self) {
         let path = config_path();
         if let Some(parent) = path.parent() {
@@ -513,22 +559,38 @@ impl Theme {
 /// and every `get()` after sees the change — no app restart. `None` until first load.
 static THEME: RwLock<Option<Theme>> = RwLock::new(None);
 
+// Lock accessors that tolerate poisoning instead of `.unwrap()`-ing it. A poisoned `THEME`
+// lock carries no broken invariant: `Theme` is `Copy` and every writer fully *replaces* the
+// `Option<Theme>` in one assignment, so a panic mid-write cannot leave a torn value — the
+// recovered inner guard is always a complete, valid state. We take it back rather than
+// propagate the poison (which would cascade a single unrelated panic into every later read).
+fn read_theme() -> std::sync::RwLockReadGuard<'static, Option<Theme>> {
+    THEME
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+fn write_theme() -> std::sync::RwLockWriteGuard<'static, Option<Theme>> {
+    THEME
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// A snapshot of the loaded theme. Loads lazily on first call (and writes defaults if absent).
 /// Returns by value (cheap — `Theme: Copy`), so `theme::get().primary` and
 /// `let t = theme::get();` both work unchanged.
 pub fn get() -> Theme {
-    if let Some(t) = *THEME.read().unwrap() {
+    if let Some(t) = *read_theme() {
         return t;
     }
     let loaded = load();
-    *THEME.write().unwrap() = Some(loaded);
+    *write_theme() = Some(loaded);
     loaded
 }
 
 /// Mutate the live theme and persist it to `theme.json`. The change is visible to the next
 /// `get()` immediately, so the UI reflects it on the next frame (no restart).
 pub fn update(f: impl FnOnce(&mut Theme)) {
-    let mut guard = THEME.write().unwrap();
+    let mut guard = write_theme();
     let mut t = (*guard).unwrap_or_else(load);
     f(&mut t);
     *guard = Some(t);
@@ -540,13 +602,14 @@ pub fn update(f: impl FnOnce(&mut Theme)) {
 /// one-off light-theme shot must NOT leave a `theme.json` that taints the later dark shots,
 /// which share its throwaway config dir and reload the theme on each launch.
 pub fn set_palette_ephemeral(palette: Theme) {
-    let mut guard = THEME.write().unwrap();
-    let (ef, uf, rh) = (*guard)
-        .map(|t| (t.editor_font_size, t.ui_font_size, t.tree_row_height))
-        .unwrap_or_else(|| {
+    let mut guard = write_theme();
+    let (ef, uf, rh) = (*guard).map_or_else(
+        || {
             let d = load();
             (d.editor_font_size, d.ui_font_size, d.tree_row_height)
-        });
+        },
+        |t| (t.editor_font_size, t.ui_font_size, t.tree_row_height),
+    );
     let mut t = palette;
     t.editor_font_size = ef;
     t.ui_font_size = uf;
@@ -554,17 +617,19 @@ pub fn set_palette_ephemeral(palette: Theme) {
     *guard = Some(t);
 }
 
-/// Corner radius of the island panels (tree / editor), and the frame gap between them.
+/// Corner radius (px) of the island panels (tree / editor).
 pub const ISLAND_RADIUS: f32 = 10.0;
+/// Gap (px) between the island panels and the window frame.
 pub const FRAME_GAP: f32 = 8.0;
 
 /// Fonts (no colour — separate from the themeable palette). Both bundled + OFL-licensed,
 /// registered at startup in `main::load_fonts`.
 pub mod font {
-    /// Code font: diff + editor. JetBrains Mono.
+    /// Code font: diff + editor. `JetBrains` Mono.
     pub const FAMILY: &str = "JetBrains Mono";
     /// UI chrome font: trees, buttons, labels, overlays. Inter.
     pub const UI_FAMILY: &str = "Inter";
+    /// Line-height multiplier applied to both font families.
     pub const LINE_HEIGHT: f32 = 1.2;
 }
 
@@ -572,7 +637,7 @@ pub mod font {
 mod tests {
     use super::*;
 
-    fn approx(a: gpui::Rgba, hex: u32) -> bool {
+    fn approx(a: Rgba, hex: u32) -> bool {
         let b = c(hex);
         (a.r - b.r).abs() < 0.01 && (a.g - b.g).abs() < 0.01 && (a.b - b.b).abs() < 0.01
     }
@@ -594,7 +659,7 @@ mod tests {
 
     #[test]
     fn invalid_color_falls_back_to_default() {
-        let (t, repaired) = merge(Some(r##"{ "primary": "not-a-color" }"##));
+        let (t, repaired) = merge(Some(r#"{ "primary": "not-a-color" }"#));
         assert!(repaired);
         assert!(approx(t.primary, 0x3574F0));
     }
@@ -661,9 +726,9 @@ mod tests {
     }
     fn lin_rgb(c: Rgba) -> [f64; 3] {
         [
-            srgb_to_lin(c.r as f64),
-            srgb_to_lin(c.g as f64),
-            srgb_to_lin(c.b as f64),
+            srgb_to_lin(f64::from(c.r)),
+            srgb_to_lin(f64::from(c.g)),
+            srgb_to_lin(f64::from(c.b)),
         ]
     }
     /// Relative luminance → WCAG contrast ratio between two colours.
@@ -818,7 +883,7 @@ mod tests {
 
 /// serde adapter: Rgba <-> "#RRGGBB".
 mod hex {
-    use gpui::Rgba;
+    use kyde_color::Color as Rgba;
     use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S: Serializer>(c: &Rgba, s: S) -> Result<S::Ok, S::Error> {

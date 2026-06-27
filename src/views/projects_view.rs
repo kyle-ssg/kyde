@@ -494,34 +494,31 @@ impl Kyde {
     /// was open, the editor tabs, tree expansion, mode) or starting fresh otherwise.
     fn load_project_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.repo_root = Some(path.clone());
-        match self.project_sessions.remove(&path) {
-            Some(s) => {
-                self.mode = s.mode;
-                self.expanded = s.expanded;
-                self.open_tabs = s.open_tabs;
-                self.preview_tab = s.preview_tab;
-                self.selected = s.selected;
-                self.refresh();
-                // Reload the file that was open into the editor; else leave it empty.
-                // Restore as permanent — `open_file` would clear the preview slot, so save it
-                // first and put it back (the restored active file may itself be the preview).
-                let preview = self.preview_tab.clone();
-                match s.open_path {
-                    Some(p) => self.open_file(p, cx),
-                    None => self.open_path = None,
-                }
-                self.preview_tab = preview;
+        if let Some(s) = self.project_sessions.remove(&path) {
+            self.mode = s.mode;
+            self.expanded = s.expanded;
+            self.open_tabs = s.open_tabs;
+            self.preview_tab = s.preview_tab;
+            self.selected = s.selected;
+            self.refresh();
+            // Reload the file that was open into the editor; else leave it empty.
+            // Restore as permanent — `open_file` would clear the preview slot, so save it
+            // first and put it back (the restored active file may itself be the preview).
+            let preview = self.preview_tab.clone();
+            match s.open_path {
+                Some(p) => self.open_file(p, cx),
+                None => self.open_path = None,
             }
-            None => {
-                self.mode = Mode::Browse; // open into the code view, not git
-                self.open_path = None;
-                self.open_tabs.clear();
-                self.preview_tab = None;
-                self.selected = None;
-                self.expanded.clear();
-                self.expanded.insert(PathBuf::new()); // root folder visible by default
-                self.refresh();
-            }
+            self.preview_tab = preview;
+        } else {
+            self.mode = Mode::Browse; // open into the code view, not git
+            self.open_path = None;
+            self.open_tabs.clear();
+            self.preview_tab = None;
+            self.selected = None;
+            self.expanded.clear();
+            self.expanded.insert(PathBuf::new()); // root folder visible by default
+            self.refresh();
         }
     }
 

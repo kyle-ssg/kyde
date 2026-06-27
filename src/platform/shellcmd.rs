@@ -45,7 +45,7 @@ fn existing_in(name: &str, exe: &Path, dirs: &[PathBuf]) -> Option<bool> {
     for d in dirs {
         let p = d.join(name);
         if std::fs::symlink_metadata(&p).is_ok() {
-            let is_us = std::fs::read_link(&p).map(|t| t == exe).unwrap_or(false);
+            let is_us = std::fs::read_link(&p).is_ok_and(|t| t == exe);
             return Some(is_us);
         }
     }
@@ -55,7 +55,7 @@ fn existing_in(name: &str, exe: &Path, dirs: &[PathBuf]) -> Option<bool> {
 /// Pure core: decide the state from our exe path and the dirs to scan. A name
 /// already pointing at us wins (Installed); otherwise the first name with
 /// nothing on PATH is offered (Available); if every name is taken by something
-/// else, NameTaken.
+/// else, `NameTaken`.
 fn state_in(exe: &Path, scan: &[PathBuf]) -> State {
     for n in NAMES {
         if existing_in(n, exe, scan) == Some(true) {

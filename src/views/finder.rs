@@ -1,5 +1,5 @@
 //! Fuzzy file finder + Find-in-Files + command palette — the transient `⌘P`/`⌘⇧F`/`⌘⇧A`
-//! overlay (FinderMode::Files|Content|Actions). Crate-root child module.
+//! overlay (`FinderMode::Files|Content|Actions`). Crate-root child module.
 
 use crate::*;
 
@@ -153,7 +153,7 @@ impl Kyde {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, window, cx| {
-                                this.run_palette(kind, window, cx)
+                                this.run_palette(kind, window, cx);
                             }),
                         )
                         .into_any_element()
@@ -412,7 +412,7 @@ impl Kyde {
         };
         self.finder_query.update(cx, |e, cx| {
             e.placeholder = placeholder.into();
-            e.set_content(String::new(), Lang::PlainText, cx)
+            e.set_content(String::new(), Lang::PlainText, cx);
         });
         self.recompute_finder(cx);
         let handle = self.finder_query.read(cx).focus_handle.clone();
@@ -460,11 +460,7 @@ impl Kyde {
             // Compute the line's byte range first (immutable borrow), then select it.
             let range = {
                 let text = e.text();
-                let start: usize = text
-                    .split_inclusive('\n')
-                    .take(line0)
-                    .map(|l| l.len())
-                    .sum();
+                let start: usize = text.split_inclusive('\n').take(line0).map(str::len).sum();
                 let len = text[start..].find('\n').unwrap_or(text.len() - start);
                 start..start + len
             };
@@ -475,7 +471,7 @@ impl Kyde {
         let y = -(line0.saturating_sub(SCROLL_CONTEXT_ROWS) as f32) * lh;
         let sh = self.file_scroll.clone();
         window.defer(cx, move |_w, _cx| {
-            sh.set_offset(gpui::point(gpui::px(0.0), gpui::px(y)))
+            sh.set_offset(gpui::point(gpui::px(0.0), gpui::px(y)));
         });
         window.focus(&self.focus_handle);
         cx.notify();

@@ -1,39 +1,111 @@
+#![deny(missing_docs)]
 //! Git layer. Shells out to the `git` binary on a background-friendly API,
 //! exactly like Zed's `crates/git` (no libgit2). Pure Rust — compiles standalone.
 
-use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Everything `kyde-git` can fail with. Each variant carries the context needed to act on it
+/// — the offending path, the git command + its stderr, or the underlying I/O error + what we
+/// were doing. (Library crate → typed errors via `thiserror`, never `anyhow`.)
+#[derive(Debug, thiserror::Error)]
+pub enum GitError {
+    /// `path` is not inside a git working tree.
+    #[error("not a git repository")]
+    NotARepository,
+    /// File contains a NUL byte, so it can't be shown/edited as text.
+    #[error("binary file: {0:?}")]
+    BinaryFile(PathBuf),
+    /// File bytes are not valid UTF-8.
+    #[error("file is not valid UTF-8: {0:?}")]
+    NotUtf8(PathBuf),
+    /// A rename/move would clobber this existing destination.
+    #[error("{0:?} already exists")]
+    AlreadyExists(PathBuf),
+    /// A branch/ref name was empty after trimming.
+    #[error("empty branch name")]
+    EmptyBranchName,
+    /// A branch/ref name git would misread as a flag (leading `-`) or otherwise reject.
+    #[error("invalid branch name: {0:?}")]
+    InvalidBranchName(String),
+    /// A push was rejected because the remote advanced, and the rebase-and-retry recovery
+    /// itself failed (carries the rebase error so the user can resolve it manually).
+    #[error("remote has changes that conflict with yours — pull and resolve them manually ({0})")]
+    RemoteConflict(String),
+    /// A git subprocess ran but exited non-zero. `command` is the argv; `stderr` is git's own.
+    #[error("git {command} failed: {stderr}")]
+    Command {
+        /// The git argv that was run (debug-formatted).
+        command: String,
+        /// git's captured stderr.
+        stderr: String,
+    },
+    /// An I/O or process-spawn error, tagged with the operation (and path, where relevant).
+    #[error("{operation}: {source}")]
+    Io {
+        /// What we were doing (e.g. `"reading <path>"`, `"running git [...]"`).
+        operation: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Result alias for every fallible `kyde-git` operation.
+pub type Result<T> = std::result::Result<T, GitError>;
+
+/// Build an [`GitError::Io`] from an operation description + the underlying I/O error.
+fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> GitError {
+    move |source| GitError::Io {
+        operation: operation.into(),
+        source,
+    }
+}
+
+/// A file's working-tree status (the `XY` codes from `git status --porcelain`, collapsed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStatus {
+    /// Newly added (staged) file.
     Added,
+    /// Tracked file with content changes.
     Modified,
+    /// Tracked file removed.
     Deleted,
+    /// File moved/renamed.
     Renamed,
+    /// New file not yet tracked by git.
     Untracked,
+    /// File with a merge conflict.
     Conflict,
 }
 
+/// A changed file in the working tree: its repo-relative path + status.
 #[derive(Debug, Clone)]
 pub struct ChangedFile {
+    /// Repo-relative path of the file.
     pub path: PathBuf,
+    /// The file's working-tree status.
     pub status: FileStatus,
 }
 
 /// One entry in the git log (history view).
 #[derive(Debug, Clone)]
 pub struct Commit {
+    /// Full commit hash.
     pub hash: String,
+    /// Abbreviated commit hash.
     pub short: String,
+    /// Author name.
     pub author: String,
     /// Relative date string (`git log --date=relative`), e.g. "2 hours ago".
     pub date: String,
+    /// Commit subject (first line of the message).
     pub subject: String,
     /// Decoration refs (`%D`): e.g. "HEAD -> main, origin/main, tag: v1". Empty if none.
     pub refs: String,
 }
 
+/// A git repository rooted at a working-tree top level. All operations shell out to `git`.
 pub struct Repo {
     root: PathBuf,
 }
@@ -44,11 +116,12 @@ impl Repo {
         let out = git(path.as_ref(), &["rev-parse", "--show-toplevel"])?;
         let root = PathBuf::from(out.trim());
         if root.as_os_str().is_empty() {
-            return Err(anyhow!("not a git repository"));
+            return Err(GitError::NotARepository);
         }
         Ok(Self { root })
     }
 
+    /// The repository's working-tree root.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -99,7 +172,10 @@ impl Repo {
         let mut hits = Vec::new();
         // Each line: `path:lineno:content`. Repo-relative paths on macOS have no ':',
         // so splitting on the first two ':' is unambiguous.
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in BufReader::new(stdout)
+            .lines()
+            .map_while(std::result::Result::ok)
+        {
             let mut it = line.splitn(3, ':');
             let (Some(path), Some(num), Some(content)) = (it.next(), it.next(), it.next()) else {
                 continue;
@@ -156,7 +232,7 @@ impl Repo {
     /// HEAD (newly added) has no base → empty string (all-added).
     pub fn base_content(&self, rel: &Path) -> Result<String> {
         let p = rel.to_string_lossy();
-        git(&self.root, &["show", &format!("HEAD:{}", p)]).or(Ok(String::new()))
+        git(&self.root, &["show", &format!("HEAD:{p}")]).or(Ok(String::new()))
     }
 
     /// Current on-disk content = the "after" side. Errors if the file is binary
@@ -165,17 +241,19 @@ impl Repo {
     /// (which, fed through the diff editor's autosave, would erase the file).
     pub fn working_content(&self, rel: &Path) -> Result<String> {
         let full = self.root.join(rel);
-        let bytes = std::fs::read(&full).with_context(|| format!("reading {:?}", full))?;
+        let bytes = std::fs::read(&full).map_err(io_err(format!("reading {full:?}")))?;
         if bytes.contains(&0) {
-            return Err(anyhow!("binary file: {:?}", rel));
+            return Err(GitError::BinaryFile(rel.to_path_buf()));
         }
-        String::from_utf8(bytes).map_err(|_| anyhow!("not valid UTF-8: {:?}", rel))
+        String::from_utf8(bytes).map_err(|_| GitError::NotUtf8(rel.to_path_buf()))
     }
 
+    /// Stage a file (`git add -- <rel>`).
     pub fn stage(&self, rel: &Path) -> Result<()> {
         git(&self.root, &["add", "--", &rel.to_string_lossy()]).map(|_| ())
     }
 
+    /// Unstage a file (`git restore --staged -- <rel>`).
     pub fn unstage(&self, rel: &Path) -> Result<()> {
         git(
             &self.root,
@@ -195,7 +273,8 @@ impl Repo {
 
     /// Remove a file from the working tree (used to delete added/untracked files on rollback).
     pub fn delete_file(&self, rel: &Path) -> Result<()> {
-        std::fs::remove_file(self.root.join(rel)).map_err(Into::into)
+        let full = self.root.join(rel);
+        std::fs::remove_file(&full).map_err(io_err(format!("deleting {full:?}")))
     }
 
     /// Rename/move a working-tree file. Plain `fs::rename` (git picks up the
@@ -204,15 +283,16 @@ impl Repo {
     pub fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         let (src, dst) = (self.root.join(from), self.root.join(to));
         if dst.exists() {
-            return Err(anyhow!("{:?} already exists", to));
+            return Err(GitError::AlreadyExists(to.to_path_buf()));
         }
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::rename(&src, &dst).with_context(|| format!("renaming {:?} -> {:?}", src, dst))?;
+        std::fs::rename(&src, &dst).map_err(io_err(format!("renaming {src:?} -> {dst:?}")))?;
         Ok(())
     }
 
+    /// Commit the staged changes with `message` (passed to `git commit -F -` via stdin).
     pub fn commit(&self, message: &str) -> Result<()> {
         git_stdin(&self.root, &["commit", "-F", "-"], message).map(|_| ())
     }
@@ -267,12 +347,8 @@ impl Repo {
         match self.push() {
             Ok(out) => Ok(out),
             Err(e) if push_rejected(&e.to_string()) => {
-                self.pull_rebase().map_err(|pe| {
-                    anyhow!(
-                        "remote has changes that conflict with yours — pull and resolve \
-                         them manually ({pe})"
-                    )
-                })?;
+                self.pull_rebase()
+                    .map_err(|pe| GitError::RemoteConflict(pe.to_string()))?;
                 self.push()
             }
             Err(e) => Err(e),
@@ -432,7 +508,7 @@ impl Repo {
         let rev = valid_ref(rev)?;
         // \x1f (unit separator) between fields; one commit per line (%s/%D are single-line).
         let fmt = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D";
-        let n = format!("-n{}", limit);
+        let n = format!("-n{limit}");
         let mut args = vec!["log", rev, "--date=relative", &n, fmt];
         let path_str = path.map(|p| p.to_string_lossy().into_owned());
         if let Some(p) = &path_str {
@@ -528,7 +604,7 @@ impl Repo {
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&full, content).with_context(|| format!("writing {:?}", full))?;
+        std::fs::write(&full, content).map_err(io_err(format!("writing {full:?}")))?;
         Ok(())
     }
 }
@@ -574,10 +650,10 @@ fn classify(x: char, y: char) -> FileStatus {
 fn valid_ref(name: &str) -> Result<&str> {
     let n = name.trim();
     if n.is_empty() {
-        return Err(anyhow!("empty branch name"));
+        return Err(GitError::EmptyBranchName);
     }
     if n.starts_with('-') {
-        return Err(anyhow!("invalid branch name: {n:?}"));
+        return Err(GitError::InvalidBranchName(n.to_string()));
     }
     Ok(n)
 }
@@ -602,13 +678,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .current_dir(dir)
         .args(args)
         .output()
-        .with_context(|| format!("running git {:?}", args))?;
+        .map_err(io_err(format!("running git {args:?}")))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(GitError::Command {
+            command: format!("{args:?}"),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -622,19 +697,22 @@ fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!("spawning git {:?}", args))?;
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped (configured above)")
-        .write_all(stdin.as_bytes())?;
-    let out = child.wait_with_output()?;
+        .map_err(io_err(format!("spawning git {args:?}")))?;
+    // The pipe was configured above, so `take()` yields it; if it's somehow absent we skip the
+    // write rather than `.expect()` (rule: no unwrap/expect) — git then sees EOF and fails with
+    // its own message, surfaced below as a `Command` error.
+    if let Some(mut pipe) = child.stdin.take() {
+        pipe.write_all(stdin.as_bytes())
+            .map_err(io_err("writing to git stdin"))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(io_err(format!("waiting for git {args:?}")))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&out.stderr)
-        ));
+        return Err(GitError::Command {
+            command: format!("{args:?}"),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

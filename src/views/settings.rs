@@ -1,8 +1,12 @@
 //! Settings window — a category sidebar (Appearance / Keymap / Language Packs) + a content
-//! pane, IntelliJ-style. Hosted in a native `ModalWindow` (ModalKind::Settings). Changes
+//! pane, IntelliJ-style. Hosted in a native `ModalWindow` (`ModalKind::Settings`). Changes
 //! apply live via `theme::update` (font sizes, row height) / `choose_preset` (keymap).
 
-use crate::*;
+use crate::{
+    div, px, theme, ui, Context, FluentBuilder, InteractiveElement, IntoElement, Kyde, ModalKind,
+    MouseButton, ParentElement, Preset, SettingsSection, SharedString, StatefulInteractiveElement,
+    Styled,
+};
 use gpui::FontWeight;
 
 impl Kyde {

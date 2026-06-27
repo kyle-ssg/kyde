@@ -182,8 +182,7 @@ impl Kyde {
             .repo_root
             .as_ref()
             .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_string());
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
         // Changed files as a folder tree (root + everything expanded by rebuild_commit_view).
         let mut visible = vec![tree::Row {
             path: PathBuf::new(),
@@ -226,8 +225,7 @@ impl Kyde {
                 let selected = file_idx.is_some() && self.selected == file_idx;
                 let name_color = file_idx
                     .and_then(|i| self.files.get(i))
-                    .map(|f| status_color(f.status))
-                    .unwrap_or(t.text);
+                    .map_or(t.text, |f| status_color(f.status));
                 let name: SharedString = if is_root {
                     root_name.clone().into()
                 } else {
@@ -436,10 +434,10 @@ impl Kyde {
             if let Some(cx) = cx {
                 // Drop any stale text so nothing flashes behind the image.
                 self.diff_left.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
+                    e.set_content(String::new(), Lang::PlainText, cx);
                 });
                 self.diff_right.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
+                    e.set_content(String::new(), Lang::PlainText, cx);
                 });
             }
             return;
@@ -650,7 +648,7 @@ impl Kyde {
                 match result {
                     Ok(()) => {
                         this.commit_editor.update(cx, |e, cx| {
-                            e.set_content(String::new(), Lang::PlainText, cx)
+                            e.set_content(String::new(), Lang::PlainText, cx);
                         });
                         this.refresh();
                         // Tab may be empty now → flip to Push if it has work.
@@ -718,18 +716,17 @@ impl Kyde {
                 _ => None,
             })
             .or(if self.files.is_empty() { None } else { Some(0) });
-        match idx {
-            Some(i) => self.select_with(i, Some(cx)),
-            None => {
-                self.selected = None;
-                self.diff_path = None;
-                self.diff_left.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-                self.diff_right.update(cx, |e, cx| {
-                    e.set_content(String::new(), Lang::PlainText, cx)
-                });
-            }
+        if let Some(i) = idx {
+            self.select_with(i, Some(cx));
+        } else {
+            self.selected = None;
+            self.diff_path = None;
+            self.diff_left.update(cx, |e, cx| {
+                e.set_content(String::new(), Lang::PlainText, cx);
+            });
+            self.diff_right.update(cx, |e, cx| {
+                e.set_content(String::new(), Lang::PlainText, cx);
+            });
         }
         cx.notify();
     }

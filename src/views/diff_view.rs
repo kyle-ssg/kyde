@@ -21,8 +21,7 @@ impl Kyde {
         let title: SharedString = self
             .diff_path
             .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Diff".to_string())
+            .map_or_else(|| "Diff".to_string(), |p| p.to_string_lossy().into_owned())
             .into();
         let back = div()
             .id("diff-back")
@@ -183,7 +182,7 @@ impl Kyde {
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, _e, _w, cx| {
-                                            this.diff_revert_hunk(hi, cx)
+                                            this.diff_revert_hunk(hi, cx);
                                         }),
                                     ),
                             )
@@ -326,11 +325,7 @@ impl Kyde {
     /// A small floating control at the diff's top-right: the change count + prev/next arrows
     /// that jump between hunks. Shown whenever the current diff has at least one change.
     fn render_diff_nav(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let n = self
-            .current_diff
-            .as_ref()
-            .map(|d| d.hunks.len())
-            .unwrap_or(0);
+        let n = self.current_diff.as_ref().map_or(0, |d| d.hunks.len());
         // Nothing to navigate with a single (or zero) change — hide the control.
         if n < 2 {
             return None;
@@ -686,8 +681,7 @@ impl Kyde {
         let lang = self
             .diff_path
             .clone()
-            .map(|p| self.effective_lang(&p))
-            .unwrap_or(Lang::PlainText);
+            .map_or(Lang::PlainText, |p| self.effective_lang(&p));
         self.old_spans = highlight::highlight(&self.diff_base, lang);
         self.new_spans = highlight::highlight(text, lang);
         self.apply_diff_decorations(&d, cx);
@@ -712,8 +706,7 @@ impl Kyde {
         let lang = self
             .diff_path
             .clone()
-            .map(|p| self.effective_lang(&p))
-            .unwrap_or(Lang::PlainText);
+            .map_or(Lang::PlainText, |p| self.effective_lang(&p));
         self.diff_right
             .update(cx, |e, cx| e.set_content(content.clone(), lang, cx));
         if let (Some(rel), Some(repo)) = (self.diff_path.clone(), self.repo()) {
@@ -769,17 +762,20 @@ impl Kyde {
         let lh = editor::line_height_px();
         let top = (-f32::from(self.diff_scroll.offset().y) / lh).round() as i64;
         let anchor = top + SCROLL_CONTEXT_ROWS as i64;
+        // `rows` is non-empty (checked above), so first/last are valid by construction — no
+        // `.unwrap()` needed (rule: no unwrap in non-test code).
+        let (first, last) = (rows[0], rows[rows.len() - 1]);
         let target = if next {
             rows.iter()
                 .copied()
                 .find(|&r| (r as i64) > anchor)
-                .unwrap_or(rows[0]) // past the last → wrap to the first
+                .unwrap_or(first) // past the last → wrap to the first
         } else {
             rows.iter()
                 .copied()
                 .rev()
                 .find(|&r| (r as i64) < anchor)
-                .unwrap_or_else(|| *rows.last().unwrap()) // before the first → wrap to the last
+                .unwrap_or(last) // before the first → wrap to the last
         };
         let row = target.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
         self.diff_scroll
@@ -793,10 +789,10 @@ impl Kyde {
         self.diff_path = None;
         self.current_diff = None;
         self.diff_left.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
+            e.set_content(String::new(), Lang::PlainText, cx);
         });
         self.diff_right.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
+            e.set_content(String::new(), Lang::PlainText, cx);
         });
     }
 

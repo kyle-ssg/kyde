@@ -1,3 +1,7 @@
+// Build scripts SHOULD fail loudly: a panic here aborts the build with the message, which is
+// exactly what we want if env/OUT_DIR/file writes go wrong — so unwrap/expect are correct.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 // Build script. Embeds the Windows app icon + version metadata into kyde.exe, and on macOS
 // embeds a minimal `Info.plist` into the binary so the *unbundled* executable (run as
 // `target/release/kyde` via the `ky` shell function) shows "Kyde" in the dock / menu bar

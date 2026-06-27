@@ -13,10 +13,10 @@ impl Kyde {
         let Some((path, is_dir)) = self.delete_target.clone() else {
             return div().into_any_element();
         };
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let name = path.file_name().map_or_else(
+            || path.to_string_lossy().into_owned(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         let kind = if is_dir { "folder" } else { "file" };
 
         let cancel = btn_secondary("delete-cancel", "Cancel")
@@ -80,7 +80,7 @@ impl Kyde {
     }
 
     /// New-file / rename modal: a single-line name input + Create/Rename & Cancel.
-    /// Enter confirms / Esc cancels via the "FileFinder" key context (the input is
+    /// Enter confirms / Esc cancels via the "`FileFinder`" key context (the input is
     /// single-line, so those keys bubble up to this wrapper).
     pub(crate) fn render_name_prompt(
         &self,
@@ -111,52 +111,51 @@ impl Kyde {
                 cx.listener(|this, _e, window, cx| this.confirm_name_prompt(window, cx)),
             );
 
-        let panel =
-            div()
-                .key_context("FileFinder")
-                .on_action(cx.listener(|this, _: &FinderConfirm, window, cx| {
-                    this.confirm_name_prompt(window, cx)
-                }))
-                .on_action(cx.listener(|this, _: &FinderClose, window, cx| {
-                    this.cancel_name_prompt(window, cx)
-                }))
-                .w(px(420.0))
-                .flex()
-                .flex_col()
-                .gap_3()
-                .p_4()
-                .bg(t.frame_bg)
-                .border_1()
-                .border_color(t.divider)
-                .rounded(px(theme::ISLAND_RADIUS))
-                .shadow_lg()
-                .font_family(ui)
-                .text_size(px(theme::get().ui_font_size + 1.0))
-                .occlude()
-                .child(div().text_color(t.text).child(title))
-                .child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .bg(t.main_bg)
-                        .border_1()
-                        .border_color(t.divider)
-                        .child(self.name_input.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .justify_end()
-                        .gap_2()
-                        .child(cancel)
-                        .child(confirm),
-                );
+        let panel = div()
+            .key_context("FileFinder")
+            .on_action(cx.listener(|this, _: &FinderConfirm, window, cx| {
+                this.confirm_name_prompt(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FinderClose, window, cx| {
+                this.cancel_name_prompt(window, cx);
+            }))
+            .w(px(420.0))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .bg(t.frame_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .shadow_lg()
+            .font_family(ui)
+            .text_size(px(theme::get().ui_font_size + 1.0))
+            .occlude()
+            .child(div().text_color(t.text).child(title))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(t.main_bg)
+                    .border_1()
+                    .border_color(t.divider)
+                    .child(self.name_input.clone()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(cancel)
+                    .child(confirm),
+            );
         overlay(cx, true).child(panel).into_any_element()
     }
 
-    /// Open the delete-confirmation modal for a tree path (is_dir derived from disk).
+    /// Open the delete-confirmation modal for a tree path (`is_dir` derived from disk).
     /// Open the "new file" prompt, creating in `dir` (rel path; `""` = repo root).
     pub(crate) fn start_new_file(
         &mut self,
@@ -167,7 +166,7 @@ impl Kyde {
         self.context_menu = None;
         self.name_prompt = Some(NamePrompt::NewFile(dir));
         self.name_input.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
+            e.set_content(String::new(), Lang::PlainText, cx);
         });
         let handle = self.name_input.read(cx).focus_handle.clone();
         window.focus(&handle);
@@ -231,15 +230,11 @@ impl Kyde {
             NamePrompt::Rename(path) => {
                 let dst = path
                     .parent()
-                    .map(|d| d.join(&name))
-                    .unwrap_or_else(|| PathBuf::from(&name));
-                let ok = self
-                    .repo()
-                    .map(|r| r.rename(&path, &dst).is_ok())
-                    .unwrap_or(false);
+                    .map_or_else(|| PathBuf::from(&name), |d| d.join(&name));
+                let ok = self.repo().is_some_and(|r| r.rename(&path, &dst).is_ok());
                 if ok {
                     // Repoint any open tab / selection from the old path to the new one.
-                    for t in self.open_tabs.iter_mut() {
+                    for t in &mut self.open_tabs {
                         if *t == path {
                             *t = dst.clone();
                         }
@@ -264,8 +259,7 @@ impl Kyde {
         } else {
             self.repo_root
                 .as_ref()
-                .map(|r| r.join(&path))
-                .unwrap_or_else(|| path.clone())
+                .map_or_else(|| path.clone(), |r| r.join(&path))
         };
         let is_dir = abs.is_dir();
         self.context_menu = None;
@@ -283,8 +277,7 @@ impl Kyde {
         } else {
             self.repo_root
                 .as_ref()
-                .map(|r| r.join(&path))
-                .unwrap_or_else(|| path.clone())
+                .map_or_else(|| path.clone(), |r| r.join(&path))
         };
         let r = if is_dir {
             std::fs::remove_dir_all(&abs)
@@ -329,7 +322,7 @@ impl Kyde {
                 full.clone()
             } else {
                 full.parent()
-                    .map_or_else(|| root.clone(), |p| p.to_path_buf())
+                    .map_or_else(|| root.clone(), std::path::Path::to_path_buf)
             };
             std::process::Command::new("open")
                 .arg("-a")

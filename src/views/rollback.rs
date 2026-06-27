@@ -14,8 +14,7 @@ impl Kyde {
             .repo_root
             .as_ref()
             .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_string());
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
         // Same folder tree as the Commit view, with rollback checkboxes.
         let mut visible = vec![tree::Row {
             path: PathBuf::new(),
@@ -41,8 +40,7 @@ impl Kyde {
                     .files
                     .iter()
                     .find(|f| f.path == r.path)
-                    .map(|f| status_color(f.status))
-                    .unwrap_or(t.text);
+                    .map_or(t.text, |f| status_color(f.status));
                 let name: SharedString = if is_root {
                     root_name.clone().into()
                 } else {

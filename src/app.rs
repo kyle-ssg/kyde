@@ -34,7 +34,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
     let mut skip_dirs: std::collections::HashSet<String> =
         [".git", "target", "dist", "node_modules"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
     if let Ok(gitignore) = std::fs::read_to_string(root.join(".gitignore")) {
         for line in gitignore.lines() {
@@ -503,7 +503,8 @@ impl Kyde {
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
     /// silent no-op. `ctx` is a short human label ("Commit", "Push", …); the error is
     /// stringified after it. Still logs to stderr for debugging.
-    pub(crate) fn fail(&mut self, ctx: &str, e: anyhow::Error) {
+    pub(crate) fn fail(&mut self, ctx: &str, e: impl Into<anyhow::Error>) {
+        let e = e.into();
         eprintln!("{ctx} failed: {e:#}");
         self.op_error = Some(format!("{ctx} failed: {e}"));
     }
@@ -513,12 +514,12 @@ impl Kyde {
         self.open_path = None;
         self.preview_tab = None;
         self.file_editor.update(cx, |e, cx| {
-            e.set_content(String::new(), Lang::PlainText, cx)
+            e.set_content(String::new(), Lang::PlainText, cx);
         });
     }
 
     /// The language to actually highlight with: the file's detected language if
-    /// its pack is installed (or it needs no pack), else PlainText — so an
+    /// its pack is installed (or it needs no pack), else `PlainText` — so an
     /// un-installed type renders fast and unparsed until the user opts in.
     pub(crate) fn effective_lang(&self, rel: &std::path::Path) -> Lang {
         let lang = Lang::from_path(rel);

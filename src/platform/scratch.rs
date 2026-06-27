@@ -18,12 +18,13 @@ pub const LANGS: &[(&str, &str)] = &[
 ];
 
 fn base() -> PathBuf {
-    let root = std::env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
+    let root = std::env::var("XDG_CONFIG_HOME").map_or_else(
+        |_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".config")
-        });
+        },
+        PathBuf::from,
+    );
     root.join("kyde").join("scratches")
 }
 
@@ -31,8 +32,7 @@ fn base() -> PathBuf {
 fn project_key(project: &Path) -> String {
     let name = project
         .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "project".into());
+        .map_or_else(|| "project".into(), |n| n.to_string_lossy().into_owned());
     name.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '.' {

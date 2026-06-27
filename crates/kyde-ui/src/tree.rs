@@ -7,6 +7,9 @@ use gpui::prelude::*;
 use gpui::{div, px, svg, Context, MouseButton, Pixels, SharedString, Window};
 use kyde_theme as theme;
 
+/// Render one file-tree row (chevron + icon + label) generic over the hosting view `V`.
+/// The caller supplies the row's data + click/right-click handlers; this owns the layout,
+/// indentation, and hover/selected styling so every tree in the app looks identical.
 #[allow(clippy::too_many_arguments)]
 pub fn item<V: 'static>(
     cx: &mut Context<V>,
@@ -17,7 +20,7 @@ pub fn item<V: 'static>(
     depth: usize,
     selected: bool,
     name: SharedString,
-    name_color: gpui::Rgba,
+    name_color: kyde_color::Color,
     checkbox: Option<bool>,
     on_activate: impl Fn(&mut V, &gpui::MouseDownEvent, &mut Window, &mut Context<V>) + 'static,
     on_check: impl Fn(&mut V, &mut Context<V>) + 'static,
@@ -92,7 +95,7 @@ pub fn item<V: 'static>(
         .min_w_0()
         .pl(indent)
         .child(caret)
-        .when_some(checkbox_el, |d, cb| d.child(cb))
+        .when_some(checkbox_el, gpui::ParentElement::child)
         .child(badge)
         .child(
             div()
@@ -126,7 +129,7 @@ pub fn item<V: 'static>(
         .on_mouse_down(
             MouseButton::Right,
             cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
-                on_context(this, e.position, cx)
+                on_context(this, e.position, cx);
             }),
         )
         .into_any_element()

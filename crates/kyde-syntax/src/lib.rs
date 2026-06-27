@@ -1,7 +1,8 @@
+#![deny(missing_docs)]
 //! Tree-sitter syntax highlighting, the way Zed does it: parse with a grammar,
-//! run the grammar's HIGHLIGHTS_QUERY, map capture names → theme colors.
+//! run the grammar's `HIGHLIGHTS_QUERY`, map capture names → theme colors.
 //!
-//! This is plain Rust (no gpui) and unit-testable. It turns source text into a
+//! This is plain Rust (no UI framework) and unit-testable. It turns source text into a
 //! flat list of colored spans the UI can render.
 
 use kyde_theme as theme;
@@ -9,7 +10,7 @@ use std::path::Path;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
 /// The capture names we recognize. Order matters: indices are referenced by the
-/// HighlightConfiguration. Anything a grammar emits outside this set falls back
+/// `HighlightConfiguration`. Anything a grammar emits outside this set falls back
 /// to the default foreground.
 const CAPTURES: &[&str] = &[
     "keyword",
@@ -47,7 +48,7 @@ const CAPTURES: &[&str] = &[
     "namespace",
 ];
 
-fn capture_color(name: &str) -> gpui::Rgba {
+fn capture_color(name: &str) -> kyde_color::Color {
     let t = theme::get();
     match name {
         "keyword" | "charset" | "import" | "keyframes" | "media" | "supports" | "namespace" => {
@@ -73,31 +74,55 @@ fn capture_color(name: &str) -> gpui::Rgba {
 /// One styled run of text (byte range into the source + its color).
 #[derive(Debug, Clone)]
 pub struct Span {
+    /// Byte offset where the run starts (into the source).
     pub start: usize,
+    /// Byte offset where the run ends (exclusive).
     pub end: usize,
-    pub color: gpui::Rgba,
+    /// The run's colour, resolved from the active theme.
+    pub color: kyde_color::Color,
 }
 
+/// A language Kyde can recognise (drives highlighting + the install banner). `PlainText`
+/// means no grammar — the file renders uncoloured.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Lang {
+    /// TypeScript + JSX (`.tsx`).
     Tsx,
+    /// TypeScript (`.ts`).
     Ts,
+    /// JavaScript (`.js`/`.jsx`/`.mjs`/`.cjs`).
     Js,
+    /// Rust (`.rs`).
     Rust,
+    /// JSON (`.json`).
     Json,
+    /// Markdown (`.md`) — block-level only.
     Markdown,
+    /// Shell script (`.sh`/`.bash`/`.zsh`).
     Bash,
+    /// CSS (`.css`).
     Css,
+    /// SCSS (`.scss`) — reuses the CSS grammar.
     Scss,
+    /// YAML (`.yml`/`.yaml`).
     Yaml,
+    /// TOML (`.toml`).
     Toml,
+    /// Python (`.py`/`.pyi`).
     Python,
+    /// HTML (`.html`/`.htm`).
     Html,
+    /// Go (`.go`).
     Go,
+    /// R (`.r`/`.R`).
     R,
+    /// LaTeX (`.tex`/`.sty`/`.cls`).
     Latex,
+    /// `.env` files — builtin line highlighter (no grammar).
     Env,
+    /// `.gitignore` files — builtin line highlighter (no grammar).
     Gitignore,
+    /// No grammar; rendered as plain, uncoloured text.
     PlainText,
 }
 
@@ -220,6 +245,14 @@ fn pack(id: &str) -> Option<&'static Pack> {
 }
 
 impl Lang {
+    /// Infer the language from a file's name/extension (dotfiles like `.env` first).
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use kyde_syntax::Lang;
+    /// assert_eq!(Lang::from_path(Path::new("src/main.rs")), Lang::Rust);
+    /// assert_eq!(Lang::from_path(Path::new(".gitignore")), Lang::Gitignore);
+    /// ```
     pub fn from_path(path: &Path) -> Self {
         // Filename-based types first (dotfiles have no `extension()`).
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -233,20 +266,20 @@ impl Lang {
         match path.extension().and_then(|e| e.to_str()) {
             Some("tsx") => Lang::Tsx,
             Some("ts") => Lang::Ts,
-            Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Lang::Js,
+            Some("js" | "jsx" | "mjs" | "cjs") => Lang::Js,
             Some("rs") => Lang::Rust,
             Some("json") => Lang::Json,
-            Some("md") | Some("markdown") => Lang::Markdown,
-            Some("sh") | Some("bash") | Some("zsh") => Lang::Bash,
+            Some("md" | "markdown") => Lang::Markdown,
+            Some("sh" | "bash" | "zsh") => Lang::Bash,
             Some("css") => Lang::Css,
             Some("scss") => Lang::Scss,
-            Some("yml") | Some("yaml") => Lang::Yaml,
+            Some("yml" | "yaml") => Lang::Yaml,
             Some("toml") => Lang::Toml,
-            Some("py") | Some("pyi") => Lang::Python,
-            Some("html") | Some("htm") => Lang::Html,
+            Some("py" | "pyi") => Lang::Python,
+            Some("html" | "htm") => Lang::Html,
             Some("go") => Lang::Go,
-            Some("r") | Some("R") => Lang::R,
-            Some("tex") | Some("sty") | Some("cls") | Some("latex") => Lang::Latex,
+            Some("r" | "R") => Lang::R,
+            Some("tex" | "sty" | "cls" | "latex") => Lang::Latex,
             _ => Lang::PlainText,
         }
     }
@@ -278,6 +311,11 @@ impl Lang {
         pack(id)
     }
 
+    // In a zero-grammar build every match arm below is `cfg`'d out, so the match always
+    // `return None`s and everything after it is unreachable + `lang` unused. These allows are
+    // no-ops in any build with ≥1 grammar (the normal case); they only silence that degenerate
+    // config so `cargo build --no-default-features` is warning-free.
+    #[allow(unreachable_code, unused_variables)]
     fn config(self) -> Option<HighlightConfiguration> {
         // Each arm is gated to its grammar's Cargo feature. In a feature-trimmed
         // build the absent arms vanish and the lang falls through to the catch-all
@@ -285,8 +323,15 @@ impl Lang {
         // un-installed pack. The catch-all also covers the builtin-highlighter
         // langs (Env/Gitignore) and PlainText, so the match stays exhaustive
         // regardless of which features are on.
+        // Explicit type: in a zero-grammar build every value-producing arm is `cfg`'d out,
+        // leaving only the diverging `_ => return None`, so nothing else pins the tuple type.
         #[allow(unreachable_patterns)]
-        let (lang, highlights, injections, locals) = match self {
+        let (lang, highlights, injections, locals): (
+            tree_sitter::Language,
+            &str,
+            &str,
+            &str,
+        ) = match self {
             #[cfg(feature = "typescript")]
             Lang::Tsx => (
                 tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -429,7 +474,10 @@ impl Lang {
 impl Lang {
     /// The raw tree-sitter grammar for this language (no highlight config), used
     /// for structural analysis like code folding. `None` for the builtin
-    /// line-highlighters and PlainText.
+    /// line-highlighters and `PlainText`.
+    // Zero-grammar build: every arm is `cfg`'d out → the match always `return None`s, so
+    // `Some(lang)` is unreachable + `lang` unused. No-op allows in any build with ≥1 grammar.
+    #[allow(unreachable_code, unused_variables)]
     fn grammar(self) -> Option<tree_sitter::Language> {
         // Feature-gated like `config()`: an absent grammar's arm vanishes and the
         // lang falls through to `_ => return None` (no folding, like PlainText).
@@ -480,8 +528,7 @@ fn is_foldable(node: &tree_sitter::Node, source: &[u8]) -> bool {
     }
     let opens_with_bracket = source
         .get(node.start_byte())
-        .map(|b| matches!(b, b'{' | b'[' | b'(' | b'<'))
-        .unwrap_or(false);
+        .is_some_and(|b| matches!(b, b'{' | b'[' | b'(' | b'<'));
     let kind = node.kind();
     opens_with_bracket
         || kind.contains("block")
@@ -608,9 +655,8 @@ pub fn highlight(source: &str, lang: Lang) -> Vec<Span> {
     };
     let mut hl = Highlighter::new();
     let mut spans = Vec::new();
-    let events = match hl.highlight(&config, source.as_bytes(), None, |_| None) {
-        Ok(e) => e,
-        Err(_) => return spans,
+    let Ok(events) = hl.highlight(&config, source.as_bytes(), None, |_| None) else {
+        return spans;
     };
 
     let mut stack: Vec<usize> = Vec::new();

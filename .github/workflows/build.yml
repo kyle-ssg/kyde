@@ -55,6 +55,36 @@ jobs:
       - name: Trim build compiles
         run: cargo build --no-default-features --features rust,json,toml
 
+  # MSRV gate: prove the whole workspace still builds on the pinned minimum Rust
+  # (Cargo.toml `rust-version` / rust-toolchain.toml). Catches accidental use of a
+  # too-new std/lang feature before it ships. Pinned explicitly here (not @stable)
+  # so the job fails loudly if someone bumps the floor without meaning to.
+  msrv:
+    name: MSRV 1.96 builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.96 (pinned MSRV)
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      # gpui's Linux backend (blade/Vulkan + wayland/x11/xkb + fontconfig).
+      - name: Install Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev libzstd-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig-dev libfreetype-dev \
+            libx11-dev libxcb1-dev libvulkan-dev \
+            clang cmake
+
+      - name: Build workspace on MSRV
+        run: cargo build --workspace --all-targets
+
   build:
     name: build (${{ matrix.name }})
     # Manual-only. Release artifacts are built + attached by release.yml (release-please) at

@@ -101,7 +101,7 @@ impl Element for EditorElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> Prepaint {
@@ -199,10 +199,7 @@ impl Element for EditorElement {
             let content = &editor.content;
             let line_at = |b: usize| -> &str {
                 let s = all_starts.get(b).copied().unwrap_or(content.len());
-                let e = all_starts
-                    .get(b + 1)
-                    .map(|&n| n - 1)
-                    .unwrap_or(content.len());
+                let e = all_starts.get(b + 1).map_or(content.len(), |&n| n - 1);
                 content.get(s..e).unwrap_or("")
             };
             // Visible buffer lines (fold-filtered). No folds collapsed → just 0..line_count,
@@ -228,7 +225,7 @@ impl Element for EditorElement {
                     visible_lines.push(usize::MAX); // sentinel = filler (blank, no line number)
                 }
             };
-            for &b in visible_buf.iter() {
+            for &b in &visible_buf {
                 let start = all_starts.get(b).copied().unwrap_or(0);
                 if let Some(&k) = editor.filler.get(&b) {
                     push_filler(&mut line_starts, &mut visible_lines, k, start);
@@ -261,7 +258,7 @@ impl Element for EditorElement {
                             }
                         };
                         if take == 0 {
-                            take = rest.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+                            take = rest.chars().next().map_or(1, char::len_utf8);
                         }
                         let seg_str = &rest[..take];
                         let dr = line_starts.len();
@@ -302,7 +299,6 @@ impl Element for EditorElement {
                         ),
                     );
                 }
-                continue;
             }
             // (filler-end rows below the last line are blank → no shaped entries needed)
             for _ in 0..editor.filler_end {
@@ -432,7 +428,7 @@ impl Element for EditorElement {
         _: Option<&GlobalElementId>,
         _: Option<&gpui::InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         pre: &mut Prepaint,
         window: &mut Window,
         cx: &mut App,
@@ -611,7 +607,7 @@ impl Element for EditorElement {
         }
         // `pre.lines` is sparse — only on-screen rows are present, so iterate it directly
         // (no full-file scan) and position each by its display row.
-        for (&i, line) in pre.lines.iter() {
+        for (&i, line) in &pre.lines {
             let origin = point(text_x, bounds.top() + lh * i as f32);
             let _ = line.paint(origin, lh, window, cx);
         }
@@ -751,11 +747,7 @@ impl Element for EditorElement {
                 Err(i) => i.saturating_sub(1),
             };
             let col = cur.saturating_sub(pre.line_starts.get(dr).copied().unwrap_or(0));
-            let cx_x = pre
-                .lines
-                .get(&dr)
-                .map(|l| l.x_for_index(col))
-                .unwrap_or(px(0.0));
+            let cx_x = pre.lines.get(&dr).map_or(px(0.0), |l| l.x_for_index(col));
             if let Some(scroll) = scroll {
                 let top = bounds.top() + lh * dr as f32;
                 let bottom = top + lh;

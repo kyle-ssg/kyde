@@ -63,8 +63,7 @@ impl Kyde {
                 let abs = self
                     .repo_root
                     .as_ref()
-                    .map(|r| r.join(rel))
-                    .unwrap_or_else(|| rel.clone());
+                    .map_or_else(|| rel.clone(), |r| r.join(rel));
                 div()
                     .id("image-scroll")
                     .overflow_scroll()
@@ -103,7 +102,7 @@ impl Kyde {
                         cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
                             let fe = this.file_editor.clone();
                             fe.update(cx, |ed, cx| {
-                                ed.click_at(e.position, e.modifiers.shift, window, cx)
+                                ed.click_at(e.position, e.modifiers.shift, window, cx);
                             });
                             cx.stop_propagation();
                         }),
@@ -173,7 +172,7 @@ impl Kyde {
                         self.repo_root
                             .as_ref()
                             .map(|r| r.join(p))
-                            .and_then(|abs| abs.parent().map(|d| d.to_path_buf()))
+                            .and_then(|abs| abs.parent().map(std::path::Path::to_path_buf))
                     });
                     let mv = self
                         .md_view
@@ -293,8 +292,7 @@ impl Kyde {
             .repo_root
             .as_ref()
             .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_string());
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
         let visible = self.browse_visible_rows();
         let scratch_group = scratch_group_path();
         // O(1) status lookup per row (was `self.files.iter().find()` — O(changed) per row,
@@ -325,8 +323,7 @@ impl Kyde {
                 let name_color = (!is_dir)
                     .then(|| status_by_path.get(&r.path))
                     .flatten()
-                    .map(|&s| status_color(s))
-                    .unwrap_or(theme::get().text);
+                    .map_or(theme::get().text, |&s| status_color(s));
                 ui::tree::item(
                     cx,
                     self.dragging(Divider::Tree),
@@ -856,8 +853,7 @@ impl Kyde {
         let abs = self
             .repo_root
             .as_ref()
-            .map(|r| r.join(&rel))
-            .unwrap_or_else(|| rel.clone());
+            .map_or_else(|| rel.clone(), |r| r.join(&rel));
         let Ok(bytes) = std::fs::read(&abs) else {
             self.font_preview = None;
             return;

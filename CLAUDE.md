@@ -37,9 +37,17 @@ feel. No web, no Electron, no React.
   large-file diffs lag.
 
 ## Layout — a Cargo workspace
-The root package is the **gpui binary**; the pure, gpui-free logic lives in **library
-crates** under `crates/` (compiler-enforced boundaries, real test targets, independent
-rebuilds). Each extracted crate is **aliased back to its old module name** in `main.rs`
+The root package is the **gpui binary**; the logic lives in **library crates** under `crates/`
+(compiler-enforced boundaries, real test targets, independent rebuilds). **gpui is isolated to
+the UI layer**: only `kyde-ui` (the widget toolkit) and the binary depend on it. The eight
+model/logic crates are gpui-free — `kyde-git`, `kyde-diff`, `kyde-tree`, `kyde-markdown`,
+`kyde-update`, `kyde-config`, **`kyde-theme`, `kyde-syntax`** (verify: `cargo tree -p
+kyde-syntax | grep gpui` is empty). Colours are **`kyde_color::Color`** — a zero-dep POD in the
+tiny `kyde-color` crate; its **optional `gpui` feature** (on only in the binary + `kyde-ui`)
+adds `From<Color>` for gpui's `Rgba`/`Hsla`/`Fill`/`Background`, so `.bg(theme_color)` /
+`.text_color(theme_color)` still compile with zero call-site changes. `kyde-color` is the one
+non-UI crate that *names* gpui, and only behind that off-by-default feature.
+Each extracted crate is **aliased back to its old module name** in `main.rs`
 (`use kyde_git as git;`, `use kyde_config::keymap;`, …) so every existing `git::` /
 `crate::theme::` call site across the binary compiles unchanged.
 The binary is grouped into **tiers**, each a module folder. A feature module is an `impl Kyde`
@@ -73,13 +81,15 @@ clipboard.rs  scratch.rs  shellcmd.rs
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/base_content/working_content/stage/unstage/apply_patch/
-              commit + Commit/ChangedFile/FileStatus. Shells out to `git`. (anyhow)
+              commit + Commit/ChangedFile/FileStatus. Shells out to `git`. (thiserror: GitError)
 kyde-diff     FileDiff::compute() → line Hunks + word ranges; hunk_patch(). (similar)
 kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
-kyde-update   GitHub release check + self-update download/swap. (anyhow, serde_json)
+kyde-update   GitHub release check + self-update download/swap. (thiserror: UpdateError, serde_json)
 kyde-config   keymap + plugins + projects: config/persistence (JSON, XDG). (serde)
-kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (gpui Rgba, serde)
+kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
+              feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
+kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (kyde-color, serde) — gpui-free
 kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
               file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, and the file-tree
               row `tree::item<V>` (generic over the view). Aliased back as `ui` in main.rs.
@@ -87,8 +97,8 @@ kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill,
 kyde-syntax   tree-sitter highlight() + fold_regions(); OWNS every grammar crate behind
               per-pack features. Binary depends with default-features=false and forwards
               its own packs (`rust` → `kyde-syntax/rust`); kyde-syntax's own default is
-              `full` so `cargo test -p kyde-syntax` covers all grammars. (gpui Rgba,
-              tree-sitter*, kyde-theme)
+              `full` so `cargo test -p kyde-syntax` covers all grammars. (kyde-color,
+              tree-sitter*, kyde-theme) — gpui-free
 ```
 
 ## Theme — runtime config (`src/theme.rs` + `~/.config/kyde/theme.json`)
@@ -189,12 +199,52 @@ compiles every tree-sitter grammar (~18MB `.rodata`, the bulk of compile time). 
 ```sh
 cargo build --no-default-features --features terminal,rust,json && ./target/debug/kyde /path/to/repo
 ```
-`[profile.dev]` is `opt-level = 1`, no LTO — gpui is fast enough in debug for UI testing. Add a
+`[profile.dev]` is `opt-level = 1`, no LTO — fast incremental rebuilds — but
+`[profile.dev.package."*"]` bumps every *dependency* to `opt-level = 3`, so gpui/alacritty/
+tree-sitter run smoothly in debug (deps rarely recompile, so the cost is one-time). Add a
 grammar to `--features` only when testing that language. Use `cargo check` for compile-verify
 between edits. Run `cargo fmt` + `clippy` + `test` ONCE at the end (CI = fmt + clippy + test),
 not per iteration; a default/release build is only for perf claims or shipping. NOTE: under
 slim features the `kyde-syntax` highlight tests for un-built grammars (typescript, …) fail —
 expected; use `--workspace` or `-p kyde-syntax` (full grammars) for a true green.
+
+## Code-quality policy (enforced, CI fails otherwise)
+Lints live centrally in **`[workspace.lints]`** (root `Cargo.toml`); every member opts in with
+`[lints] workspace = true`. CI runs `clippy --all-targets -- -D warnings`, so a warning = a
+failure. Rules:
+- **No `unwrap()`/`expect()` in non-test code** — `clippy::{unwrap_used,expect_used}` are
+  `deny` (tests exempt via `clippy.toml`). A genuinely-infallible call is restructured away or,
+  rarely, kept as `expect()` under a narrowest-scope `#[allow(clippy::expect_used)]` with a
+  comment proving why (e.g. main-window open, PTY spawn, `build.rs`). Never `.unwrap()` a lock —
+  recover from poison (`kyde-theme::{read,write}_theme`).
+- **Typed errors** — library crates use **`thiserror`** (`kyde-git::GitError`,
+  `kyde-update::UpdateError`); every variant carries context. `anyhow` is binary-only. No
+  `Box<dyn Error>`.
+- **`clippy::pedantic`** is on (`warn` + curated `allow`s in `[workspace.lints]`, each
+  justified). Add a new allow there with a comment, never a blanket crate-root allow.
+- **`#![deny(missing_docs)]`** on every lib crate; public items are documented, key pure
+  entry points have **doctests** (run by `cargo test`).
+- **MSRV `1.96`** — `rust-version` in every `Cargo.toml` + `rust-toolchain.toml`; the `msrv`
+  CI job builds the workspace on 1.96. `unsafe` needs a `// SAFETY:` comment. Supply chain is
+  gated by `cargo-deny` (advisories + licenses + bans).
+
+### Workspace Cargo conventions (don't regress these)
+- **Metadata + shared deps are inherited, never redeclared.** `[workspace.package]`
+  (version/edition/rust-version/license/repository) and `[workspace.dependencies]`
+  (gpui/anyhow/thiserror/serde/serde_json/futures/objc2*) live in the root `Cargo.toml`. A new
+  crate uses `version.workspace = true`, `serde.workspace = true`, etc. — NOT a literal
+  `version = "0.1.0"` / `serde = "1"`. Proof it's clean: `rg '^edition = "20' crates/*/Cargo.toml`
+  and `rg '^anyhow = "1"' crates/*/Cargo.toml` must both be empty. release-please bumps
+  `[workspace.package].version`.
+- **gpui is pinned exactly** (`gpui = "=0.2.2"` in `[workspace.dependencies]`) and **`Cargo.lock`
+  is committed** — reproducible builds. Don't loosen to `"0.2"`. `cargo build --locked` must pass.
+- **`[profile.dev.package."*"] opt-level = 3`** optimizes *dependencies* in debug while our
+  crates stay at `opt-level = 1` (fast incremental rebuilds). Keep both.
+- **Features stay independent down to the empty set**: `cargo build --workspace
+  --no-default-features` must be green (a CI-adjacent gate). See the zero-grammar gotcha under
+  Language packs — `kyde-syntax`'s `config()`/`grammar()` need their explicit tuple/`Language`
+  type annotation + `#[allow(unreachable_code, unused_variables)]`, because with no grammar
+  feature every match arm `cfg`s out and the match collapses to `_ => return None`.
 
 Smoke-tested: launches, renders, no panic. NOTE: `screencapture` of the window fails
 silently unless the terminal has macOS Screen-Recording permission (System Settings →
@@ -355,7 +405,14 @@ The plugin system is **two separate gates**, do not conflate them:
   `grammar()` / the `PACKS` table, all `#[cfg(feature = "…")]`. An off feature drops
   the grammar crate **and** its code; the lang then collapses to the existing
   "no pack → `PlainText`" path (zero new runtime branches). A `_ => return None`
-  catch-all keeps both matches exhaustive under any feature combo.
+  catch-all keeps both matches exhaustive under any feature combo. **GOTCHA:** with
+  *zero* grammars (`--no-default-features`), every value-producing arm `cfg`s out and the
+  match is only `_ => return None`, so (a) the result type is uninferable — both fns carry an
+  explicit annotation (`let (...): (tree_sitter::Language, &str, &str, &str)` /
+  `let lang: tree_sitter::Language`), and (b) the code after the match is unreachable + `lang`
+  unused — both fns carry `#[allow(unreachable_code, unused_variables)]` (no-ops with ≥1
+  grammar). Keep these when adding/refactoring grammars, or `cargo build --no-default-features`
+  breaks (E0282 + warnings).
 - **Install list** (`plugins.json`, `plugins::Plugins`) — the **runtime** toggle:
   which *compiled-in* grammar is active for this user (drives the install banner).
 

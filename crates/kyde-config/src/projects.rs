@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The recent-projects list shown on the landing view (persisted to `projects.json`).
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Recents {
     /// Most-recent first.
@@ -12,15 +13,17 @@ pub struct Recents {
 
 impl Recents {
     fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
+        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
+            |_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
                 PathBuf::from(home).join(".config")
-            });
+            },
+            PathBuf::from,
+        );
         base.join("kyde").join("projects.json")
     }
 
+    /// Load the recent-projects list from `projects.json` (missing/invalid → empty).
     pub fn load() -> Self {
         std::fs::read_to_string(Self::config_path())
             .ok()
@@ -28,6 +31,7 @@ impl Recents {
             .unwrap_or_default()
     }
 
+    /// Persist the recent-projects list to `projects.json` (best-effort).
     pub fn save(&self) {
         let path = Self::config_path();
         if let Some(parent) = path.parent() {
@@ -49,9 +53,10 @@ impl Recents {
 
 /// Last path component as the project name.
 pub fn name_of(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+    path.file_name().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Abbreviate a path with `~` for the home directory (display only).
@@ -94,14 +99,14 @@ pub fn initials(name: &str) -> String {
     }
 }
 
-/// Stable icon color (0xRRGGBB) derived from the name — like JetBrains' project chips.
+/// Stable icon color (0xRRGGBB) derived from the name — like `JetBrains`' project chips.
 pub fn color_for(name: &str) -> u32 {
     const PALETTE: &[u32] = &[
         0xE8744F, 0x9B7BE8, 0x4F90E8, 0x73BD79, 0xD6A14F, 0xC77DBB, 0x4FB6C7, 0xE85F87,
     ];
     let mut h: u32 = 2166136261;
     for b in name.bytes() {
-        h ^= b as u32;
+        h ^= u32::from(b);
         h = h.wrapping_mul(16777619);
     }
     PALETTE[(h as usize) % PALETTE.len()]

@@ -1,37 +1,54 @@
+#![deny(missing_docs)]
 //! Minimal Markdown → block model for the side-by-side preview (the markdown plugin).
 //! Parses with `pulldown-cmark` into a flat list of blocks with inline styling; `render.rs`
-//! turns these into gpui elements. Pure (no gpui) so it's unit-testable.
+//! turns these into renderer elements. Pure (no UI framework) so it's unit-testable.
 
 /// An inline run of text with its active emphasis.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
+    /// The run's text.
     pub text: String,
+    /// Rendered bold (`**…**`).
     pub bold: bool,
+    /// Rendered italic (`*…*`).
     pub italic: bool,
+    /// Rendered as inline code (`` `…` ``).
     pub code: bool,
 }
 
 /// A block-level element of the rendered document.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
+    /// A heading: level (1–6) + its inline spans.
     Heading(u8, Vec<Span>),
+    /// A paragraph of inline spans.
     Paragraph(Vec<Span>),
     /// Fenced/indented code block (raw text, monospace).
     Code(String),
     /// List item with its nesting depth (1 = top level).
     ListItem(usize, Vec<Span>),
+    /// A block quote's inline spans.
     Quote(Vec<Span>),
+    /// A horizontal rule (`---`).
     Rule,
     /// An image. `src` is the raw URL or (file-relative) path from the source;
     /// `alt` is the alt text. Covers both Markdown `![alt](src)` and raw HTML
     /// `<img src="…" alt="…">` (the latter is how the README embeds screenshots).
     Image {
+        /// Raw URL or file-relative path of the image.
         src: String,
+        /// Alt text.
         alt: String,
     },
 }
 
 /// Parse Markdown source into a flat list of blocks.
+///
+/// ```
+/// use kyde_markdown::{parse, Block};
+/// let blocks = parse("# Title\n\nhello");
+/// assert!(matches!(blocks[0], Block::Heading(1, _)));
+/// ```
 pub fn parse(src: &str) -> Vec<Block> {
     use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
@@ -153,10 +170,7 @@ fn extract_imgs(html: &str) -> Vec<(String, String)> {
     let mut from = 0;
     while let Some(rel) = lower[from..].find("<img") {
         let start = from + rel;
-        let end = lower[start..]
-            .find('>')
-            .map(|e| start + e)
-            .unwrap_or(lower.len());
+        let end = lower[start..].find('>').map_or(lower.len(), |e| start + e);
         let tag = &html[start..end];
         if let Some(src) = attr(tag, "src") {
             out.push((src, attr(tag, "alt").unwrap_or_default()));
@@ -199,7 +213,7 @@ fn attr(tag: &str, name: &str) -> Option<String> {
 }
 
 fn level_to_u8(level: pulldown_cmark::HeadingLevel) -> u8 {
-    use pulldown_cmark::HeadingLevel::*;
+    use pulldown_cmark::HeadingLevel::{H1, H2, H3, H4, H5, H6};
     match level {
         H1 => 1,
         H2 => 2,

@@ -146,7 +146,7 @@ pub struct CodeEditor {
     /// Single-line inputs (e.g. the file-finder query) don't bind enter/up/down,
     /// letting those keys bubble to the surrounding key context.
     pub single_line: bool,
-    /// Optional key-context override (e.g. the find bar's inputs use "FindBar" so its
+    /// Optional key-context override (e.g. the find bar's inputs use "`FindBar`" so its
     /// enter/escape bindings fire). `None` → the default single/multi-line context.
     pub ctx_override: Option<&'static str>,
     /// Fill the parent's height (clickable across the whole box, e.g. the commit message)
@@ -249,11 +249,11 @@ pub struct CodeEditor {
     /// Show a line-number gutter (diff panes + future editor option).
     pub line_numbers: bool,
     /// Per buffer-line background tint (diff hunk colors). Empty = none.
-    pub line_bg: std::collections::HashMap<usize, gpui::Rgba>,
+    pub line_bg: std::collections::HashMap<usize, kyde_color::Color>,
     /// Per buffer-line word-level highlight: byte ranges within the line that actually
     /// changed (inline word diff), painted in `word_bg_color` over the line tint.
     pub word_bg: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>,
-    pub word_bg_color: gpui::Rgba,
+    pub word_bg_color: kyde_color::Color,
     /// Diff alignment: insert N blank display rows BEFORE buffer line `b` (`filler[b]=N`),
     /// so this pane lines up row-for-row with the other side. `filler_end` = trailing blanks.
     pub filler: std::collections::HashMap<usize, usize>,
@@ -331,7 +331,12 @@ impl CodeEditor {
             line_numbers: false,
             line_bg: std::collections::HashMap::new(),
             word_bg: std::collections::HashMap::new(),
-            word_bg_color: gpui::rgba(0x00000000),
+            word_bg_color: kyde_color::Color {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            },
             filler: std::collections::HashMap::new(),
             filler_end: 0,
         }
@@ -441,7 +446,7 @@ impl CodeEditor {
         }
         // Longest line (bytes) → element content width for horizontal scroll. Cheap byte
         // scan, only on content change (not per frame).
-        self.max_line_len = self.content.split('\n').map(|l| l.len()).max().unwrap_or(0);
+        self.max_line_len = self.content.split('\n').map(str::len).max().unwrap_or(0);
         // Small files: highlight + find folds inline (correct on the very first frame, no
         // flicker). Big files: clear now so the file opens instantly as plain text, then
         // compute spans + folds on a background thread and swap them in when ready — the
@@ -663,7 +668,7 @@ impl CodeEditor {
     }
 
     // ── line geometry ─────────────────────────────────────────────
-    /// (line_index, byte offset of line start) for a content offset.
+    /// (`line_index`, byte offset of line start) for a content offset.
     fn locate(&self, off: usize) -> (usize, usize) {
         let mut start = 0usize;
         for (i, line) in self.content.split('\n').enumerate() {
@@ -708,12 +713,7 @@ impl CodeEditor {
     }
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         let (li, start) = self.locate(self.cursor());
-        let line_len = self
-            .content
-            .split('\n')
-            .nth(li)
-            .map(|l| l.len())
-            .unwrap_or(0);
+        let line_len = self.content.split('\n').nth(li).map_or(0, str::len);
         self.move_to(start + line_len, cx);
     }
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
@@ -753,16 +753,14 @@ impl CodeEditor {
         let x = self
             .line_layouts
             .get(&dr)
-            .map(|l| l.x_for_index(col))
-            .unwrap_or(px(0.0));
+            .map_or(px(0.0), |l| l.x_for_index(col));
         let Some(&new_start) = self.line_starts.get(target) else {
             return;
         };
         let new_col = self
             .line_layouts
             .get(&target)
-            .map(|l| l.closest_index_for_x(x))
-            .unwrap_or(0);
+            .map_or(0, |l| l.closest_index_for_x(x));
         let off = new_start + new_col;
         if extend {
             self.select_to(off, cx);
@@ -790,10 +788,7 @@ impl CodeEditor {
     fn delete_to_home(&mut self, _: &DeleteToHome, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let caret = self.cursor();
-            let line_start = self.content[..caret]
-                .rfind('\n')
-                .map(|i| i + 1)
-                .unwrap_or(0);
+            let line_start = self.content[..caret].rfind('\n').map_or(0, |i| i + 1);
             self.select_to(line_start, cx);
         }
         self.replace_text_in_range(None, "", window, cx);
@@ -823,11 +818,10 @@ impl CodeEditor {
     fn shift_lines(&mut self, indent: bool, cx: &mut Context<Self>) {
         let unit = "  ";
         let (s, e) = (self.selected_range.start, self.selected_range.end);
-        let region_start = self.content[..s].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let region_start = self.content[..s].rfind('\n').map_or(0, |i| i + 1);
         let region_end = self.content[e..]
             .find('\n')
-            .map(|i| e + i)
-            .unwrap_or(self.content.len());
+            .map_or(self.content.len(), |i| e + i);
         let region = self.content[region_start..region_end].to_string();
         let mut out = String::new();
         for (i, line) in region.split('\n').enumerate() {
@@ -840,10 +834,8 @@ impl CodeEditor {
             } else {
                 let strip = if line.starts_with(unit) {
                     2
-                } else if line.starts_with(' ') || line.starts_with('\t') {
-                    1
                 } else {
-                    0
+                    usize::from(line.starts_with(' ') || line.starts_with('\t'))
                 };
                 out.push_str(&line[strip..]);
             }
@@ -960,11 +952,10 @@ impl CodeEditor {
     /// Select the whole line (its text, excluding the trailing newline) containing `off`.
     fn select_line_at(&mut self, off: usize, cx: &mut Context<Self>) {
         let off = off.min(self.content.len());
-        let start = self.content[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let start = self.content[..off].rfind('\n').map_or(0, |i| i + 1);
         let end = self.content[off..]
             .find('\n')
-            .map(|i| off + i)
-            .unwrap_or(self.content.len());
+            .map_or(self.content.len(), |i| off + i);
         self.selected_range = start..end;
         self.selection_reversed = false;
         cx.notify();
@@ -1200,8 +1191,7 @@ impl CodeEditor {
             let line_len = self.content[self.line_starts[last]..]
                 .split('\n')
                 .next()
-                .map(|l| l.len())
-                .unwrap_or(0);
+                .map_or(0, str::len);
             return (self.line_starts[last] + line_len).min(self.content.len());
         }
         let dr = raw_dr.min(last);
@@ -1217,8 +1207,7 @@ impl CodeEditor {
         let col = self
             .line_layouts
             .get(&dr)
-            .map(|l| l.closest_index_for_x(x))
-            .unwrap_or(0);
+            .map_or(0, |l| l.closest_index_for_x(x));
         // Clamp to real content length so a click past the last char (or into a
         // placeholder/filler) never lands beyond the buffer.
         (self.line_starts[dr] + col).min(self.content.len())
@@ -1354,11 +1343,13 @@ impl EntityInputHandler for CodeEditor {
         self.selected_range = new_sel_utf16
             .as_ref()
             .map(|r| self.range_from_utf16(r))
-            .map(|r| r.start + range.start..r.end + range.end)
-            .unwrap_or_else(|| {
-                let c = range.start + new_text.len();
-                c..c
-            });
+            .map_or_else(
+                || {
+                    let c = range.start + new_text.len();
+                    c..c
+                },
+                |r| r.start + range.start..r.end + range.end,
+            );
         self.dirty = true;
         self.recompute_folds(cx);
         cx.notify();
@@ -1426,7 +1417,7 @@ impl Render for CodeEditor {
             .track_focus(&self.focus_handle)
             .cursor(CursorStyle::IBeam)
             .when(!fill, |d| d.w_full().min_h(relative(1.0)))
-            .when(fill, |d| d.size_full())
+            .when(fill, gpui::Styled::size_full)
             // Transparent: the editor adopts its container's background (the rounded editor
             // island, the commit box, the finder) so it never paints square corners over a
             // rounded parent (gpui clips to a rectangle, not the rounded shape).
@@ -1473,7 +1464,7 @@ impl Render for CodeEditor {
     }
 }
 
-/// (line_index, line_start_offset) for an offset, given precomputed line starts.
+/// (`line_index`, `line_start_offset`) for an offset, given precomputed line starts.
 fn locate_in(line_starts: &[usize], content: &str, off: usize) -> (usize, usize) {
     let mut idx = 0;
     for (i, &s) in line_starts.iter().enumerate() {
@@ -1488,7 +1479,7 @@ fn locate_in(line_starts: &[usize], content: &str, off: usize) -> (usize, usize)
     (idx, line_starts.get(idx).copied().unwrap_or(0))
 }
 
-/// Build TextRuns covering one line, colored by the highlight spans that fall in it.
+/// Build `TextRuns` covering one line, colored by the highlight spans that fall in it.
 /// Public so the side-by-side diff can color its lines with the same logic.
 pub fn line_runs(
     line: &str,
@@ -1600,7 +1591,7 @@ fn caret_after_fold(
         .iter()
         .copied()
         .find(|&s| fold_end(foldable, s).is_some_and(|e| cli > s && cli <= e))?;
-    let line_len = content.split('\n').nth(start).map(|l| l.len()).unwrap_or(0);
+    let line_len = content.split('\n').nth(start).map_or(0, str::len);
     Some(line_byte_start(content, start) + line_len)
 }
 
@@ -1749,10 +1740,10 @@ mod tests {
             .map(|i| highlight::Span {
                 start: i * 10,
                 end: i * 10 + 6,
-                color: gpui::rgb(0xffffff),
+                color: kyde_color::Color::rgb(0xffffff),
             })
             .collect();
-        let total = spans.last().map(|s| s.end).unwrap_or(0);
+        let total = spans.last().map_or(0, |s| s.end);
         let font = gpui::Font {
             family: "monospace".into(),
             features: Default::default(),

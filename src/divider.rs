@@ -7,7 +7,7 @@
 //! shared by all of them. A crate-root child module, so the `impl Kyde` block below reaches
 //! `Kyde`'s private fields directly (like `render.rs`).
 
-use super::*;
+use super::{theme, Kyde, Window, RAIL_W};
 
 /// Width of the diff center gutter (the `»`/checkbox column). It's `flex_none`, so the two
 /// diff panes share only `island_w - DIFF_GUTTER_W`.

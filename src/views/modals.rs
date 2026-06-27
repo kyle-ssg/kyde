@@ -1,5 +1,5 @@
 //! Native modal windows + their bodies: language-pack manager, fonts, clear-data, new-branch,
-//! the install banner, and the ModalWindow plumbing (open/close/slot). Crate-root child module.
+//! the install banner, and the `ModalWindow` plumbing (open/close/slot). Crate-root child module.
 
 use crate::*;
 
@@ -256,7 +256,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.close_modal_window(ModalKind::NewBranch, cx)
+                            this.close_modal_window(ModalKind::NewBranch, cx);
                         }),
                     ),
             )

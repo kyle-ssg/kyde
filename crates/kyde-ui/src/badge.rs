@@ -47,6 +47,8 @@ pub fn badge_inner(b: Badge, grow: f32) -> gpui::AnyElement {
     }
 }
 
+/// Pick the [`Badge`] for a file path: a coloured monogram for known types
+/// (`rs`/`ts`/`json`/…), else a generic document icon.
 pub fn file_badge(path: &std::path::Path) -> Badge {
     let rgb = |v: u32| gpui::rgb(v);
     // Ignore files (.gitignore, .dockerignore, .prettierignore, …) → a "ban" circle-slash.

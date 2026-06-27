@@ -1,5 +1,6 @@
+#![deny(missing_docs)]
 //! A lazy file-tree model built from the flat, sorted list of repo files
-//! (`Repo::list_files`, gitignored paths already excluded). Pure Rust, no gpui — the
+//! (`Repo::list_files`, gitignored paths already excluded). Pure Rust, no UI framework — the
 //! Browse pane turns `visible()` into IntelliJ-style indented rows.
 
 use std::collections::{BTreeMap, HashSet};
@@ -21,7 +22,9 @@ pub struct Tree {
 
 /// A flattened, currently-visible row.
 pub struct Row {
+    /// Repo-relative path of this row's file or directory.
     pub path: PathBuf,
+    /// True if this row is a directory (drawn with a chevron + folder icon).
     pub is_dir: bool,
     /// Nesting depth (0 = top level) → indentation.
     pub depth: usize,

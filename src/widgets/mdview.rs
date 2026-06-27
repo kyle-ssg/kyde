@@ -596,7 +596,7 @@ impl Element for MarkdownElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) -> MdPrepaint {
@@ -658,7 +658,7 @@ impl Element for MarkdownElement {
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         pre: &mut MdPrepaint,
         window: &mut Window,
         cx: &mut App,

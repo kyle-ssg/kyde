@@ -1,6 +1,11 @@
 [package]
 name = "kyde-tree"
-version = "0.1.0"
-edition = "2021"
-license = "Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "File-tree model for Kyde. Pure std, no GUI."
+
+[lints]
+workspace = true

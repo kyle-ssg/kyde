@@ -261,7 +261,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
-                            this.open_menu(e.position, MenuTarget::HistoryCompare(i), cx)
+                            this.open_menu(e.position, MenuTarget::HistoryCompare(i), cx);
                         }),
                     )
                     .into_any_element()
@@ -332,8 +332,7 @@ impl Kyde {
             .repo_root
             .as_ref()
             .and_then(|p| p.file_name())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "/".to_string())
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned())
             .into();
         let file_rows: Vec<gpui::AnyElement> = visible
             .into_iter()
@@ -345,8 +344,7 @@ impl Kyde {
                 let selected = file_idx.is_some() && self.history_file_selected == file_idx;
                 let name_color = file_idx
                     .and_then(|i| self.history_files.get(i))
-                    .map(|f| status_color(f.status))
-                    .unwrap_or(t.text);
+                    .map_or(t.text, |f| status_color(f.status));
                 let name: SharedString = if is_root {
                     root_name.clone()
                 } else {
@@ -582,7 +580,7 @@ impl Kyde {
                 .text_size(px(t.ui_font_size))
                 // Clicks inside the menu must not fall through to the backdrop (which closes).
                 .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
-                    cx.stop_propagation()
+                    cx.stop_propagation();
                 })
                 .child(div().px_1().pb_1().child(self.history_branch_query.clone()));
             if matches("HEAD") {
@@ -637,7 +635,7 @@ impl Kyde {
                 .font_family(ui)
                 .text_size(px(t.ui_font_size))
                 .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
-                    cx.stop_propagation()
+                    cx.stop_propagation();
                 });
             for mode in CompareMode::ALL {
                 let selected = mode == cur;
@@ -741,7 +739,7 @@ impl Kyde {
                 self.history_remotes = r.remote_branches().unwrap_or_default();
             }
             self.history_branch_query.update(cx, |e, cx| {
-                e.set_content(String::new(), Lang::PlainText, cx)
+                e.set_content(String::new(), Lang::PlainText, cx);
             });
         }
         self.history_branch_open = !self.history_branch_open;
