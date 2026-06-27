@@ -1,6 +1,10 @@
 [package]
 name = "kyde"
-version.workspace = true
+# Literal (NOT version.workspace) because release-please's `rust` strategy bumps
+# `[package].version` and needs a real string here. The shared `[workspace.package].version`
+# below is kept in lockstep via release-please-config.json `extra-files`, so the internal
+# crates that inherit it stay on the same number.
+version = "1.3.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
@@ -17,8 +21,9 @@ workspace = true
 members = ["crates/*"]
 
 # Shared package metadata — every member inherits via `version.workspace = true`, etc., so the
-# version/edition/MSRV/license live in exactly one place. release-please (release-type "rust")
-# bumps `version` here.
+# version/edition/MSRV/license live in exactly one place. release-please keeps this `version`
+# in lockstep with the root `[package].version` via the `extra-files` updater in
+# release-please-config.json (it can't bump an inherited `version.workspace` directly).
 [workspace.package]
 version = "1.3.0"
 edition = "2021"
