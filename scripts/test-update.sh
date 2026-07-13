@@ -43,15 +43,19 @@ cp -R "$APP" "$FIX/Kyde.app"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $FIX_VERSION" "$FIX/Kyde.app/Contents/Info.plist"
 # Re-sign (editing Info.plist invalidated the ad-hoc signature).
 codesign --force -s - "$FIX/Kyde.app" >/dev/null 2>&1 || true
-# Package exactly like the release workflow does.
+# Package exactly like the release workflow does — including the .sha256 checksum asset,
+# so the updater's verification path is exercised end-to-end (it verifies whenever the
+# checksum asset is present, file:// fixtures included).
 ditto -c -k --keepParent "$FIX/Kyde.app" "$FIX/kyde-macos.zip"
+(cd "$FIX" && shasum -a 256 kyde-macos.zip > kyde-macos.zip.sha256)
 
 cat > "$FIX/latest.json" <<JSON
 {
   "tag_name": "v$FIX_VERSION",
   "html_url": "https://github.com/kyle-ssg/kyde/releases",
   "assets": [
-    { "browser_download_url": "file://$FIX/kyde-macos.zip" }
+    { "browser_download_url": "file://$FIX/kyde-macos.zip" },
+    { "browser_download_url": "file://$FIX/kyde-macos.zip.sha256" }
   ]
 }
 JSON

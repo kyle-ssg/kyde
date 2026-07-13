@@ -2553,6 +2553,37 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// IME composition: each marked-text update replaces the PREVIOUS marked region, and the
+    /// IME's selection is relative to that region — the selection must be anchored at the
+    /// region's START on both ends. (It was anchored at `range.end` on the end, overshooting
+    /// by the old marked text's length on every update — walking the selection past the
+    /// composed text and, eventually, the buffer.)
+    #[gpui::test]
+    fn ime_composition_keeps_selection_inside_marked_text(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx); // content: "const a = 2;\n"
+                k.browse.editor.update(cx, |e, cx| {
+                    e.select_range(3..3, cx); // caret inside the buffer
+                                              // First composition update: no marked text yet → replaces the caret.
+                    e.replace_and_mark_text_in_range(None, "ni", Some(0..2), window, cx);
+                    assert_eq!(e.selection(), 3..5, "selection covers the marked text");
+                    // Second update replaces the marked region ("ni" → "niho"). Selection
+                    // must cover the new marked text — 3..7, not 3..9 (the old overshoot).
+                    e.replace_and_mark_text_in_range(None, "niho", Some(0..4), window, cx);
+                    assert_eq!(
+                        e.selection(),
+                        3..7,
+                        "selection must be anchored at the marked region's start"
+                    );
+                    assert!(e.selection().end <= e.text().len());
+                });
+            })
+            .unwrap();
+    }
+
     /// Window-refocus reload: a file changed on disk by an external tool must land in the
     /// open editor when `reload_external` runs (the activation observer's callback), as
     /// long as the buffer has no unsaved edits.
@@ -2578,6 +2609,44 @@ mod gpui_smoke_tests {
                     k.browse.editor.read(cx).text(),
                     "const a = 99; // external\n",
                     "refocus must reload the externally-changed file"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Window-refocus reload, Commit view: the side-by-side panes show a file's working
+    /// copy, and `refresh` deliberately never touches the pane editors (cx=None re-select)
+    /// — so an explicit refocus must reload them, or external edits stay invisible (and an
+    /// editable stale right pane could then clobber them on the next keystroke).
+    #[gpui::test]
+    fn reload_external_refreshes_commit_diff_panes(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.enter_commit(cx);
+                // Select the modified file WITH a context so the panes actually load.
+                let i = k
+                    .files
+                    .iter()
+                    .position(|f| f.path.ends_with("app.tsx"))
+                    .expect("app.tsx is a change");
+                k.select_with(i, Some(cx));
+                assert_eq!(k.diff.right.read(cx).text(), "const a = 2;\n");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // External tool rewrites the file while Kyde is in the background.
+        std::fs::write(dir.join("app.tsx"), "const a = 7; // external\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(
+                    k.diff.right.read(cx).text(),
+                    "const a = 7; // external\n",
+                    "refocus must reload the commit view's working pane"
                 );
             })
             .unwrap();

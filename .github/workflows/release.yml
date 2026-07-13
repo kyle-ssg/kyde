@@ -158,6 +158,13 @@ jobs:
         if: startsWith(matrix.name, 'macos')
         run: ditto -c -k --keepParent dist/Kyde.app "${{ matrix.asset }}"
 
+      # The in-app updater verifies the download against this digest before swapping the
+      # bundle in (kyde-update REFUSES an https install with no checksum asset) — every
+      # zip must ship with its `.sha256` sibling.
+      - name: Checksum (macos)
+        if: startsWith(matrix.name, 'macos')
+        run: shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+
       # Parked with the Linux matrix entry above.
       # - name: Package AppImage (linux)
       #   if: matrix.name == 'linux'
@@ -178,4 +185,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ needs.release-please.outputs.tag_name }}" \
-            "${{ matrix.asset }}" --clobber
+            "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber

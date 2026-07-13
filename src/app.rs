@@ -407,6 +407,24 @@ impl Kyde {
                 }
             }
         }
+        // Same for the Commit view's side-by-side panes. `refresh` re-selects with cx=None
+        // on purpose — that updates only the diff MODEL, never the pane editors, so the
+        // debounced background refresh can't stomp mid-typing. But on an explicit window
+        // refocus the panes must pick up external edits like the Browse editor does: reload
+        // them under the same never-clobber rules (no unsaved pane edits, bytes actually
+        // changed on disk).
+        if self.mode == Mode::Commit && !self.diff.right.read(cx).dirty {
+            if let (Some(i), Some(repo)) = (self.selected, self.repo()) {
+                let changed = self
+                    .files
+                    .get(i)
+                    .and_then(|f| repo.working_content(&f.path).ok())
+                    .is_some_and(|c| self.diff.right.read(cx).text() != c);
+                if changed {
+                    self.select_with(i, Some(cx));
+                }
+            }
+        }
         // An external change may have emptied the active git tab — keep it valid.
         self.normalize_git_tab(cx);
         cx.notify();

@@ -23,6 +23,18 @@ pub enum UpdateError {
     /// The downloaded archive contained no `.app` bundle.
     #[error("no .app found in the download")]
     NoAppInDownload,
+    /// A remote (https) release has no `.sha256` checksum asset — refuse to install an
+    /// unverifiable binary. (Releases publish one alongside each zip; see release.yml.)
+    #[error("release has no checksum asset — refusing unverified install")]
+    MissingChecksum,
+    /// The downloaded zip's SHA-256 doesn't match the published checksum.
+    #[error("checksum mismatch — expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        /// The digest published next to the release asset.
+        expected: String,
+        /// The digest of what was actually downloaded.
+        actual: String,
+    },
     /// An external command (`curl` / `ditto`) ran but failed. `action` names the step.
     #[error("{action} failed: {stderr}")]
     Command {
@@ -66,6 +78,9 @@ pub struct Release {
     /// `browser_download_url` of the macOS `.app` zip (empty if the release has no zip asset).
     /// May be a `file://` URL in tests.
     pub zip_url: String,
+    /// URL of the zip's `.sha256` checksum asset (empty when the release has none — only
+    /// pre-checksum releases and bare dev fixtures; https installs refuse to proceed then).
+    pub sha256_url: String,
     /// Release page URL — the fallback when we can't swap in place (dev binary / no asset).
     pub page_url: String,
 }
@@ -157,10 +172,19 @@ pub fn parse_feed(body: &str, current: &str) -> Option<Release> {
         })
         .unwrap_or_default();
     let zip_url = pick_asset_url(&urls, std::env::consts::ARCH).unwrap_or_default();
+    // The checksum asset sits next to the zip as `<asset>.sha256`, so its download URL is
+    // exactly the zip's with that suffix. Empty when the release didn't publish one.
+    let want_sha = format!("{zip_url}.sha256");
+    let sha256_url = urls
+        .iter()
+        .find(|u| **u == want_sha)
+        .map(|u| (*u).to_string())
+        .unwrap_or_default();
     Some(Release {
         version: norm(&tag),
         tag,
         zip_url,
+        sha256_url,
         page_url,
     })
 }
@@ -204,11 +228,71 @@ pub fn pick_asset_url(urls: &[&str], arch: &str) -> Option<String> {
     None
 }
 
-/// Download `zip_url`, unzip, and swap the new `Kyde.app` over `bundle` in place. On success
-/// the caller relaunches (`open <bundle>`) and quits. Runs off the UI thread (blocking I/O).
-pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
+/// Extra curl flags for a URL. Remote fetches pin HTTPS + TLS 1.2 so neither the request
+/// nor any `-L` redirect can ever downgrade to plain http; `file://` (the dev fixture, see
+/// `scripts/test-update.sh`) is exempt.
+fn curl_security_args(url: &str) -> &'static [&'static str] {
+    if url.starts_with("file://") {
+        &[]
+    } else {
+        &["--proto", "=https", "--tlsv1.2"]
+    }
+}
+
+/// Verify `file`'s SHA-256 against the checksum published at `sha256_url` (a text file whose
+/// first whitespace-separated token is the hex digest — `shasum -a 256` output). The local
+/// digest is computed by shelling to `shasum` (ships with macOS), matching this crate's
+/// no-extra-deps philosophy.
+fn verify_checksum(file: &Path, sha256_url: &str) -> Result<()> {
+    let body = curl_text(sha256_url)?;
+    let expected = body
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(UpdateError::ChecksumMismatch {
+            expected: format!("<malformed checksum asset: {expected:.16}…>"),
+            actual: String::new(),
+        });
+    }
+    let out = Command::new("shasum")
+        .args(["-a", "256"])
+        .arg(file)
+        .output()
+        .map_err(io_err("spawning shasum"))?;
+    if !out.status.success() {
+        return Err(UpdateError::Command {
+            action: "checksum".into(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let actual = stdout
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if actual != expected {
+        return Err(UpdateError::ChecksumMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+/// Download `zip_url`, verify it against `sha256_url`, unzip, and swap the new `Kyde.app`
+/// over `bundle` in place. On success the caller relaunches (`open <bundle>`) and quits.
+/// Runs off the UI thread (blocking I/O).
+///
+/// Integrity policy: an https download REQUIRES a checksum asset (every release publishes
+/// `<zip>.sha256` — see release.yml — so a missing one means an incomplete or tampered
+/// release; refuse rather than install unverified). A `file://` fixture may omit it (dev
+/// seam), but is verified when present.
+pub fn download_and_swap(zip_url: &str, sha256_url: &str, bundle: &Path) -> Result<()> {
     if zip_url.is_empty() {
         return Err(UpdateError::NoZip);
+    }
+    if sha256_url.is_empty() && !zip_url.starts_with("file://") {
+        return Err(UpdateError::MissingChecksum);
     }
     let tmp = std::env::temp_dir().join(format!("kyde-update-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
@@ -217,6 +301,7 @@ pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
     // Download (curl handles `file://` for the dev fixture too).
     let zip = tmp.join("kyde.zip");
     let out = Command::new("curl")
+        .args(curl_security_args(zip_url))
         .args(["-fsSL", "-o"])
         .arg(&zip)
         .arg(zip_url)
@@ -227,6 +312,9 @@ pub fn download_and_swap(zip_url: &str, bundle: &Path) -> Result<()> {
             action: "download".into(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
+    }
+    if !sha256_url.is_empty() {
+        verify_checksum(&zip, sha256_url)?;
     }
 
     // Unzip with ditto (preserves bundle symlinks/metadata/signature, unlike `unzip`).
@@ -281,6 +369,7 @@ pub fn download_zip(zip_url: &str, dir: &Path) -> Result<PathBuf> {
         .unwrap_or("kyde-update.zip");
     let dest = dir.join(name);
     let out = Command::new("curl")
+        .args(curl_security_args(zip_url))
         .args(["-fsSL", "-o"])
         .arg(&dest)
         .arg(zip_url)
@@ -296,22 +385,32 @@ pub fn download_zip(zip_url: &str, dir: &Path) -> Result<PathBuf> {
 }
 
 /// Move (same volume) or copy (cross-volume, e.g. temp → /Applications) the new bundle in.
+/// The copy path stages into a sibling and renames into place, so a half-copied bundle can
+/// never sit at the real path (a direct `ditto` to the destination could die mid-copy AND
+/// block the caller's rollback rename — leaving the user with no launchable app).
 fn install(new_app: &Path, bundle: &Path) -> Result<()> {
     if std::fs::rename(new_app, bundle).is_ok() {
         return Ok(());
     }
+    // Stage inside the destination's directory (same volume) → the final rename is atomic.
+    let staged = bundle.with_extension("app.staging");
+    let _ = std::fs::remove_dir_all(&staged);
     let out = Command::new("ditto")
         .arg(new_app)
-        .arg(bundle)
+        .arg(&staged)
         .output()
         .map_err(io_err("spawning ditto copy"))?;
     if !out.status.success() {
+        let _ = std::fs::remove_dir_all(&staged);
         return Err(UpdateError::Command {
             action: "install".into(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
-    Ok(())
+    std::fs::rename(&staged, bundle).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&staged);
+        io_err(format!("installing {bundle:?}"))(e)
+    })
 }
 
 fn find_app(dir: &Path) -> Option<PathBuf> {
@@ -323,6 +422,7 @@ fn find_app(dir: &Path) -> Option<PathBuf> {
 
 fn curl_text(url: &str) -> Result<String> {
     let out = Command::new("curl")
+        .args(curl_security_args(url))
         .args(["-fsSL", "-H", "User-Agent: kyde-updater", url])
         .output()
         .map_err(io_err("spawning curl"))?;
@@ -370,18 +470,78 @@ mod tests {
             "html_url": "https://github.com/kyle-ssg/kyde/releases/tag/v1.2.0",
             "assets": [
                 { "browser_download_url": "https://example.com/notes.txt" },
-                { "browser_download_url": "https://example.com/kyde-macos.zip" }
+                { "browser_download_url": "https://example.com/kyde-macos.zip" },
+                { "browser_download_url": "https://example.com/kyde-macos.zip.sha256" }
             ]
         }"#;
-        // Newer than 1.0.0 → surfaced, picks the .zip asset.
+        // Newer than 1.0.0 → surfaced, picks the .zip asset (NOT its .sha256 sibling) and
+        // the matching checksum asset.
         let r = parse_feed(feed, "1.0.0").expect("should surface a newer release");
         assert_eq!(r.version, "1.2.0");
         assert_eq!(r.tag, "v1.2.0");
         assert_eq!(r.zip_url, "https://example.com/kyde-macos.zip");
+        assert_eq!(r.sha256_url, "https://example.com/kyde-macos.zip.sha256");
         assert!(r.page_url.contains("v1.2.0"));
         // Same/newer current → nothing to offer.
         assert_eq!(parse_feed(feed, "1.2.0"), None);
         assert_eq!(parse_feed(feed, "1.3.0"), None);
+    }
+
+    /// A release without a checksum asset parses (old releases exist), but an https install
+    /// from it must be refused — never swap in an unverifiable binary.
+    #[test]
+    fn https_install_requires_a_checksum_asset() {
+        let feed = r#"{
+            "tag_name": "v9.9.9",
+            "html_url": "u",
+            "assets": [ { "browser_download_url": "https://example.com/kyde-macos.zip" } ]
+        }"#;
+        let r = parse_feed(feed, "1.0.0").expect("release parses");
+        assert!(r.sha256_url.is_empty());
+        let tmp = std::env::temp_dir().join("kyde-nochecksum-test.app");
+        let err = download_and_swap(&r.zip_url, &r.sha256_url, &tmp)
+            .expect_err("https install without a checksum must be refused");
+        assert!(matches!(err, UpdateError::MissingChecksum));
+    }
+
+    /// End-to-end checksum verification against a real file + a `file://` checksum asset:
+    /// the matching digest passes, a corrupted one fails with `ChecksumMismatch`.
+    #[test]
+    fn verify_checksum_accepts_match_and_rejects_mismatch() {
+        let dir = std::env::temp_dir().join(format!("kyde-sha-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let payload = dir.join("payload.bin");
+        std::fs::write(&payload, b"hello update\n").unwrap();
+        // Compute the real digest the same way the verifier does (shasum ships on macOS
+        // and the Linux CI runners alike).
+        let out = Command::new("shasum")
+            .args(["-a", "256"])
+            .arg(&payload)
+            .output()
+            .expect("shasum available");
+        let digest = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        let good = dir.join("payload.bin.sha256");
+        std::fs::write(&good, format!("{digest}  payload.bin\n")).unwrap();
+        let good_url = format!("file://{}", good.display());
+        verify_checksum(&payload, &good_url).expect("matching digest verifies");
+
+        // Flip a hex digit → mismatch.
+        let bad_digest: String = digest
+            .chars()
+            .map(|c| if c == '0' { '1' } else { '0' })
+            .collect();
+        let bad = dir.join("bad.sha256");
+        std::fs::write(&bad, format!("{bad_digest}  payload.bin\n")).unwrap();
+        let bad_url = format!("file://{}", bad.display());
+        let err = verify_checksum(&payload, &bad_url).expect_err("corrupt digest must fail");
+        assert!(matches!(err, UpdateError::ChecksumMismatch { .. }));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
