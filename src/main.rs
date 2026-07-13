@@ -2553,6 +2553,36 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Window-refocus reload: a file changed on disk by an external tool must land in the
+    /// open editor when `reload_external` runs (the activation observer's callback), as
+    /// long as the buffer has no unsaved edits.
+    #[gpui::test]
+    fn reload_external_picks_up_disk_changes(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                assert_eq!(k.browse.editor.read(cx).text(), "const a = 2;\n");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // Simulate an external editor rewriting the file while Kyde is in the background.
+        std::fs::write(dir.join("app.tsx"), "const a = 99; // external\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "const a = 99; // external\n",
+                    "refocus must reload the externally-changed file"
+                );
+            })
+            .unwrap();
+    }
+
     /// Autosave state machine: a dirty editor buffer flushes to disk, the buffer is marked
     /// clean, and the changed-files list optimistically shows the file as Modified before
     /// the debounced `git status` lands (so tree/tab colors react instantly).
