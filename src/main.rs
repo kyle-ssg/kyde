@@ -2553,6 +2553,37 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// IME composition: each marked-text update replaces the PREVIOUS marked region, and the
+    /// IME's selection is relative to that region — the selection must be anchored at the
+    /// region's START on both ends. (It was anchored at `range.end` on the end, overshooting
+    /// by the old marked text's length on every update — walking the selection past the
+    /// composed text and, eventually, the buffer.)
+    #[gpui::test]
+    fn ime_composition_keeps_selection_inside_marked_text(cx: &mut TestAppContext) {
+        use gpui::EntityInputHandler;
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx); // content: "const a = 2;\n"
+                k.browse.editor.update(cx, |e, cx| {
+                    e.select_range(3..3, cx); // caret inside the buffer
+                                              // First composition update: no marked text yet → replaces the caret.
+                    e.replace_and_mark_text_in_range(None, "ni", Some(0..2), window, cx);
+                    assert_eq!(e.selection(), 3..5, "selection covers the marked text");
+                    // Second update replaces the marked region ("ni" → "niho"). Selection
+                    // must cover the new marked text — 3..7, not 3..9 (the old overshoot).
+                    e.replace_and_mark_text_in_range(None, "niho", Some(0..4), window, cx);
+                    assert_eq!(
+                        e.selection(),
+                        3..7,
+                        "selection must be anchored at the marked region's start"
+                    );
+                    assert!(e.selection().end <= e.text().len());
+                });
+            })
+            .unwrap();
+    }
+
     /// Window-refocus reload: a file changed on disk by an external tool must land in the
     /// open editor when `reload_external` runs (the activation observer's callback), as
     /// long as the buffer has no unsaved edits.
