@@ -97,12 +97,13 @@ impl Kyde {
                 self.updating = true;
                 cx.notify();
                 let zip = rel.zip_url.clone();
+                let sha = rel.sha256_url.clone();
                 cx.spawn(async move |this, cx| {
                     let res = cx
                         .background_executor()
                         .spawn({
                             let bundle = bundle.clone();
-                            async move { update::download_and_swap(&zip, &bundle) }
+                            async move { update::download_and_swap(&zip, &sha, &bundle) }
                         })
                         .await;
                     this.update(cx, |this, cx| {
