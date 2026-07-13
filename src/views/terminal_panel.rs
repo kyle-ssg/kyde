@@ -30,8 +30,8 @@ impl Kyde {
                     .text_color(t.text)
                     .child("Terminal"),
             );
-        for (i, view) in self.term_tabs.iter().enumerate() {
-            let active = i == self.term_panel.active;
+        for (i, view) in self.term.tabs.iter().enumerate() {
+            let active = i == self.term.panel.active;
             let mut title = view.read(cx).title.clone();
             if view.read(cx).exited {
                 title.push_str(" (exited)");
@@ -58,7 +58,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
-                            this.term_panel.active = i;
+                            this.term.panel.active = i;
                             this.focus_active_terminal(window, cx);
                             cx.notify();
                         }),
@@ -104,7 +104,7 @@ impl Kyde {
                 ),
         );
         // Spacer pushes the minimize + maximize/restore toggles to the right edge of the strip.
-        let maxed = self.term_panel.maximized;
+        let maxed = self.term.panel.maximized;
         strip = strip
             .child(div().flex_1().min_w_0())
             // Minimize: hide the panel (reopen via the rail icon or ⌃`). A `−` glyph styled
@@ -126,8 +126,8 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.term_panel.open = false;
-                            this.term_panel.maximized = false;
+                            this.term.panel.open = false;
+                            this.term.panel.maximized = false;
                             cx.notify();
                         }),
                     ),
@@ -165,9 +165,9 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, window, cx| {
-                            this.term_panel.maximized = !this.term_panel.maximized;
+                            this.term.panel.maximized = !this.term.panel.maximized;
                             // Persist so the terminal reopens maximized next time.
-                            crate::save_ui_bool("terminal_maximized", this.term_panel.maximized);
+                            crate::save_ui_bool("terminal_maximized", this.term.panel.maximized);
                             this.focus_active_terminal(window, cx);
                             cx.notify();
                         }),
@@ -175,7 +175,7 @@ impl Kyde {
             );
 
         // The active terminal widget (entity → element).
-        let body = self.term_tabs.get(self.term_panel.active).map_or_else(
+        let body = self.term.tabs.get(self.term.panel.active).map_or_else(
             || div().into_any_element(),
             |v| v.clone().into_any_element(),
         );
@@ -207,20 +207,20 @@ impl Kyde {
             .flex()
             .flex_col()
             // Maximized → fill the right column; otherwise a fixed, drag-resizable height.
-            .when(self.term_panel.maximized, |d| d.flex_1().min_h_0())
-            .when(!self.term_panel.maximized, |d| {
-                d.flex_none().h(px(self.term_height))
+            .when(self.term.panel.maximized, |d| d.flex_1().min_h_0())
+            .when(!self.term.panel.maximized, |d| {
+                d.flex_none().h(px(self.term.height))
             })
             // Inside the right column already (right of the full-height rail) → no left pad;
             // aligns with the body island above it.
             .pr(px(theme::FRAME_GAP))
             // Maximized has no body above it, so it needs the top frame gap the body used to
             // provide; docked mode gets its top spacing from the resize divider instead.
-            .when(self.term_panel.maximized, |d| d.pt(px(theme::FRAME_GAP)))
+            .when(self.term.panel.maximized, |d| d.pt(px(theme::FRAME_GAP)))
             .pb(px(theme::FRAME_GAP))
             .bg(t.frame_bg)
             // No resize divider when maximized (it fills the column).
-            .when(!self.term_panel.maximized, |d| d.child(divider))
+            .when(!self.term.panel.maximized, |d| d.child(divider))
             .child(island)
             .into_any_element()
     }
@@ -234,21 +234,21 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         let focused = self.terminal_is_focused(window, cx);
-        match self.term_panel.toggle(focused, !self.term_tabs.is_empty()) {
+        match self.term.panel.toggle(focused, !self.term.tabs.is_empty()) {
             ToggleAction::Open { spawn } => {
-                self.term_panel.open = true;
+                self.term.panel.open = true;
                 if spawn {
                     self.new_terminal_tab(cx);
                 }
                 // Restore the persisted maximized preference on (re)open.
-                self.term_panel.maximized = crate::load_ui_bool("terminal_maximized", false);
+                self.term.panel.maximized = crate::load_ui_bool("terminal_maximized", false);
                 self.focus_active_terminal(window, cx);
             }
             // Visible & focused → hide, returning focus to the app root so editor/tree
             // shortcuts (backspace = delete, etc.) work again.
             ToggleAction::Hide => {
-                self.term_panel.open = false;
-                self.term_panel.maximized = false;
+                self.term.panel.open = false;
+                self.term.panel.maximized = false;
                 window.focus(&self.focus_handle);
             }
             // Visible but unfocused → just focus it (VSCode ⌃` behaviour).
@@ -259,8 +259,9 @@ impl Kyde {
 
     /// Whether the active terminal tab currently owns keyboard focus.
     pub(crate) fn terminal_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
-        self.term_tabs
-            .get(self.term_panel.active)
+        self.term
+            .tabs
+            .get(self.term.panel.active)
             .is_some_and(|v| v.read(cx).handle().is_focused(window))
     }
 
@@ -272,11 +273,11 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.term_panel.open && !self.term_tabs.is_empty() {
-            self.close_terminal_tab(self.term_panel.active, cx);
+        if self.term.panel.open && !self.term.tabs.is_empty() {
+            self.close_terminal_tab(self.term.panel.active, cx);
             // Keep focus on the terminal if any tab remains; otherwise the panel hid itself, so
             // hand focus back to the app root.
-            if self.term_panel.open {
+            if self.term.panel.open {
                 self.focus_active_terminal(window, cx);
             } else {
                 window.focus(&self.focus_handle);
@@ -291,8 +292,8 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.term_panel.open {
-            self.term_panel.open = true;
+        if !self.term.panel.open {
+            self.term.panel.open = true;
         }
         self.new_terminal_tab(cx);
         self.focus_active_terminal(window, cx);
@@ -307,14 +308,14 @@ impl Kyde {
         cx.subscribe(&view, |this, v, ev, cx| match ev {
             crate::terminal::TerminalEvent::TitleChanged => cx.notify(),
             crate::terminal::TerminalEvent::CloseRequested => {
-                if let Some(idx) = this.term_tabs.iter().position(|t| t == &v) {
+                if let Some(idx) = this.term.tabs.iter().position(|t| t == &v) {
                     this.close_terminal_tab(idx, cx);
                 }
             }
         })
         .detach();
-        self.term_tabs.push(view);
-        self.term_panel.on_tab_added(self.term_tabs.len());
+        self.term.tabs.push(view);
+        self.term.panel.on_tab_added(self.term.tabs.len());
         cx.notify();
     }
 
@@ -323,12 +324,12 @@ impl Kyde {
     /// re-homes focus (the ^D `exit` path runs in a window-less subscription, so we can't focus
     /// here; the new active tab — or the app root — is focused in `render`).
     pub(crate) fn close_terminal_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
-        let len = self.term_tabs.len();
+        let len = self.term.tabs.len();
         if idx >= len {
             return;
         }
-        self.term_tabs.remove(idx);
-        self.term_panel.on_tab_closed(len, idx);
+        self.term.tabs.remove(idx);
+        self.term.panel.on_tab_closed(len, idx);
         cx.notify();
     }
 
@@ -337,7 +338,7 @@ impl Kyde {
     /// `TerminalElement` isn't in the window tree yet and an immediate-only focus
     /// wouldn't stick (same gotcha as the finder/branch-popup focus).
     pub(crate) fn focus_active_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(view) = self.term_tabs.get(self.term_panel.active) {
+        if let Some(view) = self.term.tabs.get(self.term.panel.active) {
             let handle = view.read(cx).handle();
             window.focus(&handle);
             window.defer(cx, move |window, _cx| window.focus(&handle));

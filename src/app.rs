@@ -9,7 +9,7 @@ use super::*;
 pub(crate) const SCROLL_CONTEXT_ROWS: usize = 3;
 /// Debounce before the editable diff pane saves + re-diffs after a keystroke (the save +
 /// `git status` + re-diff all shell out, so bursts of typing are coalesced).
-const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
+pub(crate) const DIFF_EDIT_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(180);
 /// Debounce before a Browse edit triggers a background `git status` refresh.
 pub(crate) const STATUS_REFRESH_DEBOUNCE: std::time::Duration =
     std::time::Duration::from_millis(400);
@@ -74,6 +74,76 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// A consistent read of everything `refresh` pulls from git + disk, computed on a
+/// background thread so the (potentially many-subprocess, big-repo-slow) IO never blocks
+/// the UI thread. `apply` writes it back into `Kyde` on the foreground. See
+/// [`Kyde::refresh`].
+struct RepoSnapshot {
+    /// Changed files from `git status` (empty when `status_err` is set).
+    files: Vec<ChangedFile>,
+    /// `Some(message)` when `git status` failed — surfaced as the op-error banner while
+    /// the previous file list is kept (so a transient failure doesn't blank the tree).
+    status_err: Option<String>,
+    /// All tracked+untracked files (git) or the filesystem walk (non-git), for the tree.
+    all_files: Vec<PathBuf>,
+    /// Current branch (`None` when detached / non-git).
+    current_branch: Option<String>,
+    /// Commits ahead of the push base (`None` when non-git / unborn).
+    ahead: Option<usize>,
+    /// Commits behind the upstream (`None` when non-git / no upstream).
+    behind: Option<usize>,
+    /// The revision a push is measured against.
+    push_base: String,
+    /// Files a push would send.
+    push_files: Vec<ChangedFile>,
+    /// Scratch files under the project root.
+    scratches: Vec<PathBuf>,
+    /// Whether `root` is inside a git working tree (drives which fields are meaningful).
+    is_git: bool,
+}
+
+impl RepoSnapshot {
+    /// Do all the blocking git + filesystem reads for `root`. Safe to call off the UI
+    /// thread — it touches only owned data (no `Kyde`, no gpui).
+    fn read(root: &std::path::Path) -> Self {
+        let scratches = scratch::list(root);
+        let Ok(repo) = Repo::discover(root) else {
+            // Not a git repo: Browse is still a file tree (walk the filesystem); all
+            // git-only state stays empty.
+            return Self {
+                files: Vec::new(),
+                status_err: None,
+                all_files: list_dir_files(root),
+                current_branch: None,
+                ahead: None,
+                behind: None,
+                push_base: String::new(),
+                push_files: Vec::new(),
+                scratches,
+                is_git: false,
+            };
+        };
+        // `git status` failing means we can't trust the file list — carry the message so
+        // `apply` keeps the old list and shows the banner rather than a looks-clean tree.
+        let (files, status_err) = match repo.status() {
+            Ok(files) => (files, None),
+            Err(e) => (Vec::new(), Some(format!("Reading status failed: {e}"))),
+        };
+        Self {
+            files,
+            status_err,
+            all_files: repo.list_files().unwrap_or_default(),
+            current_branch: repo.current_branch(),
+            ahead: repo.ahead_count(),
+            behind: repo.behind_count(),
+            push_base: repo.push_base(),
+            push_files: repo.push_files(),
+            scratches,
+            is_git: true,
+        }
+    }
+}
+
 impl Kyde {
     pub(crate) fn new(
         root: Option<PathBuf>,
@@ -82,137 +152,24 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> Self {
         let keymap_preset = keymap.preset;
-        let commit_editor = cx.new(|cx| {
-            let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Commit message…");
-            e.fill_height = true; // fill the box so the whole area is clickable
-            e.soft_wrap = true; // wrap long commit messages instead of running off the box
-            e
-        });
-        // No placeholder: an empty open file should read as empty, not show prompt text.
-        let file_editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
-        // Diff panes: left read-only (base), right editable (working copy, live-saves). The
-        // base pane renders its line numbers on the RIGHT, toward the center gutter, so the
-        // two panes' numbers meet in the middle (IntelliJ/GitHub side-by-side style).
-        let diff_left = cx.new(|cx| {
-            let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
-            e.gutter_right = true;
-            e
-        });
-        let diff_right = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
-        cx.subscribe(&diff_right, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.diff_right.read(cx).dirty {
-                // Debounce: typing fires Changed per keystroke, but the save + `git status`
-                // + full re-diff are expensive (subprocess!). Only run them after the last
-                // keystroke settles, so typing stays responsive even on large files.
-                this.diff_edit_gen = this.diff_edit_gen.wrapping_add(1);
-                let gen = this.diff_edit_gen;
-                cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(DIFF_EDIT_DEBOUNCE).await;
-                    this.update(cx, |this, cx| {
-                        if this.diff_edit_gen == gen {
-                            this.diff_autosave(cx);
-                        }
-                    })
-                    .ok();
-                })
-                .detach();
-            }
-        })
-        .detach();
-        // Auto-save: persist every edit to disk immediately (no Save button). Gated on
-        // `dirty` so loading a file (set_content emits Changed with dirty=false) doesn't
-        // rewrite it; real edits/undo set dirty=true and flush here.
-        cx.subscribe(&file_editor, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.file_editor.read(cx).dirty {
-                // Editing a preview (temporary) tab promotes it to a permanent tab — VS Code
-                // behaviour, so the edit survives the next single-click elsewhere.
-                if this.preview_tab.is_some() && this.preview_tab == this.open_path {
-                    this.preview_tab = None;
-                }
-                this.autosave(cx);
-            }
-        })
-        .detach();
-        let finder_query = cx.new(|cx| CodeEditor::single_line(cx, "Type to search files…"));
+        // Commit-view state (message editor + changed-files search + its subscription) now
+        // lives in `CommitView::new`; the Browse file editor + its autosave subscription in
+        // `BrowseView::new`; the diff panes + the right pane's debounced autosave in
+        // `DiffPanes::new` (see the `commit`/`browse`/`diff` fields below).
+        // Finder overlay state (query box + its change subscription) now lives in
+        // `Finder::new` (see the `finder` field below).
         let plugins_query = cx.new(|cx| CodeEditor::single_line(cx, "Search plugins…"));
         let name_input = cx.new(|cx| CodeEditor::single_line(cx, "File name"));
-        // Find / replace bar inputs use the "FindBar" key context (enter/escape bindings).
-        let find_query = cx.new(|cx| {
-            let mut e = CodeEditor::single_line(cx, "Find");
-            e.ctx_override = Some("FindBar");
-            e
-        });
-        let replace_query = cx.new(|cx| {
-            let mut e = CodeEditor::single_line(cx, "Replace");
-            e.ctx_override = Some("FindBar");
-            e
-        });
-        cx.subscribe(&find_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.find_open {
-                this.recompute_find(cx);
-            }
-        })
-        .detach();
-        // History branch-picker filter; re-render the dropdown live as it changes.
-        let history_branch_query = cx.new(|cx| CodeEditor::single_line(cx, "Search branches…"));
-        cx.subscribe(&history_branch_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.history_branch_open {
-                cx.notify();
-            }
-        })
-        .detach();
-        // Commit-list filter; re-render the history view live as it changes.
-        let history_commit_query = cx.new(|cx| CodeEditor::single_line(cx, "Search commits…"));
-        cx.subscribe(&history_commit_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.mode == Mode::History {
-                cx.notify();
-            }
-        })
-        .detach();
-        // History files-tree filter.
-        let history_files_query = cx.new(|cx| CodeEditor::single_line(cx, "Search files…"));
-        cx.subscribe(&history_files_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.mode == Mode::History {
-                cx.notify();
-            }
-        })
-        .detach();
+        // Find/replace bar state (both inputs + the query subscription) now lives in
+        // `FindBar::new` (see the `find` field below).
+        // History-view state (commit list, files tree, branch picker) + its three search-box
+        // subscriptions now live in `HistoryView::new` (see the `history` field below).
         let project_search = cx.new(|cx| CodeEditor::single_line(cx, "Search projects"));
-        let branch_query = cx.new(|cx| CodeEditor::single_line(cx, "Search / new branch name"));
-        // Re-filter the branch popup live as the query changes.
-        cx.subscribe(&branch_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.branch_popup_open {
-                cx.notify();
-            }
-        })
-        .detach();
+        // Branch-switcher popup state + its search-box subscription now live in
+        // `BranchPopup::new` (see the `branch` field below).
         cx.subscribe(&project_search, |_this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) {
                 cx.notify();
-            }
-        })
-        .detach();
-        // Commit-view file filter — repaint the changed-files list as the query changes.
-        let commit_search = cx.new(|cx| CodeEditor::single_line(cx, "Search files…"));
-        cx.subscribe(&commit_search, |_this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) {
-                cx.notify();
-            }
-        })
-        .detach();
-
-        // Re-query the finder whenever its input changes.
-        cx.subscribe(&finder_query, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.finder_open {
-                // Find-in-Files shells out to `git grep` (expensive on large repos), so it's
-                // debounced + run on a background thread. Every other mode is an in-memory
-                // fuzzy match — cheap, run inline.
-                if this.finder_mode == FinderMode::Content {
-                    this.schedule_content_search(cx);
-                } else {
-                    this.recompute_finder(cx);
-                    cx.notify();
-                }
             }
         })
         .detach();
@@ -232,77 +189,36 @@ impl Kyde {
             repo_root: root,
             mode: Mode::Browse, // code-first: a freshly opened project shows the editor
             focus_handle: cx.focus_handle(),
-            focus_commit_msg: false,
             keymap,
             plugins: Plugins::load(),
             ignored_packs: std::collections::HashSet::new(),
             recents: Recents::load(),
             project_search,
-            commit_search,
             files: Vec::new(),
             selected: None,
-            commit_focus: std::collections::HashSet::new(),
-            commit_tree: tree::Tree::default(),
-            commit_expanded: std::collections::HashSet::new(),
-            commit_checked: std::collections::HashSet::new(),
-            current_diff: None,
-            old_spans: Vec::new(),
-            new_spans: Vec::new(),
-            commit_editor,
-            diff_left,
-            diff_right,
-            diff_path: None,
-            diff_image: None,
-            diff_readonly: false,
-            diff_base: String::new(),
-            diff_scroll: ScrollHandle::new(),
-            diff_split: 0.5,
+            commit: CommitView::new(cx),
+            diff: DiffPanes::new(cx),
             divider_drag: None,
-            file_scroll: ScrollHandle::new(),
             sb_drag: None,
             scroll_dims: std::collections::HashMap::new(),
-            md_editor_scroll: ScrollHandle::new(),
-            md_preview_scroll: ScrollHandle::new(),
-            md_view: None,
             projects_search_focused: false,
-            md_editor_w: 480.0,
-            all_files: Vec::new(),
-            file_tree: tree::Tree::default(),
-            // Root folder starts expanded so the tree shows on open.
-            expanded: std::collections::HashSet::from([PathBuf::new()]),
-            tree_width: 320.0,
-            tree_collapsed: false,
-            commit_collapsed: false,
-            open_path: None,
-            open_tabs: Vec::new(),
-            preview_tab: None,
-            scratches: Vec::new(),
-            tab_scroll: ScrollHandle::new(),
-            selected_path: None,
-            tree_scroll: ScrollHandle::new(),
-            file_editor,
-            find_open: false,
-            find_replace: false,
-            find_query,
-            replace_query,
-            find_matches: Vec::new(),
-            find_idx: 0,
-            diff_edit_gen: 0,
-            finder_gen: 0,
-            show_fps: load_show_fps(),
-            fps_value: 0.0,
-            fps_shown: 0.0,
-            fps_last: None,
-            fps_file_last: None,
-            finder_open: false,
-            finder_mode: FinderMode::Files,
-            finder_query,
-            finder_results: Vec::new(),
-            content_results: Vec::new(),
-            action_results: Vec::new(),
-            finder_selected: 0,
-            onboarding_open: first_run,
-            onboarding_forced: first_run,
+            browse: BrowseView::new(cx),
+            find: FindBar::new(cx),
+            fps: Fps {
+                show: load_show_fps(),
+                value: 0.0,
+                shown: 0.0,
+                last: None,
+                file_last: None,
+            },
+            finder: Finder::new(cx),
+            onboarding: Onboarding {
+                open: first_run,
+                forced: first_run,
+                choice: keymap_preset,
+                install_cmd: true,
+                shell_cmd_error: None,
+            },
             plugins_win: None,
             plugins_query,
             fonts_win: None,
@@ -312,19 +228,16 @@ impl Kyde {
             settings_theme_open: false,
             font_preview: None,
             welcome_frame: 0,
-            onboarding_choice: keymap_preset,
-            onboarding_install_cmd: true,
-            shell_cmd_error: None,
             pending_crash: crash_log_path()
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .filter(|s| !s.trim().is_empty()),
             op_error: None,
+            pending_error: None,
             context_menu: None,
             diff_win: None,
             diff_modal_open: false,
             main_window_bounds: None,
             diff_view_open: false,
-            find_target: crate::FindTarget::File,
             rollback_win: None,
             new_branch_win: None,
             new_branch_checkout: true,
@@ -335,56 +248,17 @@ impl Kyde {
             rollback_checked: std::collections::HashSet::new(),
             rollback_delete_added: false,
             current_branch: None,
-            branch_list: Vec::new(),
-            branch_remotes: Vec::new(),
-            branch_popup_open: false,
-            branch_query,
-            branch_expanded: std::collections::HashSet::new(),
+            branch: BranchPopup::new(cx),
             refresh_gen: 0,
-            ahead: None,
-            behind: None,
-            pushing: false,
-            committing: false,
-            pulling: false,
-            fetching: false,
-            push_msg: None,
+            sync: SyncState::new(),
             push_win: None,
-            push_files: Vec::new(),
-            push_base: String::new(),
             git_tab: GitTab::Commit,
-            push_selected: None,
             update_available: None,
             updating: false,
-            history_rev: "HEAD".to_string(),
-            history_path: None,
-            history_commits: Vec::new(),
-            history_selected: None,
-            history_files: Vec::new(),
-            history_file_selected: None,
-            history_files_tree: tree::Tree::default(),
-            history_files_expanded: std::collections::HashSet::new(),
-            history_files_query,
-            history_panel_h: 320.0,
-            history_panel_collapsed: false,
-            history_compare: CompareMode::Local,
-            history_compare_open: false,
-            history_branch_open: false,
-            history_locals: Vec::new(),
-            history_remotes: Vec::new(),
-            history_branch_query,
-            history_commit_query,
-            history_scroll: ScrollHandle::new(),
-            history_commit_frac: 2.0 / 3.0,
-            #[cfg(feature = "terminal")]
-            term_tabs: Vec::new(),
-            // Starts closed; the persisted "maximized" preference is restored when it opens
-            // (act_toggle_terminal), so the default (all-false) is correct here.
-            #[cfg(feature = "terminal")]
-            term_panel: TermPanel::default(),
-            #[cfg(feature = "terminal")]
-            term_height: 260.0,
+            history: HistoryView::new(cx),
+            term: TermState::new(),
         };
-        me.refresh();
+        me.refresh(cx);
         // Background: ask GitHub if there's a newer release, then surface the update banner.
         // Network I/O off the UI thread; failures stay silent.
         cx.spawn(async move |this, cx| {
@@ -408,39 +282,78 @@ impl Kyde {
         Repo::discover(self.repo_root.as_ref()?).ok()
     }
 
-    pub(crate) fn refresh(&mut self) {
-        if let Some(repo) = self.repo() {
-            // `git status` failing means we can't trust the file list — surface it rather
-            // than show an empty (looks-clean) tree. A later success clears the banner.
-            match repo.status() {
-                Ok(files) => {
-                    self.files = files;
-                    self.op_error = None;
-                }
-                Err(e) => self.fail("Reading status", e),
-            }
-            self.all_files = repo.list_files().unwrap_or_default();
-            self.file_tree = tree::Tree::build(&self.all_files);
-            self.current_branch = repo.current_branch();
-            self.ahead = repo.ahead_count();
-            self.behind = repo.behind_count();
-            // What a push would send — kept live so the Push tab's count badge is accurate.
-            self.push_base = repo.push_base();
-            self.push_files = repo.push_files();
-        } else if let Some(root) = self.repo_root.clone() {
-            // Not a git repo: Browse is still a file tree, so populate it by walking the
-            // filesystem. Git-only state (changed files, branch, ahead) stays empty, and the
-            // commit/push/rollback flows simply have nothing to act on.
+    /// Re-read git status + the file tree. The reads (a handful of `git` subprocesses, plus
+    /// a `git ls-files` / filesystem walk that is O(repo size)) run on a **background
+    /// thread** — on a large repo they take real time, and doing them inline used to freeze
+    /// the UI on every startup, window-refocus, and save. A [`RepoSnapshot`] is computed off
+    /// thread, then applied on the foreground; a monotonic `refresh_gen` drops any snapshot
+    /// that a newer refresh has already superseded.
+    pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root.clone() else {
+            // Landing view / project closed: no repo to read — clear git-derived state so a
+            // stale tree/branch never lingers behind the landing view.
             self.files.clear();
-            self.push_files.clear();
+            self.sync.push_files.clear();
             self.current_branch = None;
-            self.ahead = None;
+            self.sync.ahead = None;
+            self.sync.behind = None;
             self.op_error = None;
-            self.all_files = list_dir_files(&root);
-            self.file_tree = tree::Tree::build(&self.all_files);
-        }
-        if let Some(root) = self.repo_root.clone() {
-            self.scratches = scratch::list(&root);
+            self.browse.all_files.clear();
+            self.browse.tree = tree::Tree::default();
+            self.browse.scratches.clear();
+            self.rebuild_commit_view(false);
+            self.selected = None;
+            self.diff.current = None;
+            self.diff.old_spans.clear();
+            self.diff.new_spans.clear();
+            cx.notify();
+            return;
+        };
+        self.refresh_gen = self.refresh_gen.wrapping_add(1);
+        let generation = self.refresh_gen;
+        cx.spawn(async move |this, cx| {
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move { RepoSnapshot::read(&root) })
+                .await;
+            this.update(cx, |this, cx| {
+                // Only the newest refresh wins — a snapshot superseded by a later refresh is
+                // dropped rather than clobbering fresher state.
+                if this.refresh_gen == generation {
+                    this.apply_snapshot(snapshot, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write a background [`RepoSnapshot`] into `self` and rebuild the derived UI state
+    /// (commit tree + current selection). Runs on the foreground (needs `&mut self`).
+    fn apply_snapshot(&mut self, snap: RepoSnapshot, cx: &mut Context<Self>) {
+        self.browse.all_files = snap.all_files;
+        self.browse.tree = tree::Tree::build(&self.browse.all_files);
+        self.current_branch = snap.current_branch;
+        self.sync.ahead = snap.ahead;
+        self.sync.behind = snap.behind;
+        self.browse.scratches = snap.scratches;
+        if snap.is_git {
+            // What a push would send — kept live so the Push tab's count badge is accurate.
+            self.sync.push_base = snap.push_base;
+            self.sync.push_files = snap.push_files;
+            if let Some(msg) = snap.status_err {
+                // Keep the previous file list on a transient failure (see `RepoSnapshot`);
+                // a later success clears the banner.
+                eprintln!("{msg}");
+                self.op_error = Some(msg);
+            } else {
+                self.files = snap.files;
+                self.op_error = None;
+            }
+        } else {
+            self.files.clear();
+            self.sync.push_files.clear();
+            self.op_error = None;
         }
         self.rebuild_commit_view(false);
         match self.selected {
@@ -448,11 +361,24 @@ impl Kyde {
             _ if !self.files.is_empty() => self.select(0),
             _ => {
                 self.selected = None;
-                self.current_diff = None;
-                self.old_spans.clear();
-                self.new_spans.clear();
+                self.diff.current = None;
+                self.diff.old_spans.clear();
+                self.diff.new_spans.clear();
             }
         }
+        // The fuzzy finder matches against `all_files` — if it's open while this snapshot
+        // lands (e.g. opened right after boot, before the first background read finished),
+        // its cached results are stale/empty and nothing else would recompute them until
+        // the next keystroke. Content mode is untouched (its grep is repo-side + debounced).
+        if self.finder.open && self.finder.mode != FinderMode::Content {
+            self.recompute_finder(cx);
+        }
+        // Re-apply an operation error stashed alongside this refresh (see `pending_error`),
+        // now that the status read has cleared `op_error`, so it survives the clear.
+        if let Some(msg) = self.pending_error.take() {
+            self.op_error = Some(msg);
+        }
+        cx.notify();
     }
 
     /// Re-read git + the open file from disk. Triggered when the window regains focus,
@@ -463,18 +389,19 @@ impl Kyde {
             return; // Projects landing — nothing to reload.
         }
         // git status, file tree, and the selected file's diff (all read fresh from disk/git).
-        self.refresh();
+        self.refresh(cx);
 
         // Reload the Browse editor's open file — but only when the user has no unsaved
         // edits (never clobber), the file still exists, and the on-disk bytes actually
         // changed (avoid pointless cursor/selection resets).
-        if let (Some(rel), Some(repo)) = (self.open_path.clone(), self.repo()) {
+        if let (Some(rel), Some(repo)) = (self.browse.open_path.clone(), self.repo()) {
             let exists = repo.root().join(&rel).exists();
-            if exists && !self.file_editor.read(cx).dirty {
+            if exists && !self.browse.editor.read(cx).dirty {
                 if let Ok(content) = repo.working_content(&rel) {
-                    if self.file_editor.read(cx).text() != content {
+                    if self.browse.editor.read(cx).text() != content {
                         let lang = self.effective_lang(&rel);
-                        self.file_editor
+                        self.browse
+                            .editor
                             .update(cx, |e, cx| e.set_content(content, lang, cx));
                     }
                 }
@@ -509,11 +436,21 @@ impl Kyde {
         self.op_error = Some(format!("{ctx} failed: {e}"));
     }
 
+    /// Like [`fail`](Self::fail), but for an operation error raised alongside a `refresh`
+    /// (see [`pending_error`](Self::pending_error)). Setting `op_error` directly would be
+    /// wiped when the async refresh's clean status read lands; stashing it here lets
+    /// `apply_snapshot` re-apply it after that clear, so the banner survives the refresh.
+    pub(crate) fn fail_pending(&mut self, ctx: &str, e: impl Into<anyhow::Error>) {
+        let e = e.into();
+        eprintln!("{ctx} failed: {e:#}");
+        self.pending_error = Some(format!("{ctx} failed: {e}"));
+    }
+
     /// Reset the editor to nothing-open.
     pub(crate) fn clear_open(&mut self, cx: &mut Context<Self>) {
-        self.open_path = None;
-        self.preview_tab = None;
-        self.file_editor.update(cx, |e, cx| {
+        self.browse.open_path = None;
+        self.browse.preview_tab = None;
+        self.browse.editor.update(cx, |e, cx| {
             e.set_content(String::new(), Lang::PlainText, cx);
         });
     }
@@ -531,31 +468,39 @@ impl Kyde {
 
     /// Persist `rel`'s `text` to disk: through the repo's working tree in a git repo, else
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
-    /// files) write to themselves, since `join` keeps an absolute right-hand side. Best-effort
-    /// — errors are swallowed (this runs on every keystroke via autosave).
-    fn write_open_file(&self, rel: &std::path::Path, text: &str) {
+    /// files) write to themselves, since `join` keeps an absolute right-hand side. Returns
+    /// the error so callers can surface it (a swallowed write means silently-lost edits).
+    fn write_open_file(&self, rel: &std::path::Path, text: &str) -> anyhow::Result<()> {
         if let Some(repo) = self.repo() {
-            let _ = repo.save_file(rel, text);
+            repo.save_file(rel, text)?;
         } else if let Some(root) = self.repo_root.as_ref() {
             let full = root.join(rel);
             if let Some(parent) = full.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
-            let _ = std::fs::write(full, text);
+            std::fs::write(full, text)?;
         }
+        Ok(())
     }
 
     /// Write the open file to disk without the git refresh — cheap enough to run on
     /// every keystroke. The changed-files tree re-syncs on mode switch / window refocus.
-    fn autosave(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn autosave(&mut self, cx: &mut Context<Self>) {
         let (Some(rel), text) = (
-            self.open_path.clone(),
-            self.file_editor.read(cx).text().to_string(),
+            self.browse.open_path.clone(),
+            self.browse.editor.read(cx).text().to_string(),
         ) else {
             return;
         };
-        self.write_open_file(&rel, &text);
-        self.file_editor.update(cx, |e, _| e.dirty = false);
+        // A failed autosave means the user's keystrokes never reached disk — surface it
+        // (op-error banner) and keep the buffer dirty so a later save can retry, rather
+        // than silently marking it clean and losing the edit.
+        if let Err(e) = self.write_open_file(&rel, &text) {
+            self.fail("Saving file", e);
+            cx.notify();
+            return;
+        }
+        self.browse.editor.update(cx, |e, _| e.dirty = false);
         // Optimistic status: flip the tree/tab color to "modified" the instant we save,
         // rather than waiting ~0.4s for the debounced `git status`. Only when the file isn't
         // already a known change — so a real Added/Untracked/Deleted status (e.g. a new file
@@ -575,14 +520,17 @@ impl Kyde {
 
     fn save_open(&mut self, cx: &mut Context<Self>) {
         let (Some(rel), text) = (
-            self.open_path.clone(),
-            self.file_editor.read(cx).text().to_string(),
+            self.browse.open_path.clone(),
+            self.browse.editor.read(cx).text().to_string(),
         ) else {
             return;
         };
-        self.write_open_file(&rel, &text);
-        self.file_editor.update(cx, |e, _| e.dirty = false);
-        self.refresh();
+        if let Err(e) = self.write_open_file(&rel, &text) {
+            self.fail("Saving file", e);
+            return;
+        }
+        self.browse.editor.update(cx, |e, _| e.dirty = false);
+        self.refresh(cx);
     }
 
     // ── in-editor find / replace ──────────────────────────────────
@@ -592,9 +540,9 @@ impl Kyde {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.show_fps = !self.show_fps;
-        self.fps_last = None;
-        save_show_fps(self.show_fps); // remember across launches
+        self.fps.show = !self.fps.show;
+        self.fps.last = None;
+        save_show_fps(self.fps.show); // remember across launches
         cx.notify();
     }
 
@@ -606,17 +554,17 @@ impl Kyde {
     ) {
         if self.context_menu.is_some() {
             self.context_menu = None;
-        } else if self.find_open {
+        } else if self.find.open {
             self.close_find(&CloseFind, window, cx);
             return;
         } else if self.diff_view_open {
             self.diff_view_open = false; // Escape leaves the full-screen Show-Diff view
         } else if self.delete_target.is_some() {
             self.delete_target = None;
-        } else if self.branch_popup_open {
-            self.branch_popup_open = false;
-        } else if self.onboarding_open && !self.onboarding_forced {
-            self.onboarding_open = false;
+        } else if self.branch.popup_open {
+            self.branch.popup_open = false;
+        } else if self.onboarding.open && !self.onboarding.forced {
+            self.onboarding.open = false;
         } else if self.mode == Mode::Commit {
             self.mode = Mode::Browse; // Escape = Cancel in the Commit view
         } else {
@@ -634,9 +582,10 @@ impl Kyde {
     /// ⌘W — close the active editor tab (no-op when nothing is open).
     pub(crate) fn act_close_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(idx) = self
+            .browse
             .open_path
             .as_ref()
-            .and_then(|p| self.open_tabs.iter().position(|t| t == p))
+            .and_then(|p| self.browse.open_tabs.iter().position(|t| t == p))
         {
             self.close_tab(idx, cx);
         }
@@ -656,10 +605,8 @@ impl Kyde {
     /// visible (the chosen view stays hidden behind the terminal). Centralised so the reset is
     /// consistent across triggers and unit-testable.
     pub(crate) fn switch_mode(&mut self, to: Mode, cx: &mut Context<Self>) {
-        #[cfg(feature = "terminal")]
-        {
-            self.term_panel.maximized = false;
-        }
+        // Un-maximize the terminal first — `term.panel` is always compiled, so no cfg gate.
+        self.term.panel.maximized = false;
         match to {
             Mode::Commit => self.enter_commit(cx),
             Mode::History => self.enter_history(cx),
@@ -671,6 +618,3 @@ impl Kyde {
         }
     }
 }
-
-#[cfg(feature = "terminal")]
-impl Kyde {}

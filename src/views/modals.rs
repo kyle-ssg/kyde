@@ -13,6 +13,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let ext = self
+            .browse
             .open_path
             .as_ref()
             .and_then(|p| p.extension())
@@ -209,7 +210,7 @@ impl Kyde {
                     .border_color(t.primary)
                     .bg(t.main_bg)
                     .font_family(theme::font::FAMILY)
-                    .child(self.branch_query.clone()),
+                    .child(self.branch.query.clone()),
             );
 
         let check = |label: &'static str, on: bool, toggle: fn(&mut Self, &mut Context<Self>)| {
@@ -312,15 +313,7 @@ impl Kyde {
                          theme, recent projects, preferences). Kyde will restart. Can't be undone.",
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap_2()
-                    .child(cancel)
-                    .child(confirm),
-            )
+            .child(ui::modal_footer().child(cancel).child(confirm))
             .into_any_element()
     }
 
@@ -491,7 +484,7 @@ impl Kyde {
                     // New Branch: focus the name field so you can type immediately. Others:
                     // focus the root so Escape (on_key_down) dispatches.
                     if view.kind == ModalKind::NewBranch {
-                        let input = view.kyde.read(cx).branch_query.read(cx).focus_handle(cx);
+                        let input = view.kyde.read(cx).branch.query.read(cx).focus_handle(cx);
                         window.focus(&input);
                     } else if view.kind == ModalKind::Plugins {
                         let input = view.kyde.read(cx).plugins_query.read(cx).focus_handle(cx);
@@ -524,7 +517,8 @@ impl Kyde {
 
     /// Pack available for the open file but not yet installed (drives the banner).
     pub(crate) fn pending_pack(&self) -> Option<&'static highlight::Pack> {
-        self.open_path
+        self.browse
+            .open_path
             .as_ref()
             .and_then(|p| Lang::from_path(p).pack())
             .filter(|p| !self.plugins.is_installed(p.id) && !self.ignored_packs.contains(p.id))
@@ -541,7 +535,7 @@ impl Kyde {
     /// Install the pack for the open file and re-highlight it in place
     /// (without disturbing the buffer's content, selection, or dirty flag).
     pub(crate) fn install_open_pack(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.open_path.clone() else {
+        let Some(rel) = self.browse.open_path.clone() else {
             return;
         };
         let lang = Lang::from_path(&rel);
@@ -550,7 +544,7 @@ impl Kyde {
             self.plugins.save();
             // Re-highlight in place so the colors appear immediately — previously this only
             // set the lang, leaving the cached (plain) spans until the file was reopened.
-            self.file_editor.update(cx, |e, cx| e.set_lang(lang, cx));
+            self.browse.editor.update(cx, |e, cx| e.set_lang(lang, cx));
         }
     }
 
@@ -598,9 +592,9 @@ impl Kyde {
         self.plugins.save();
         if id == "font" {
             self.load_font_preview(cx);
-        } else if let Some(rel) = self.open_path.clone() {
+        } else if let Some(rel) = self.browse.open_path.clone() {
             let eff = self.effective_lang(&rel);
-            self.file_editor.update(cx, |e, cx| e.set_lang(eff, cx));
+            self.browse.editor.update(cx, |e, cx| e.set_lang(eff, cx));
         }
         cx.notify();
     }
@@ -614,12 +608,12 @@ impl Kyde {
         self.plugins.save();
         if pack_id == "font" {
             self.load_font_preview(cx);
-        } else if let Some(rel) = self.open_path.clone() {
+        } else if let Some(rel) = self.browse.open_path.clone() {
             // If the open file's language maps to this pack, re-highlight it now.
             let lang = Lang::from_path(&rel);
             if lang.pack().map(|p| p.id) == Some(pack_id) {
                 let eff = self.effective_lang(&rel);
-                self.file_editor.update(cx, |e, cx| e.set_lang(eff, cx));
+                self.browse.editor.update(cx, |e, cx| e.set_lang(eff, cx));
             }
         }
         cx.notify();

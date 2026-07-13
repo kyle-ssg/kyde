@@ -18,7 +18,7 @@ impl Kyde {
         let t = theme::get();
 
         // ── header: branch chip + commit search + compare-mode segmented control ──
-        let rev_label: SharedString = format!("⎇ {}", self.history_rev).into();
+        let rev_label: SharedString = format!("⎇ {}", self.history.rev).into();
         let branch_chip = div()
             .id("hist-branch")
             .flex()
@@ -44,9 +44,9 @@ impl Kyde {
                 MouseButton::Left,
                 cx.listener(|this, _e, window, cx| {
                     this.toggle_history_branches(cx);
-                    if this.history_branch_open {
+                    if this.history.branch_open {
                         // Focus now and next frame: the dropdown isn't in the tree on first open.
-                        let handle = this.history_branch_query.read(cx).focus_handle.clone();
+                        let handle = this.history.branch_query.read(cx).focus_handle.clone();
                         window.focus(&handle);
                         window.defer(cx, move |window, _cx| window.focus(&handle));
                     }
@@ -55,7 +55,7 @@ impl Kyde {
 
         // Compare-mode dropdown trigger (replaces the old segmented control). The menu itself
         // is rendered near the branch dropdown below (anchored above the panel).
-        let cmp_label: SharedString = self.history_compare.label().into();
+        let cmp_label: SharedString = self.history.compare.label().into();
         let compare_chip = div()
             .id("hist-compare")
             .flex_none()
@@ -81,12 +81,12 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
-                    this.history_compare_open = !this.history_compare_open;
+                    this.history.compare_open = !this.history.compare_open;
                     cx.notify();
                 }),
             );
         // Scope chip: shown when the log is restricted to a folder/file; click clears it.
-        let scope_chip = self.history_path.as_ref().map(|p| {
+        let scope_chip = self.history.path.as_ref().map(|p| {
             let label: SharedString = format!("▸ {}", p.to_string_lossy()).into();
             div()
                 .id("hist-scope")
@@ -135,12 +135,12 @@ impl Kyde {
                     .border_1()
                     .border_color(t.divider)
                     .text_size(px(t.ui_font_size))
-                    .child(self.history_commit_query.clone()),
+                    .child(self.history.commit_query.clone()),
             )
             .child(compare_chip)
             // Minimise / expand the bottom panel (IDE tool-window style).
             .child({
-                let collapsed = self.history_panel_collapsed;
+                let collapsed = self.history.panel_collapsed;
                 div()
                     .id("hist-panel-toggle")
                     .flex_none()
@@ -178,7 +178,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.history_panel_collapsed = !this.history_panel_collapsed;
+                            this.history.panel_collapsed = !this.history.panel_collapsed;
                             cx.notify();
                         }),
                     )
@@ -186,13 +186,15 @@ impl Kyde {
 
         // ── commit list (filtered by the commit search box) ──
         let cq = self
-            .history_commit_query
+            .history
+            .commit_query
             .read(cx)
             .text()
             .trim()
             .to_lowercase();
         let commit_rows: Vec<gpui::AnyElement> = self
-            .history_commits
+            .history
+            .commits
             .iter()
             .enumerate()
             // Keep the original index (drives selection); match subject / author / hash.
@@ -203,22 +205,17 @@ impl Kyde {
                     || c.short.to_lowercase().contains(&cq)
             })
             .map(|(i, c)| {
-                let selected = self.history_selected == Some(i);
+                let selected = self.history.selected == Some(i);
                 let subject: SharedString = c.subject.clone().into();
                 let meta: SharedString = format!("{} · {} · {}", c.short, c.author, c.date).into();
                 let refs = c.refs.clone();
-                div()
-                    .id(("hist-commit", i))
+                ui::picker::row(("hist-commit", i), selected, t.bg_mid)
                     .flex()
                     .flex_col()
                     .gap(px(1.0))
                     .mx_1()
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(t.selected_bg))
-                    .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
                     .child(
                         div()
                             .flex()
@@ -273,7 +270,7 @@ impl Kyde {
         let commit_pane = div()
             .id("hist-commits")
             .overflow_y_scroll()
-            .track_scroll(&self.history_scroll)
+            .track_scroll(&self.history.scroll)
             .size_full()
             .flex()
             .flex_col()
@@ -284,7 +281,7 @@ impl Kyde {
         // Commit list = a resizable share of the panel width on the LEFT (defaults to 2/3); the
         // files pane fills the rest (flex_1). Sized in EXPLICIT pixels from the same formula the
         // divider drag inverts (`Divider::HistCommit`), so the bar tracks the cursor exactly 1:1.
-        let commit_frac = self.history_commit_frac.clamp(0.15, 0.85);
+        let commit_frac = self.history.commit_frac.clamp(0.15, 0.85);
         let commit_w = commit_frac * full_island_w(f32::from(window.viewport_size().width));
         let commit_wrap = div()
             .w(px(commit_w))
@@ -295,7 +292,8 @@ impl Kyde {
 
         // ── changed files of the selected commit, as a folder tree + a search box ──
         let fq = self
-            .history_files_query
+            .history
+            .files_query
             .read(cx)
             .text()
             .trim()
@@ -305,10 +303,11 @@ impl Kyde {
             is_dir: true,
             depth: 0,
         }];
-        if self.history_files_expanded.contains(&PathBuf::new()) {
+        if self.history.files_expanded.contains(&PathBuf::new()) {
             for mut r in self
-                .history_files_tree
-                .visible(&self.history_files_expanded)
+                .history
+                .files_tree
+                .visible(&self.history.files_expanded)
             {
                 r.depth += 1;
                 visible.push(r);
@@ -316,7 +315,7 @@ impl Kyde {
         }
         // Filter by the search box: keep root, matching files, and dirs containing a match.
         if !fq.is_empty() {
-            let files = &self.history_files;
+            let files = &self.history.files;
             visible.retain(|r| {
                 r.path.as_os_str().is_empty()
                     || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&fq))
@@ -339,11 +338,11 @@ impl Kyde {
             .map(|r| {
                 let is_root = r.path.as_os_str().is_empty();
                 let file_idx = (!r.is_dir)
-                    .then(|| self.history_files.iter().position(|f| f.path == r.path))
+                    .then(|| self.history.files.iter().position(|f| f.path == r.path))
                     .flatten();
-                let selected = file_idx.is_some() && self.history_file_selected == file_idx;
+                let selected = file_idx.is_some() && self.history.file_selected == file_idx;
                 let name_color = file_idx
-                    .and_then(|i| self.history_files.get(i))
+                    .and_then(|i| self.history.files.get(i))
                     .map_or(t.text, |f| status_color(f.status));
                 let name: SharedString = if is_root {
                     root_name.clone()
@@ -354,7 +353,7 @@ impl Kyde {
                         .unwrap_or_default()
                         .into()
                 };
-                let expanded = self.history_files_expanded.contains(&r.path);
+                let expanded = self.history.files_expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let p_act = r.path.clone();
                 ui::tree::item(
@@ -370,12 +369,12 @@ impl Kyde {
                     None,
                     move |this, _e, _w, cx| {
                         if is_dir {
-                            if !this.history_files_expanded.remove(&p_act) {
-                                this.history_files_expanded.insert(p_act.clone());
+                            if !this.history.files_expanded.remove(&p_act) {
+                                this.history.files_expanded.insert(p_act.clone());
                             }
                             cx.notify();
                         } else if let Some(i) =
-                            this.history_files.iter().position(|f| f.path == p_act)
+                            this.history.files.iter().position(|f| f.path == p_act)
                         {
                             this.select_history_file(i, cx);
                         }
@@ -390,11 +389,11 @@ impl Kyde {
             .px_2()
             .py_1p5()
             .text_size(px(t.ui_font_size))
-            .child(self.history_files_query.clone());
+            .child(self.history.files_query.clone());
         let files_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
         // No changed files (e.g. "Compare with Local" when the working tree matches the
         // commit) → an explicit empty-state instead of a lone, childless root folder row.
-        let files_body = if self.history_files.is_empty() {
+        let files_body = if self.history.files.is_empty() {
             div()
                 .flex()
                 .flex_1()
@@ -450,8 +449,8 @@ impl Kyde {
         // Bottom panel (one island): toolbar, then commit list | files, divider-split.
         // Height is drag-resizable via the strip above it (`history_panel_h`). The header
         // chevron minimises it to just the toolbar (`history_panel_collapsed`).
-        let panel_h = self.history_panel_h;
-        let collapsed = self.history_panel_collapsed;
+        let panel_h = self.history.panel_h;
+        let collapsed = self.history.panel_collapsed;
         // Toolbar height: pt + 28px chip row + pb. Used to anchor the dropdowns + as the
         // panel height when minimised.
         let header_h = theme::FRAME_GAP * 2.0 + 28.0;
@@ -511,23 +510,26 @@ impl Kyde {
         // Branch dropdown: a search box over Local / Remote sections, anchored ABOVE the
         // bottom-panel toolbar (it grows up over the diff so it isn't clipped by the panel).
         // A transparent backdrop closes it.
-        if self.history_branch_open {
+        if self.history.branch_open {
             let q = self
-                .history_branch_query
+                .history
+                .branch_query
                 .read(cx)
                 .text()
                 .trim()
                 .to_lowercase();
             let matches = |n: &str| q.is_empty() || n.to_lowercase().contains(&q);
-            let cur = self.history_rev.clone();
+            let cur = self.history.rev.clone();
             let locals: Vec<String> = self
-                .history_locals
+                .history
+                .locals
                 .iter()
                 .filter(|n| matches(n))
                 .cloned()
                 .collect();
             let remotes: Vec<String> = self
-                .history_remotes
+                .history
+                .remotes
                 .iter()
                 .filter(|n| matches(n))
                 .cloned()
@@ -536,21 +538,20 @@ impl Kyde {
             let mk = |b: String, cx: &mut Context<Self>| {
                 let selected = b == cur;
                 let label: SharedString = b.clone().into();
-                div()
-                    .id(SharedString::from(format!("hist-rev-{b}")))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_color(t.text)
-                    .when(selected, |d| d.bg(t.selected_bg))
-                    .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
-                    .child(label)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.set_history_rev(b.clone(), cx)),
-                    )
-                    .into_any_element()
+                ui::picker::row(
+                    SharedString::from(format!("hist-rev-{b}")),
+                    selected,
+                    t.bg_mid,
+                )
+                .px_2()
+                .py_1()
+                .text_color(t.text)
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| this.set_history_rev(b.clone(), cx)),
+                )
+                .into_any_element()
             };
             let section = |label: &'static str| {
                 div()
@@ -582,7 +583,7 @@ impl Kyde {
                 .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
                     cx.stop_propagation();
                 })
-                .child(div().px_1().pb_1().child(self.history_branch_query.clone()));
+                .child(div().px_1().pb_1().child(self.history.branch_query.clone()));
             if matches("HEAD") {
                 menu = menu.child(mk("HEAD".to_string(), cx));
             }
@@ -607,7 +608,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.history_branch_open = false;
+                            this.history.branch_open = false;
                             cx.notify();
                         }),
                     )
@@ -617,8 +618,8 @@ impl Kyde {
 
         // Compare-mode dropdown: anchored above the panel toolbar on the RIGHT (the chip is
         // top-right). Each row = label + one-line description so the taxonomy is self-explaining.
-        if self.history_compare_open {
-            let cur = self.history_compare;
+        if self.history.compare_open {
+            let cur = self.history.compare;
             let mut menu = div()
                 .id("hist-compare-list")
                 .absolute()
@@ -640,17 +641,12 @@ impl Kyde {
             for mode in CompareMode::ALL {
                 let selected = mode == cur;
                 menu = menu.child(
-                    div()
-                        .id(mode.key())
+                    ui::picker::row(mode.key(), selected, t.bg_mid)
                         .flex()
                         .flex_col()
                         .gap(px(1.0))
                         .px_2()
                         .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(t.selected_bg))
-                        .when(!selected, |d| d.hover(|d| d.bg(t.bg_mid)))
                         .child(div().text_color(t.text).child(mode.label()))
                         .child(
                             div()
@@ -673,7 +669,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.history_compare_open = false;
+                            this.history.compare_open = false;
                             cx.notify();
                         }),
                     )
@@ -687,7 +683,7 @@ impl Kyde {
     // ── History (git log) view ────────────────────────────────────────────
     /// Enter the history view for the whole repo, logging the current branch.
     pub(crate) fn enter_history(&mut self, cx: &mut Context<Self>) {
-        self.history_path = None;
+        self.history.path = None;
         self.enter_history_inner(cx);
     }
 
@@ -695,7 +691,7 @@ impl Kyde {
     /// subtree, recursively. Opened from a Browse-tree folder's right-click → "Git History".
     pub(crate) fn enter_history_for(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         // Root path (empty) = whole repo.
-        self.history_path = if path.as_os_str().is_empty() {
+        self.history.path = if path.as_os_str().is_empty() {
             None
         } else {
             Some(path)
@@ -706,7 +702,7 @@ impl Kyde {
     fn enter_history_inner(&mut self, cx: &mut Context<Self>) {
         self.mode = Mode::History;
         self.diff_view_open = false;
-        self.history_rev = self
+        self.history.rev = self
             .current_branch
             .clone()
             .unwrap_or_else(|| "HEAD".to_string());
@@ -715,15 +711,15 @@ impl Kyde {
 
     /// Reload the commit list for `history_rev` (scoped to `history_path`), select newest.
     pub(crate) fn reload_history(&mut self, cx: &mut Context<Self>) {
-        let path = self.history_path.clone();
-        self.history_commits = self
+        let path = self.history.path.clone();
+        self.history.commits = self
             .repo()
-            .and_then(|r| r.log(&self.history_rev, 300, path.as_deref()).ok())
+            .and_then(|r| r.log(&self.history.rev, 300, path.as_deref()).ok())
             .unwrap_or_default();
-        self.history_selected = None;
-        self.history_files.clear();
-        self.history_file_selected = None;
-        if self.history_commits.is_empty() {
+        self.history.selected = None;
+        self.history.files.clear();
+        self.history.file_selected = None;
+        if self.history.commits.is_empty() {
             cx.notify();
         } else {
             self.select_history_commit(0, cx);
@@ -733,30 +729,30 @@ impl Kyde {
     /// Toggle the history branch dropdown, loading local + remote branches when opening it
     /// and resetting the search box.
     pub(crate) fn toggle_history_branches(&mut self, cx: &mut Context<Self>) {
-        if !self.history_branch_open {
+        if !self.history.branch_open {
             if let Some(r) = self.repo() {
-                self.history_locals = r.branches().unwrap_or_default();
-                self.history_remotes = r.remote_branches().unwrap_or_default();
+                self.history.locals = r.branches().unwrap_or_default();
+                self.history.remotes = r.remote_branches().unwrap_or_default();
             }
-            self.history_branch_query.update(cx, |e, cx| {
+            self.history.branch_query.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
         }
-        self.history_branch_open = !self.history_branch_open;
+        self.history.branch_open = !self.history.branch_open;
         cx.notify();
     }
 
     /// Point the log at a different branch/rev (from the branch dropdown).
     pub(crate) fn set_history_rev(&mut self, rev: String, cx: &mut Context<Self>) {
-        self.history_rev = rev;
-        self.history_branch_open = false;
+        self.history.rev = rev;
+        self.history.branch_open = false;
         self.reload_history(cx);
     }
 
     /// `(from, to)` revisions for the current compare mode against `hash`; `to == None`
     /// means the working tree.
     fn history_revs(&self, hash: &str) -> (String, Option<String>) {
-        match self.history_compare {
+        match self.history.compare {
             CompareMode::Before => (format!("{hash}^"), Some(hash.to_string())),
             CompareMode::Local => (hash.to_string(), None),
             CompareMode::BeforeLocal => (format!("{hash}^"), None),
@@ -764,35 +760,35 @@ impl Kyde {
     }
 
     fn recompute_history_files(&mut self) {
-        self.history_files.clear();
-        let (Some(idx), Some(repo)) = (self.history_selected, self.repo()) else {
+        self.history.files.clear();
+        let (Some(idx), Some(repo)) = (self.history.selected, self.repo()) else {
             return;
         };
-        let Some(commit) = self.history_commits.get(idx) else {
+        let Some(commit) = self.history.commits.get(idx) else {
             return;
         };
         let (from, to) = self.history_revs(&commit.hash);
-        let path = self.history_path.clone();
-        self.history_files = repo.diff_files(&from, to.as_deref(), path.as_deref());
+        let path = self.history.path.clone();
+        self.history.files = repo.diff_files(&from, to.as_deref(), path.as_deref());
         // Folder tree of the changed files, fully expanded so every change is visible.
-        let paths: Vec<PathBuf> = self.history_files.iter().map(|f| f.path.clone()).collect();
-        self.history_files_tree = tree::Tree::build(&paths);
-        self.history_files_expanded.clear();
-        self.history_files_expanded.insert(PathBuf::new());
+        let paths: Vec<PathBuf> = self.history.files.iter().map(|f| f.path.clone()).collect();
+        self.history.files_tree = tree::Tree::build(&paths);
+        self.history.files_expanded.clear();
+        self.history.files_expanded.insert(PathBuf::new());
         for p in &paths {
             for anc in p.ancestors().skip(1) {
-                self.history_files_expanded.insert(anc.to_path_buf());
+                self.history.files_expanded.insert(anc.to_path_buf());
             }
         }
     }
 
     /// Select a commit → recompute its changed files (per compare mode) + open the first.
     pub(crate) fn select_history_commit(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.history_selected = Some(idx);
+        self.history.selected = Some(idx);
         self.recompute_history_files();
-        self.history_file_selected = None;
-        if self.history_files.is_empty() {
-            self.diff_path = None;
+        self.history.file_selected = None;
+        if self.history.files.is_empty() {
+            self.diff.path = None;
             cx.notify();
         } else {
             self.select_history_file(0, cx);
@@ -808,15 +804,15 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         self.context_menu = None;
-        self.history_selected = Some(idx);
+        self.history.selected = Some(idx);
         self.set_history_compare(mode, cx);
     }
 
     /// Change the compare mode (vs parent / latest / local) → refresh files + diff.
     pub(crate) fn set_history_compare(&mut self, mode: CompareMode, cx: &mut Context<Self>) {
-        self.history_compare = mode;
-        self.history_compare_open = false;
-        match self.history_selected {
+        self.history.compare = mode;
+        self.history.compare_open = false;
+        match self.history.selected {
             Some(idx) => self.select_history_commit(idx, cx),
             None => cx.notify(),
         }
@@ -824,14 +820,14 @@ impl Kyde {
 
     /// Load a file's diff for the selected commit + compare mode (read-only).
     pub(crate) fn select_history_file(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.history_file_selected = Some(idx);
-        let (Some(cidx), Some(repo)) = (self.history_selected, self.repo()) else {
+        self.history.file_selected = Some(idx);
+        let (Some(cidx), Some(repo)) = (self.history.selected, self.repo()) else {
             return;
         };
-        let Some(commit) = self.history_commits.get(cidx).cloned() else {
+        let Some(commit) = self.history.commits.get(cidx).cloned() else {
             return;
         };
-        let Some(file) = self.history_files.get(idx).cloned() else {
+        let Some(file) = self.history.files.get(idx).cloned() else {
             return;
         };
         let (from, to) = self.history_revs(&commit.hash);

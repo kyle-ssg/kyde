@@ -62,17 +62,17 @@ impl Kyde {
     /// `set_divider_size` is lossless (the fractional scale cancels).
     fn divider_size(&self, d: Divider, vw: f32, _vh: f32) -> f32 {
         match d {
-            Divider::Tree => self.tree_width,
-            Divider::MdSplit => self.md_editor_w,
+            Divider::Tree => self.browse.tree_width,
+            Divider::MdSplit => self.browse.md_editor_w,
             Divider::DiffPane => {
-                self.diff_split.clamp(0.15, 0.85) * (full_island_w(vw) - DIFF_GUTTER_W).max(1.0)
+                self.diff.split.clamp(0.15, 0.85) * (full_island_w(vw) - DIFF_GUTTER_W).max(1.0)
             }
-            Divider::HistCommit => self.history_commit_frac.clamp(0.15, 0.85) * full_island_w(vw),
-            Divider::HistPanel => self.history_panel_h,
+            Divider::HistCommit => self.history.commit_frac.clamp(0.15, 0.85) * full_island_w(vw),
+            Divider::HistPanel => self.history.panel_h,
             Divider::Term => {
                 #[cfg(feature = "terminal")]
                 {
-                    self.term_height
+                    self.term.height
                 }
                 #[cfg(not(feature = "terminal"))]
                 {
@@ -85,26 +85,26 @@ impl Kyde {
     /// Set state so the pane `d` controls becomes `size` px, clamped to keep both sides usable.
     fn set_divider_size(&mut self, d: Divider, size: f32, vw: f32, vh: f32) {
         match d {
-            Divider::Tree => self.tree_width = size.clamp(180.0, 900.0),
+            Divider::Tree => self.browse.tree_width = size.clamp(180.0, 900.0),
             Divider::MdSplit => {
-                let island_left = RAIL_W + self.tree_width + theme::FRAME_GAP;
+                let island_left = RAIL_W + self.browse.tree_width + theme::FRAME_GAP;
                 let island_w = (vw - island_left - theme::FRAME_GAP).max(1.0);
-                self.md_editor_w = size.clamp(200.0, (island_w - 200.0).max(200.0));
+                self.browse.md_editor_w = size.clamp(200.0, (island_w - 200.0).max(200.0));
             }
             Divider::DiffPane => {
                 let avail = (full_island_w(vw) - DIFF_GUTTER_W).max(1.0);
-                self.diff_split = (size / avail).clamp(0.15, 0.85);
+                self.diff.split = (size / avail).clamp(0.15, 0.85);
             }
             Divider::HistCommit => {
-                self.history_commit_frac = (size / full_island_w(vw)).clamp(0.15, 0.85);
+                self.history.commit_frac = (size / full_island_w(vw)).clamp(0.15, 0.85);
             }
             Divider::HistPanel => {
-                self.history_panel_h = size.clamp(140.0, (vh - 180.0).max(140.0));
+                self.history.panel_h = size.clamp(140.0, (vh - 180.0).max(140.0));
             }
             Divider::Term => {
                 #[cfg(feature = "terminal")]
                 {
-                    self.term_height = size.clamp(120.0, (vh - 160.0).max(120.0));
+                    self.term.height = size.clamp(120.0, (vh - 160.0).max(120.0));
                 }
                 #[cfg(not(feature = "terminal"))]
                 {

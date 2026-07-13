@@ -67,15 +67,7 @@ impl Kyde {
                         "“{name}” will be permanently deleted from disk. This can't be undone."
                     )),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap_2()
-                    .child(cancel)
-                    .child(confirm),
-            );
+            .child(ui::modal_footer().child(cancel).child(confirm));
         overlay(cx, true).child(panel).into_any_element()
     }
 
@@ -143,15 +135,7 @@ impl Kyde {
                     .border_color(t.divider)
                     .child(self.name_input.clone()),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap_2()
-                    .child(cancel)
-                    .child(confirm),
-            );
+            .child(ui::modal_footer().child(cancel).child(confirm));
         overlay(cx, true).child(panel).into_any_element()
     }
 
@@ -221,9 +205,12 @@ impl Kyde {
                     dir.join(&name)
                 };
                 if let Some(repo) = self.repo() {
-                    if repo.save_file(&rel, "").is_ok() {
-                        self.refresh();
-                        self.open_file(rel, cx);
+                    match repo.save_file(&rel, "") {
+                        Ok(()) => {
+                            self.refresh(cx);
+                            self.open_file(rel, cx);
+                        }
+                        Err(e) => self.fail("Creating file", e),
                     }
                 }
             }
@@ -231,21 +218,25 @@ impl Kyde {
                 let dst = path
                     .parent()
                     .map_or_else(|| PathBuf::from(&name), |d| d.join(&name));
-                let ok = self.repo().is_some_and(|r| r.rename(&path, &dst).is_ok());
-                if ok {
-                    // Repoint any open tab / selection from the old path to the new one.
-                    for t in &mut self.open_tabs {
-                        if *t == path {
-                            *t = dst.clone();
+                if let Some(repo) = self.repo() {
+                    match repo.rename(&path, &dst) {
+                        Ok(()) => {
+                            // Repoint any open tab / selection from the old path to the new one.
+                            for t in &mut self.browse.open_tabs {
+                                if *t == path {
+                                    *t = dst.clone();
+                                }
+                            }
+                            let was_open = self.browse.open_path.as_ref() == Some(&path);
+                            if self.browse.selected_path.as_ref() == Some(&path) {
+                                self.browse.selected_path = Some(dst.clone());
+                            }
+                            self.refresh(cx);
+                            if was_open {
+                                self.open_file(dst, cx);
+                            }
                         }
-                    }
-                    let was_open = self.open_path.as_ref() == Some(&path);
-                    if self.selected_path.as_ref() == Some(&path) {
-                        self.selected_path = Some(dst.clone());
-                    }
-                    self.refresh();
-                    if was_open {
-                        self.open_file(dst, cx);
+                        Err(e) => self.fail("Renaming", e),
                     }
                 }
             }
@@ -285,17 +276,21 @@ impl Kyde {
             std::fs::remove_file(&abs)
         };
         if let Err(e) = r {
-            eprintln!("delete {abs:?} failed: {e:#}");
+            // The file is still on disk — surface the error and leave tabs/selection
+            // pointing at it, rather than silently pretending the delete happened.
+            self.fail("Deleting", e);
+            cx.notify();
+            return;
         }
         // Drop any open tab / selection pointing at the deleted path.
-        self.open_tabs.retain(|t| t != &path);
-        if self.open_path.as_ref() == Some(&path) {
-            self.open_path = self.open_tabs.last().cloned();
+        self.browse.open_tabs.retain(|t| t != &path);
+        if self.browse.open_path.as_ref() == Some(&path) {
+            self.browse.open_path = self.browse.open_tabs.last().cloned();
         }
-        if self.selected_path.as_ref() == Some(&path) {
-            self.selected_path = None;
+        if self.browse.selected_path.as_ref() == Some(&path) {
+            self.browse.selected_path = None;
         }
-        self.refresh();
+        self.refresh(cx);
         cx.notify();
     }
 
@@ -346,7 +341,7 @@ impl Kyde {
         if self.mode != Mode::Browse {
             return;
         }
-        if let Some(path) = self.selected_path.clone() {
+        if let Some(path) = self.browse.selected_path.clone() {
             self.open_delete(path, cx);
         }
     }
@@ -367,11 +362,11 @@ impl Kyde {
         };
         match scratch::create(&root, ext) {
             Ok(path) => {
-                self.refresh();
+                self.refresh(cx);
                 self.mode = Mode::Browse;
                 self.open_file(path, cx);
             }
-            Err(e) => eprintln!("scratch create failed: {e:#}"),
+            Err(e) => self.fail("Creating scratch file", e),
         }
         cx.notify();
     }

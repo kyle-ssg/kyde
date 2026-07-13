@@ -98,7 +98,7 @@ impl Kyde {
                 d.child(self.render_crash_banner(ui, cx))
             });
 
-        if self.onboarding_open {
+        if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
         root.into_any_element()
@@ -302,7 +302,7 @@ impl Kyde {
             .when(self.pending_crash.is_some(), |d| {
                 d.child(self.render_crash_banner(ui, cx))
             });
-        if self.onboarding_open {
+        if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
         root.into_any_element()
@@ -480,11 +480,11 @@ impl Kyde {
                 root,
                 crate::ProjectSession {
                     mode: self.mode,
-                    open_path: self.open_path.clone(),
-                    open_tabs: self.open_tabs.clone(),
-                    preview_tab: self.preview_tab.clone(),
+                    open_path: self.browse.open_path.clone(),
+                    open_tabs: self.browse.open_tabs.clone(),
+                    preview_tab: self.browse.preview_tab.clone(),
                     selected: self.selected,
-                    expanded: self.expanded.clone(),
+                    expanded: self.browse.expanded.clone(),
                 },
             );
         }
@@ -496,29 +496,29 @@ impl Kyde {
         self.repo_root = Some(path.clone());
         if let Some(s) = self.project_sessions.remove(&path) {
             self.mode = s.mode;
-            self.expanded = s.expanded;
-            self.open_tabs = s.open_tabs;
-            self.preview_tab = s.preview_tab;
+            self.browse.expanded = s.expanded;
+            self.browse.open_tabs = s.open_tabs;
+            self.browse.preview_tab = s.preview_tab;
             self.selected = s.selected;
-            self.refresh();
+            self.refresh(cx);
             // Reload the file that was open into the editor; else leave it empty.
             // Restore as permanent — `open_file` would clear the preview slot, so save it
             // first and put it back (the restored active file may itself be the preview).
-            let preview = self.preview_tab.clone();
+            let preview = self.browse.preview_tab.clone();
             match s.open_path {
                 Some(p) => self.open_file(p, cx),
-                None => self.open_path = None,
+                None => self.browse.open_path = None,
             }
-            self.preview_tab = preview;
+            self.browse.preview_tab = preview;
         } else {
             self.mode = Mode::Browse; // open into the code view, not git
-            self.open_path = None;
-            self.open_tabs.clear();
-            self.preview_tab = None;
+            self.browse.open_path = None;
+            self.browse.open_tabs.clear();
+            self.browse.preview_tab = None;
             self.selected = None;
-            self.expanded.clear();
-            self.expanded.insert(PathBuf::new()); // root folder visible by default
-            self.refresh();
+            self.browse.expanded.clear();
+            self.browse.expanded.insert(PathBuf::new()); // root folder visible by default
+            self.refresh(cx);
         }
     }
 
@@ -538,9 +538,9 @@ impl Kyde {
         if self.open_projects.is_empty() {
             // Back to the landing view.
             self.repo_root = None;
-            self.open_path = None;
-            self.open_tabs.clear();
-            self.preview_tab = None;
+            self.browse.open_path = None;
+            self.browse.open_tabs.clear();
+            self.browse.preview_tab = None;
             self.selected = None;
         } else {
             // Prefer the tab that shifted into this slot, else the previous one.

@@ -12,34 +12,18 @@ pub struct Recents {
 }
 
 impl Recents {
-    fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
-            |_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".config")
-            },
-            PathBuf::from,
-        );
-        base.join("kyde").join("projects.json")
-    }
+    /// Config file name under the XDG config dir.
+    const FILE: &'static str = "projects.json";
 
     /// Load the recent-projects list from `projects.json` (missing/invalid → empty).
+    #[must_use]
     pub fn load() -> Self {
-        std::fs::read_to_string(Self::config_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        crate::store::load_or_default(Self::FILE)
     }
 
     /// Persist the recent-projects list to `projects.json` (best-effort).
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
+        crate::store::save(Self::FILE, self);
     }
 
     /// Move `path` to the front (most recent), de-duplicating.

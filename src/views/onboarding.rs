@@ -14,7 +14,7 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let preset_card = |preset: Preset, cx: &mut Context<Self>| {
-            let selected = self.onboarding_choice == preset;
+            let selected = self.onboarding.choice == preset;
             let sample: Vec<gpui::AnyElement> = keymap::ACTIONS
                 .iter()
                 .map(|a| {
@@ -71,7 +71,7 @@ impl Kyde {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| {
-                        this.onboarding_choice = preset;
+                        this.onboarding.choice = preset;
                         cx.notify();
                     }),
                 )
@@ -99,7 +99,7 @@ impl Kyde {
             .child(
                 div()
                     .text_color(theme::get().line_number)
-                    .child(if self.onboarding_forced {
+                    .child(if self.onboarding.forced {
                         "Pick a keymap and theme to get started. You can change these any time in Kyde → Settings (⌘,)."
                     } else {
                         "Change your keymap, theme and more any time in Kyde → Settings (⌘,)."
@@ -132,14 +132,14 @@ impl Kyde {
                             cx.listener(|this, _e, _w, cx| {
                                 // Apply the shell-command checkbox before closing: only
                                 // when ticked and a name is actually free to claim.
-                                if this.onboarding_install_cmd
+                                if this.onboarding.install_cmd
                                     && matches!(shellcmd::state(), shellcmd::State::Available(_))
                                 {
                                     if let Err(e) = shellcmd::install() {
-                                        this.shell_cmd_error = Some(e);
+                                        this.onboarding.shell_cmd_error = Some(e);
                                     }
                                 }
-                                let choice = this.onboarding_choice;
+                                let choice = this.onboarding.choice;
                                 this.choose_preset(choice, cx);
                             }),
                         ),
@@ -149,7 +149,7 @@ impl Kyde {
         // Clicks inside the panel must not reach the backdrop.
         let panel = panel.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
 
-        overlay(cx, !self.onboarding_forced)
+        overlay(cx, !self.onboarding.forced)
             .child(panel)
             .into_any_element()
     }
@@ -169,7 +169,7 @@ impl Kyde {
         // name → reflects the pending checkbox; taken → off (and locked).
         let (checked, enabled) = match &st {
             shellcmd::State::Installed(_) => (true, false),
-            shellcmd::State::Available(_) => (self.onboarding_install_cmd, true),
+            shellcmd::State::Available(_) => (self.onboarding.install_cmd, true),
             _ => (false, false),
         };
         let label = match &st {
@@ -224,14 +224,14 @@ impl Kyde {
             row = row.cursor_pointer().on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
-                    this.onboarding_install_cmd = !this.onboarding_install_cmd;
+                    this.onboarding.install_cmd = !this.onboarding.install_cmd;
                     cx.notify();
                 }),
             );
         }
 
         let mut col = div().flex().flex_col().gap_1().child(row);
-        if let Some(err) = &self.shell_cmd_error {
+        if let Some(err) = &self.onboarding.shell_cmd_error {
             col = col.child(
                 div()
                     .text_color(t.status_deleted)
@@ -253,8 +253,8 @@ impl Kyde {
         self.keymap.set_preset(preset);
         self.keymap.save();
         apply_keymap(cx, &self.keymap);
-        self.onboarding_open = false;
-        self.onboarding_forced = false;
+        self.onboarding.open = false;
+        self.onboarding.forced = false;
         cx.notify();
     }
 }

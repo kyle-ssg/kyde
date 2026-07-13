@@ -149,40 +149,25 @@ impl Keymap {
     }
 
     // ── persistence ───────────────────────────────────────────────
+    /// Config file name under the XDG config dir.
+    const FILE: &'static str = "keymap.json";
+
     /// Path to `keymap.json` under the XDG config dir.
+    #[must_use]
     pub fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
-            |_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".config")
-            },
-            PathBuf::from,
-        );
-        base.join("kyde").join("keymap.json")
+        crate::store::config_path(Self::FILE)
     }
 
     /// Load from disk. Returns (keymap, `first_run`) — `first_run` is true when no
-    /// config existed yet (used to trigger onboarding).
+    /// usable config existed yet (used to trigger onboarding).
+    #[must_use]
     pub fn load() -> (Self, bool) {
-        let path = Self::config_path();
-        match std::fs::read_to_string(&path) {
-            Ok(s) => match serde_json::from_str::<Keymap>(&s) {
-                Ok(km) => (km, false),
-                Err(_) => (Keymap::default(), true),
-            },
-            Err(_) => (Keymap::default(), true),
-        }
+        crate::store::load_reporting_missing(Self::FILE)
     }
 
     /// Persist the keymap to `keymap.json` (best-effort).
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        crate::store::save(Self::FILE, self);
     }
 }
 

@@ -2,7 +2,7 @@
 //! Crate-root child module.
 
 use crate::{
-    badge_inner, btn_primary_state, btn_secondary, div, file_badge, px, status_color, theme,
+    badge_inner, btn_primary_state, btn_secondary, div, file_badge, px, status_color, theme, ui,
     Context, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde, MenuTarget,
     ModalKind, Mode, MouseButton, ParentElement, Repo, SharedString, StatefulInteractiveElement,
     Styled,
@@ -17,13 +17,14 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let n = self.push_files.len();
+        let n = self.sync.push_files.len();
         let rows: Vec<gpui::AnyElement> = self
+            .sync
             .push_files
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                let selected = self.push_selected == Some(i);
+                let selected = self.sync.push_selected == Some(i);
                 let name: SharedString = f
                     .path
                     .file_name()
@@ -39,8 +40,7 @@ impl Kyde {
                     .filter(|s| !s.is_empty());
                 let name_color = status_color(f.status);
                 let path = f.path.clone();
-                div()
-                    .id(("push-file", i))
+                ui::picker::row(("push-file", i), selected, t.bg_mid)
                     .flex()
                     .flex_row()
                     .items_center()
@@ -48,10 +48,6 @@ impl Kyde {
                     .mx(px(6.0))
                     .px_2()
                     .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(t.selected_bg))
-                    .when(!selected, |d| d.hover(|s| s.bg(t.bg_mid)))
                     .child(div().flex_none().child(badge_inner(file_badge(&path), 2.0)))
                     .child(div().flex_none().text_color(name_color).child(name))
                     .when_some(dir, |d, dir| {
@@ -122,7 +118,7 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let pushing = self.pushing;
+        let pushing = self.sync.pushing;
         let push_btn =
             btn_primary_state("push", if pushing { "Pushing…" } else { "Push" }, pushing)
                 .py_2()
@@ -148,7 +144,7 @@ impl Kyde {
             .flex()
             .flex_col()
             .gap(px(theme::FRAME_GAP))
-            .w(px(self.tree_width))
+            .w(px(self.browse.tree_width))
             .flex_none()
             .h_full()
             .child(list_island)
@@ -162,10 +158,11 @@ impl Kyde {
     pub(crate) fn render_push_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
-        let n = self.push_files.len();
+        let n = self.sync.push_files.len();
         // Flat file list, styled like the commit/rollback rows (badge + name + status
         // color), right-click → "View Diff". No checkboxes — a push is all-or-nothing.
         let rows: Vec<gpui::AnyElement> = self
+            .sync
             .push_files
             .iter()
             .enumerate()
@@ -239,15 +236,7 @@ impl Kyde {
             )
             .children(rows);
 
-        let footer = div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(t.divider)
+        let footer = ui::window_footer()
             .child(
                 btn_secondary("push-cancel", "Cancel")
                     .py_1p5()
@@ -261,8 +250,12 @@ impl Kyde {
             .child(
                 btn_primary_state(
                     "push",
-                    if self.pushing { "Pushing…" } else { "Push" },
-                    self.pushing,
+                    if self.sync.pushing {
+                        "Pushing…"
+                    } else {
+                        "Push"
+                    },
+                    self.sync.pushing,
                 )
                 .py_1p5()
                 .on_mouse_down(
@@ -296,10 +289,10 @@ impl Kyde {
     pub(crate) fn open_push_modal(&mut self, cx: &mut Context<Self>) {
         self.context_menu = None;
         if let Some(repo) = self.repo() {
-            self.push_base = repo.push_base();
-            self.push_files = repo.push_files();
+            self.sync.push_base = repo.push_base();
+            self.sync.push_files = repo.push_files();
         } else {
-            self.push_files.clear();
+            self.sync.push_files.clear();
         }
         self.open_modal_window(ModalKind::Push, "Push", 520.0, 560.0, cx);
         cx.notify();
@@ -315,7 +308,7 @@ impl Kyde {
         match tab {
             GitTab::Commit => {
                 // Switching onto the Commit tab focuses the message box, same as entering it.
-                self.focus_commit_msg = true;
+                self.commit.focus_msg = true;
                 if self.files.is_empty() {
                     self.clear_diff_panes(cx);
                 } else {
@@ -324,13 +317,14 @@ impl Kyde {
                 }
             }
             GitTab::Push => {
-                if self.push_files.is_empty() {
-                    self.push_selected = None;
+                if self.sync.push_files.is_empty() {
+                    self.sync.push_selected = None;
                     self.clear_diff_panes(cx);
                 } else {
                     let i = self
+                        .sync
                         .push_selected
-                        .filter(|&i| i < self.push_files.len())
+                        .filter(|&i| i < self.sync.push_files.len())
                         .unwrap_or(0);
                     self.select_push_file(i, cx);
                 }
@@ -347,8 +341,12 @@ impl Kyde {
             return;
         }
         let want = match self.git_tab {
-            GitTab::Commit if self.files.is_empty() && !self.push_files.is_empty() => GitTab::Push,
-            GitTab::Push if self.push_files.is_empty() && !self.files.is_empty() => GitTab::Commit,
+            GitTab::Commit if self.files.is_empty() && !self.sync.push_files.is_empty() => {
+                GitTab::Push
+            }
+            GitTab::Push if self.sync.push_files.is_empty() && !self.files.is_empty() => {
+                GitTab::Commit
+            }
             _ => return,
         };
         self.set_git_tab(want, cx);
@@ -357,13 +355,13 @@ impl Kyde {
     /// Select a file in the Push tab → load its committed change (`push_base` vs HEAD)
     /// read-only into the diff panes (no working-tree edit, so no revert chevrons/autosave).
     pub(crate) fn select_push_file(&mut self, idx: usize, cx: &mut Context<Self>) {
-        self.push_selected = Some(idx);
-        let Some(file) = self.push_files.get(idx).cloned() else {
+        self.sync.push_selected = Some(idx);
+        let Some(file) = self.sync.push_files.get(idx).cloned() else {
             return;
         };
         let Some(repo) = self.repo() else { return };
         let before = repo
-            .committed_content(&self.push_base, &file.path)
+            .committed_content(&self.sync.push_base, &file.path)
             .unwrap_or_default();
         let after = repo
             .committed_content("HEAD", &file.path)
@@ -378,12 +376,12 @@ impl Kyde {
     /// gutter revert chevrons or autosave.
     pub(crate) fn push_show_diff(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.context_menu = None;
-        let Some(file) = self.push_files.get(idx).cloned() else {
+        let Some(file) = self.sync.push_files.get(idx).cloned() else {
             return;
         };
         let Some(repo) = self.repo() else { return };
         let before = repo
-            .committed_content(&self.push_base, &file.path)
+            .committed_content(&self.sync.push_base, &file.path)
             .unwrap_or_default();
         let after = repo
             .committed_content("HEAD", &file.path)
@@ -403,14 +401,14 @@ impl Kyde {
     /// not block the UI), then refresh status and the ahead-count badge.
     pub(crate) fn do_push(&mut self, cx: &mut Context<Self>) {
         self.close_modal_window(ModalKind::Push, cx);
-        if self.pushing {
+        if self.sync.pushing {
             return;
         }
         let Some(root) = self.repo_root.clone() else {
             return;
         };
-        self.pushing = true;
-        self.push_msg = None;
+        self.sync.pushing = true;
+        self.sync.push_msg = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -418,14 +416,15 @@ impl Kyde {
                 .spawn(async move { Repo::discover(&root).and_then(|r| r.push_rebasing()) })
                 .await;
             this.update(cx, |this, cx| {
-                this.pushing = false;
+                this.sync.pushing = false;
                 let err = result.err().map(|e| e.to_string());
-                this.push_msg = err.clone();
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
+                this.sync.push_msg = err.clone();
+                // Stash before refresh: the async status read clears `op_error` on success,
+                // so a direct set would be wiped (see `pending_error`).
                 if let Some(m) = err {
-                    this.op_error = Some(format!("Push failed: {m}"));
+                    this.pending_error = Some(format!("Push failed: {m}"));
                 }
+                this.refresh(cx);
                 // Pushed → the Push tab may be empty now; flip to Commit if it has work.
                 this.normalize_git_tab(cx);
                 cx.notify();

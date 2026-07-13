@@ -13,7 +13,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let commit_n = self.files.len();
-        let push_n = self.push_files.len();
+        let push_n = self.sync.push_files.len();
         // Nothing to commit AND nothing to push → a single centered message.
         if commit_n == 0 && push_n == 0 {
             return div()
@@ -42,13 +42,13 @@ impl Kyde {
         let tabs = self.render_git_tabs(active, cx);
         // The Commit tab's files panel can be minimised to a thin strip (the `−` button in its
         // header), handing the full width to the side-by-side diff.
-        let collapsed = active == GitTab::Commit && self.commit_collapsed;
+        let collapsed = active == GitTab::Commit && self.commit.collapsed;
         // Auto-focus the commit-message box when the Commit view opens (deferred so the input
         // element is in the tree first). Only when its tab is active and not collapsed — the
         // box isn't rendered otherwise.
-        if self.focus_commit_msg && active == GitTab::Commit && !collapsed {
-            self.focus_commit_msg = false;
-            let handle = self.commit_editor.read(cx).focus_handle.clone();
+        if self.commit.focus_msg && active == GitTab::Commit && !collapsed {
+            self.commit.focus_msg = false;
+            let handle = self.commit.editor.read(cx).focus_handle.clone();
             window.focus(&handle);
             window.defer(cx, move |window, _cx| window.focus(&handle));
         }
@@ -101,7 +101,7 @@ impl Kyde {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, _e, _w, cx| {
-                                    this.commit_collapsed = false;
+                                    this.commit.collapsed = false;
                                     cx.notify();
                                 }),
                             ),
@@ -157,12 +157,12 @@ impl Kyde {
                 ),
             );
         }
-        if !self.push_files.is_empty() {
+        if !self.sync.push_files.is_empty() {
             row = row.child(
                 tab_pill(
                     "git-tab-push",
                     "Push",
-                    self.push_files.len(),
+                    self.sync.push_files.len(),
                     active == GitTab::Push,
                 )
                 .on_mouse_down(
@@ -189,15 +189,15 @@ impl Kyde {
             is_dir: true,
             depth: 0,
         }];
-        if self.commit_expanded.contains(&PathBuf::new()) {
-            for mut r in self.commit_tree.visible(&self.commit_expanded) {
+        if self.commit.expanded.contains(&PathBuf::new()) {
+            for mut r in self.commit.tree.visible(&self.commit.expanded) {
                 r.depth += 1;
                 visible.push(r);
             }
         }
         // Filter the changed-files list by the search box: keep the root, files whose path
         // matches, and folders that contain a matching file.
-        let query = self.commit_search.read(cx).text().trim().to_lowercase();
+        let query = self.commit.search.read(cx).text().trim().to_lowercase();
         if !query.is_empty() {
             let files = &self.files;
             visible.retain(|r| {
@@ -217,7 +217,7 @@ impl Kyde {
                 let checked = if r.is_dir {
                     self.folder_all_checked(&r.path)
                 } else {
-                    self.commit_checked.contains(&r.path)
+                    self.commit.checked.contains(&r.path)
                 };
                 let file_idx = (!r.is_dir)
                     .then(|| self.files.iter().position(|f| f.path == r.path))
@@ -235,7 +235,7 @@ impl Kyde {
                         .unwrap_or_default()
                         .into()
                 };
-                let expanded = self.commit_expanded.contains(&r.path);
+                let expanded = self.commit.expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let (p_act, p_check, p_ctx) = (r.path.clone(), r.path.clone(), r.path.clone());
                 ui::tree::item(
@@ -285,7 +285,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
-                    this.commit_collapsed = true;
+                    this.commit.collapsed = true;
                     cx.notify();
                 }),
             );
@@ -298,7 +298,7 @@ impl Kyde {
             .px_2()
             .py_1p5()
             .text_size(px(theme::get().ui_font_size))
-            .child(div().flex_1().min_w_0().child(self.commit_search.clone()))
+            .child(div().flex_1().min_w_0().child(self.commit.search.clone()))
             .child(collapse_btn);
         let search_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
         let file_list = div()
@@ -330,7 +330,7 @@ impl Kyde {
             .flex()
             .flex_col()
             .gap(px(theme::FRAME_GAP))
-            .w(px(self.tree_width))
+            .w(px(self.browse.tree_width))
             .flex_none()
             .h_full()
             .child(list_island)
@@ -358,7 +358,7 @@ impl Kyde {
             );
         // Emphasized primary CTA: standard primary button + taller pad + semibold. While a
         // commit is in flight it's dimmed + labelled "Committing…" (clicks are no-ops).
-        let committing = self.committing;
+        let committing = self.commit.committing;
         let commit_btn = btn_primary_state(
             "commit",
             if committing {
@@ -394,7 +394,7 @@ impl Kyde {
                     .p_2()
                     .bg(t.bg_mid)
                     .rounded_md()
-                    .child(self.commit_editor.clone()),
+                    .child(self.commit.editor.clone()),
             )
             // Cancel + Commit on their own line, right-aligned.
             .child(
@@ -418,25 +418,25 @@ impl Kyde {
     /// plain `refresh`) the editors are left as-is and only `current_diff` updates.
     pub(crate) fn select_with(&mut self, idx: usize, cx: Option<&mut Context<Self>>) {
         self.selected = Some(idx);
-        self.commit_focus.clear(); // a single selection drops any folder-group highlight
+        self.commit.focus.clear(); // a single selection drops any folder-group highlight
         let Some(file) = self.files.get(idx).cloned() else {
             return;
         };
         // Image files preview as an image (like Browse), not a text diff. Clear it for every
         // other selection so a stale preview never lingers.
-        self.diff_image = None;
+        self.diff.image = None;
         if is_image(&file.path) {
-            self.old_spans = Vec::new();
-            self.new_spans = Vec::new();
-            self.current_diff = None;
-            self.diff_path = None; // keep autosave disabled — never write an image pane
-            self.diff_image = Some(file.path.clone()); // set unconditionally — refresh re-selects with cx=None
+            self.diff.old_spans = Vec::new();
+            self.diff.new_spans = Vec::new();
+            self.diff.current = None;
+            self.diff.path = None; // keep autosave disabled — never write an image pane
+            self.diff.image = Some(file.path.clone()); // set unconditionally — refresh re-selects with cx=None
             if let Some(cx) = cx {
                 // Drop any stale text so nothing flashes behind the image.
-                self.diff_left.update(cx, |e, cx| {
+                self.diff.left.update(cx, |e, cx| {
                     e.set_content(String::new(), Lang::PlainText, cx);
                 });
-                self.diff_right.update(cx, |e, cx| {
+                self.diff.right.update(cx, |e, cx| {
                     e.set_content(String::new(), Lang::PlainText, cx);
                 });
             }
@@ -453,15 +453,17 @@ impl Kyde {
                 // string through the diff (it would render as "all deleted" and, worse,
                 // the right pane's autosave would truncate the file to empty).
                 let Ok(a) = repo.working_content(&file.path) else {
-                    self.old_spans = Vec::new();
-                    self.new_spans = Vec::new();
-                    self.current_diff = None;
+                    self.diff.old_spans = Vec::new();
+                    self.diff.new_spans = Vec::new();
+                    self.diff.current = None;
                     if let Some(cx) = cx {
-                        self.diff_path = None; // disables diff_autosave for this file
+                        self.diff.path = None; // disables diff_autosave for this file
                         let msg = String::from("Binary or non-text file — no diff.");
-                        self.diff_left
+                        self.diff
+                            .left
                             .update(cx, |e, cx| e.set_content(msg.clone(), Lang::PlainText, cx));
-                        self.diff_right
+                        self.diff
+                            .right
                             .update(cx, |e, cx| e.set_content(msg, Lang::PlainText, cx));
                     }
                     return;
@@ -474,9 +476,9 @@ impl Kyde {
                 // No context (e.g. during a plain `refresh`): update only the diff model,
                 // leaving the editor entities as-is.
                 None => {
-                    self.old_spans = highlight::highlight(&before, lang);
-                    self.new_spans = highlight::highlight(&after, lang);
-                    self.current_diff = Some(FileDiff::compute(&before, &after));
+                    self.diff.old_spans = highlight::highlight(&before, lang);
+                    self.diff.new_spans = highlight::highlight(&after, lang);
+                    self.diff.current = Some(FileDiff::compute(&before, &after));
                 }
                 // With a context, load both panes (editable working diff: right unlocked).
                 Some(cx) => {
@@ -509,20 +511,20 @@ impl Kyde {
     /// (dropping files that are no longer changed).
     pub(crate) fn rebuild_commit_view(&mut self, check_all: bool) {
         let paths: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
-        self.commit_tree = tree::Tree::build(&paths);
+        self.commit.tree = tree::Tree::build(&paths);
         // Expand the whole tree (root + every ancestor dir) so all changes are visible.
-        self.commit_expanded.clear();
-        self.commit_expanded.insert(PathBuf::new());
+        self.commit.expanded.clear();
+        self.commit.expanded.insert(PathBuf::new());
         for p in &paths {
             for anc in p.ancestors().skip(1) {
-                self.commit_expanded.insert(anc.to_path_buf());
+                self.commit.expanded.insert(anc.to_path_buf());
             }
         }
         if check_all {
-            self.commit_checked = paths.into_iter().collect();
+            self.commit.checked = paths.into_iter().collect();
         } else {
             let live: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
-            self.commit_checked.retain(|p| live.contains(p));
+            self.commit.checked.retain(|p| live.contains(p));
         }
     }
 
@@ -533,7 +535,7 @@ impl Kyde {
             && desc.iter().all(|&i| {
                 self.files
                     .get(i)
-                    .is_some_and(|f| self.commit_checked.contains(&f.path))
+                    .is_some_and(|f| self.commit.checked.contains(&f.path))
             })
     }
 
@@ -555,20 +557,20 @@ impl Kyde {
                 .collect();
             for p in descendants {
                 if want {
-                    self.commit_checked.insert(p);
+                    self.commit.checked.insert(p);
                 } else {
-                    self.commit_checked.remove(&p);
+                    self.commit.checked.remove(&p);
                 }
             }
-        } else if !self.commit_checked.remove(&path) {
-            self.commit_checked.insert(path);
+        } else if !self.commit.checked.remove(&path) {
+            self.commit.checked.insert(path);
         }
         cx.notify();
     }
 
     pub(crate) fn toggle_commit_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if !self.commit_expanded.remove(&dir) {
-            self.commit_expanded.insert(dir);
+        if !self.commit.expanded.remove(&dir) {
+            self.commit.expanded.insert(dir);
         }
         cx.notify();
     }
@@ -595,11 +597,11 @@ impl Kyde {
             .filter_map(|&i| self.files.get(i))
             .map(|f| f.path.clone())
             .collect();
-        self.commit_focus = group.clone();
+        self.commit.focus = group.clone();
         // Tick exactly the right-clicked path's changes — "Commit this folder/file" means those
         // files are the ones staged for the commit (otherwise the view opens with nothing
         // checked and the Commit button does nothing).
-        self.commit_checked = group;
+        self.commit.checked = group;
         cx.notify();
     }
 
@@ -612,11 +614,11 @@ impl Kyde {
     }
 
     pub(crate) fn commit_now(&mut self, cx: &mut Context<Self>) {
-        if self.committing {
+        if self.commit.committing {
             return;
         }
-        let msg = self.commit_editor.read(cx).text().trim().to_string();
-        if msg.is_empty() || self.commit_checked.is_empty() {
+        let msg = self.commit.editor.read(cx).text().trim().to_string();
+        if msg.is_empty() || self.commit.checked.is_empty() {
             return;
         }
         let Some(root) = self.repo_root.clone() else {
@@ -624,9 +626,9 @@ impl Kyde {
         };
         // Snapshot what to stage vs unstage so the actual git work runs off the UI thread
         // (staging + commit shell out per file — keep the button responsive + show feedback).
-        let checked: Vec<PathBuf> = self.commit_checked.iter().cloned().collect();
+        let checked: Vec<PathBuf> = self.commit.checked.iter().cloned().collect();
         let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
-        self.committing = true;
+        self.commit.committing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -644,13 +646,13 @@ impl Kyde {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.committing = false;
+                this.commit.committing = false;
                 match result {
                     Ok(()) => {
-                        this.commit_editor.update(cx, |e, cx| {
+                        this.commit.editor.update(cx, |e, cx| {
                             e.set_content(String::new(), Lang::PlainText, cx);
                         });
-                        this.refresh();
+                        this.refresh(cx);
                         // Tab may be empty now → flip to Push if it has work.
                         this.normalize_git_tab(cx);
                     }
@@ -685,15 +687,15 @@ impl Kyde {
         self.diff_view_open = false;
         // Drop the caret into the commit-message box on the next frame (render_commit consumes
         // this once the input element is in the tree).
-        self.focus_commit_msg = true;
+        self.commit.focus_msg = true;
         if let Some(repo) = self.repo() {
             self.files = repo.status().unwrap_or_default();
-            self.push_base = repo.push_base();
-            self.push_files = repo.push_files();
+            self.sync.push_base = repo.push_base();
+            self.sync.push_files = repo.push_files();
         }
         // Default to the tab that has work: Push if there's nothing to commit but commits
         // are waiting to be pushed; Commit otherwise.
-        self.git_tab = if self.files.is_empty() && !self.push_files.is_empty() {
+        self.git_tab = if self.files.is_empty() && !self.sync.push_files.is_empty() {
             GitTab::Push
         } else {
             GitTab::Commit
@@ -708,6 +710,7 @@ impl Kyde {
         self.rebuild_commit_view(true);
         // Prefer the currently-open file, else the prior selection, else the first change.
         let idx = self
+            .browse
             .open_path
             .as_ref()
             .and_then(|p| self.files.iter().position(|f| &f.path == p))
@@ -720,11 +723,11 @@ impl Kyde {
             self.select_with(i, Some(cx));
         } else {
             self.selected = None;
-            self.diff_path = None;
-            self.diff_left.update(cx, |e, cx| {
+            self.diff.path = None;
+            self.diff.left.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
-            self.diff_right.update(cx, |e, cx| {
+            self.diff.right.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
         }

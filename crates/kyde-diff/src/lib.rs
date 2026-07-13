@@ -127,7 +127,9 @@ impl FileDiff {
                 new_lo..new_lo
             };
 
-            let (ow, nw) = if kind == HunkKind::Modified {
+            let (ow, nw) = if kind == HunkKind::Modified
+                && !word_diff_too_large(&old[old_range.clone()], &new[new_range.clone()])
+            {
                 word_ranges(
                     &old[old_range.clone()],
                     &new[new_range.clone()],
@@ -153,6 +155,27 @@ impl FileDiff {
 
 /// `(line_idx, byte_range)` pairs for one diff side's word-level highlights.
 type WordRanges = Vec<(usize, Range<usize>)>;
+
+/// Upper bound on the total lines (old + new) in a modified region before we skip the
+/// inline word-diff. A lockfile / generated-code edit can change thousands of lines at
+/// once; word-tokenizing them all is quadratic-ish and pointless (nobody scans per-word
+/// highlights over a 5000-line replacement).
+const MAX_WORD_DIFF_LINES: usize = 400;
+/// Upper bound on any single line's byte length before we skip the inline word-diff.
+/// Minified bundles are a single multi-hundred-KB line; joining + tokenizing that blows
+/// memory and stalls the per-select diff for no useful highlight.
+const MAX_WORD_DIFF_LINE_BYTES: usize = 2_000;
+
+/// Whether a modified region is too big for the word-level (inline) diff — see the two
+/// bounds above. When true, `compute` leaves the hunk as a whole-line change with no
+/// per-word ranges, which keeps it responsive on pathological (machine-generated) files.
+fn word_diff_too_large(old_lines: &[String], new_lines: &[String]) -> bool {
+    old_lines.len() + new_lines.len() > MAX_WORD_DIFF_LINES
+        || old_lines
+            .iter()
+            .chain(new_lines)
+            .any(|l| l.len() > MAX_WORD_DIFF_LINE_BYTES)
+}
 
 /// Re-diff changed regions word-by-word; return (`line_idx`, `byte_range`) to highlight.
 fn word_ranges(
@@ -281,6 +304,45 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(2),
             "FileDiff::compute on 4000 lines took {elapsed:?} (budget 2s) — perf regression?"
+        );
+    }
+
+    /// Hostile-input guard for the word-diff cap (see `word_diff_too_large`). The tame
+    /// perf test above never exercises the pathological shapes that motivated the cap —
+    /// a minified bundle (one enormous line) and a lockfile (thousands of lines changed
+    /// at once). Without the cap, joining + word-tokenizing these stalls; with it, the
+    /// inline pass is skipped and `compute` returns near-instantly.
+    #[test]
+    fn perf_hostile_word_diff_is_capped() {
+        // Minified-file edit: a single ~500 KB line, one char changed.
+        let before = format!("{}\n", "x".repeat(500_000));
+        let after = format!("{}Y\n", "x".repeat(499_999));
+        let start = std::time::Instant::now();
+        let d = FileDiff::compute(&before, &after);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "hostile single-line word-diff exceeded budget — cap not applied?"
+        );
+        assert_eq!(d.hunks.len(), 1);
+        assert!(
+            d.hunks[0].new_word_ranges.is_empty(),
+            "an over-long line must skip the inline word-diff"
+        );
+
+        // Lockfile-style edit: thousands of lines replaced at once.
+        let many_before: String = (0..5000).map(|i| format!("a{i}\n")).collect();
+        let many_after: String = (0..5000).map(|i| format!("b{i}\n")).collect();
+        let start = std::time::Instant::now();
+        let d = FileDiff::compute(&many_before, &many_after);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "hostile many-line word-diff exceeded budget — cap not applied?"
+        );
+        assert!(
+            d.hunks
+                .iter()
+                .all(|h| h.old_word_ranges.is_empty() && h.new_word_ranges.is_empty()),
+            "a huge modified region must skip the inline word-diff"
         );
     }
 }

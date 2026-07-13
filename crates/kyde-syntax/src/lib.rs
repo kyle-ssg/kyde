@@ -48,8 +48,7 @@ const CAPTURES: &[&str] = &[
     "namespace",
 ];
 
-fn capture_color(name: &str) -> kyde_color::Color {
-    let t = theme::get();
+fn capture_color(t: &theme::Theme, name: &str) -> kyde_color::Color {
     match name {
         "keyword" | "charset" | "import" | "keyframes" | "media" | "supports" | "namespace" => {
             t.syn_keyword
@@ -590,13 +589,16 @@ fn lines_with_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
 
 /// .gitignore: comment lines (`# …`) gray; everything else default.
 fn highlight_gitignore(source: &str) -> Vec<Span> {
+    // Resolve the theme once, not per line (`theme::get()` is an RwLock read + Theme copy,
+    // and this runs on every keystroke) — same hoist as `highlight`/`highlight_env`.
+    let t = theme::get();
     let mut spans = Vec::new();
     for (start, line) in lines_with_offsets(source) {
         if line.trim_start().starts_with('#') {
             spans.push(Span {
                 start,
                 end: start + line.len(),
-                color: theme::get().syn_comment,
+                color: t.syn_comment,
             });
         }
     }
@@ -659,6 +661,9 @@ pub fn highlight(source: &str, lang: Lang) -> Vec<Span> {
         return spans;
     };
 
+    // Resolve the theme once, not per token: `theme::get()` takes an `RwLock` read and
+    // copies the whole `Theme`, and this loop runs per source token on every keystroke.
+    let t = theme::get();
     let mut stack: Vec<usize> = Vec::new();
     for ev in events.flatten() {
         match ev {
@@ -668,8 +673,8 @@ pub fn highlight(source: &str, lang: Lang) -> Vec<Span> {
             }
             HighlightEvent::Source { start, end } => {
                 let color = match stack.last() {
-                    Some(&idx) => capture_color(CAPTURES[idx]),
-                    None => theme::get().text,
+                    Some(&idx) => capture_color(&t, CAPTURES[idx]),
+                    None => t.text,
                 };
                 spans.push(Span { start, end, color });
             }

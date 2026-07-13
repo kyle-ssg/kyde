@@ -20,7 +20,7 @@ impl Render for Kyde {
             if self.recents.paths.is_empty() {
                 window.request_animation_frame();
                 self.welcome_frame = self.welcome_frame.wrapping_add(1);
-            } else if !self.projects_search_focused && !self.onboarding_open {
+            } else if !self.projects_search_focused && !self.onboarding.open {
                 // Auto-focus the search box the first time the landing list appears.
                 self.projects_search_focused = true;
                 let handle = self.project_search.read(cx).focus_handle.clone();
@@ -34,9 +34,9 @@ impl Render for Kyde {
         // A terminal tab closed last frame (^D / × on the focused tab) → focus the new active
         // tab now that it's in the window tree, so typing works without a mouse click.
         #[cfg(feature = "terminal")]
-        if self.term_panel.focus_pending {
-            self.term_panel.focus_pending = false;
-            if self.term_panel.open {
+        if self.term.panel.focus_pending {
+            self.term.panel.focus_pending = false;
+            if self.term.panel.open {
                 self.focus_active_terminal(window, cx);
             } else {
                 // Last tab closed → panel hid; return focus to the app root so editor/tree
@@ -47,29 +47,30 @@ impl Render for Kyde {
 
         // FPS monitor: drive a continuous repaint so the number reflects the real frame cost
         // (catches drops), and measure the gap between renders.
-        if self.show_fps {
+        if self.fps.show {
             window.request_animation_frame();
             let now = std::time::Instant::now();
-            if let Some(last) = self.fps_last {
+            if let Some(last) = self.fps.last {
                 let dt = now.duration_since(last).as_secs_f32();
                 if dt > 0.0 {
                     let inst = 1.0 / dt;
-                    self.fps_value = if self.fps_value <= 0.0 {
+                    self.fps.value = if self.fps.value <= 0.0 {
                         inst
                     } else {
-                        self.fps_value * 0.8 + inst * 0.2
+                        self.fps.value * 0.8 + inst * 0.2
                     };
                 }
             }
-            self.fps_last = Some(now);
-            // The overlay reads `fps_shown`, snapshotted from the live EMA on a ~5/sec throttle
+            self.fps.last = Some(now);
+            // The overlay reads `fps.shown`, snapshotted from the live EMA on a ~5/sec throttle
             // so the number is readable rather than blurring every frame.
             let due = self
-                .fps_file_last
+                .fps
+                .file_last
                 .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 0.2);
             if due {
-                self.fps_shown = self.fps_value;
-                self.fps_file_last = Some(now);
+                self.fps.shown = self.fps.value;
+                self.fps.file_last = Some(now);
             }
         }
 
@@ -176,7 +177,7 @@ impl Render for Kyde {
         #[cfg(feature = "terminal")]
         let rail = if self.repo_root.is_some() {
             let t = theme::get();
-            let active = self.term_panel.open;
+            let active = self.term.panel.open;
             rail.child(div().flex_1().min_h_0()).child(
                 div()
                     .id("rail-terminal")
@@ -243,12 +244,12 @@ impl Render for Kyde {
         // Maximized terminal hides the body (tree + editor) and fills the whole right column.
         #[cfg(feature = "terminal")]
         let term_max =
-            self.term_panel.open && self.repo_root.is_some() && self.term_panel.maximized;
+            self.term.panel.open && self.repo_root.is_some() && self.term.panel.maximized;
         #[cfg(not(feature = "terminal"))]
         let term_max = false;
         let right_col = right_col.when(!term_max, |c| c.child(body));
         #[cfg(feature = "terminal")]
-        let right_col = if self.term_panel.open && self.repo_root.is_some() {
+        let right_col = if self.term.panel.open && self.repo_root.is_some() {
             right_col.child(self.render_terminal_panel(ui, cx))
         } else {
             right_col
@@ -258,7 +259,7 @@ impl Render for Kyde {
         // relative to the body, so an update/project-tabs banner can't misalign it.
         let right_col = if self.repo_root.is_some()
             && self.mode == Mode::Browse
-            && !self.open_tabs.is_empty()
+            && !self.browse.open_tabs.is_empty()
         {
             right_col.child(self.render_tab_overflow_button(cx))
         } else {
@@ -391,7 +392,7 @@ impl Render for Kyde {
             })
             .child(self.render_status_bar(ui, cx));
 
-        if self.branch_popup_open {
+        if self.branch.popup_open {
             root = root.child(self.render_branch_popup(ui, fs, cx));
         }
         // Rollback / Push / Diff are now separate native windows (`ModalWindow`), not overlays.
@@ -401,10 +402,10 @@ impl Render for Kyde {
         if self.name_prompt.is_some() {
             root = root.child(self.render_name_prompt(ui, cx));
         }
-        if self.finder_open {
+        if self.finder.open {
             root = root.child(self.render_finder(ui, fs, cx));
         }
-        if self.onboarding_open {
+        if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
         // Rollback/Push file menus belong to their own modal windows (rendered in those
@@ -413,7 +414,7 @@ impl Render for Kyde {
         {
             root = root.child(self.render_context_menu(cx));
         }
-        if self.show_fps {
+        if self.fps.show {
             let t = theme::get();
             root = root.child(
                 div()
@@ -429,7 +430,7 @@ impl Render for Kyde {
                     .text_color(t.text)
                     .font_family(theme::font::FAMILY)
                     .text_size(px(11.0))
-                    .child(SharedString::from(format!("{:.0} fps", self.fps_shown))),
+                    .child(SharedString::from(format!("{:.0} fps", self.fps.shown))),
             );
         }
         root.into_any_element()
@@ -441,10 +442,10 @@ impl Kyde {
     /// collapsed strip + gap). Used to size the browse editor and the markdown split.
     pub(crate) fn editor_island_w(&self, window: &Window) -> f32 {
         let win_w = f32::from(window.viewport_size().width);
-        let left_chrome = if self.tree_collapsed {
+        let left_chrome = if self.browse.tree_collapsed {
             RAIL_W + theme::FRAME_GAP + 30.0 + theme::FRAME_GAP
         } else {
-            RAIL_W + theme::FRAME_GAP + self.tree_width + theme::FRAME_GAP
+            RAIL_W + theme::FRAME_GAP + self.browse.tree_width + theme::FRAME_GAP
         };
         (win_w - left_chrome).max(100.0)
     }
@@ -679,7 +680,7 @@ impl Kyde {
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
                     ));
-                if self.ahead.unwrap_or(0) > 0 {
+                if self.sync.ahead.unwrap_or(0) > 0 {
                     panel = panel.child(item("Push").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
@@ -746,7 +747,7 @@ impl Kyde {
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
                     ));
-                if self.ahead.unwrap_or(0) > 0 {
+                if self.sync.ahead.unwrap_or(0) > 0 {
                     panel = panel.child(item("Push").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
@@ -765,7 +766,7 @@ impl Kyde {
             }
             MenuTarget::Tab(idx) => {
                 let idx = *idx;
-                let reveal = self.open_tabs.get(idx).cloned();
+                let reveal = self.browse.open_tabs.get(idx).cloned();
                 panel
                     .child(item("Close").on_mouse_down(
                         MouseButton::Left,
@@ -797,7 +798,7 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| this.open_rollback_path(pr.clone(), cx)),
                 ));
-                if self.ahead.unwrap_or(0) > 0 {
+                if self.sync.ahead.unwrap_or(0) > 0 {
                     panel = panel.child(item("Push").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
@@ -820,11 +821,11 @@ impl Kyde {
                 ))
             }
             MenuTarget::TabList => {
-                if self.open_tabs.is_empty() {
+                if self.browse.open_tabs.is_empty() {
                     panel = panel.child(item("No open tabs"));
                 }
-                for (i, p) in self.open_tabs.iter().enumerate() {
-                    let active = self.open_path.as_ref() == Some(p);
+                for (i, p) in self.browse.open_tabs.iter().enumerate() {
+                    let active = self.browse.open_path.as_ref() == Some(p);
                     let name: SharedString = p
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -846,7 +847,7 @@ impl Kyde {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _e, _w, cx| {
-                                    if let Some(p) = this.open_tabs.get(i).cloned() {
+                                    if let Some(p) = this.browse.open_tabs.get(i).cloned() {
                                         this.open_file(p, cx);
                                         this.close_menu(cx);
                                     }
@@ -859,7 +860,7 @@ impl Kyde {
             // Same compare options as the header dropdown, applied to the right-clicked commit.
             MenuTarget::HistoryCompare(idx) => {
                 let idx = *idx;
-                let cur = self.history_compare;
+                let cur = self.history.compare;
                 for mode in CompareMode::ALL {
                     let label = if mode == cur {
                         SharedString::from(format!("✓ {}", mode.label()))
