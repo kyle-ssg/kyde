@@ -401,6 +401,13 @@ impl CodeEditor {
         cx.notify();
     }
 
+    /// The current selection as a byte range (collapsed = caret). Test-only read view
+    /// (the app mutates via `select_range` and never needs to read it back).
+    #[cfg(test)]
+    pub fn selection(&self) -> std::ops::Range<usize> {
+        self.selected_range.clone()
+    }
+
     /// Select a byte range (used by find/replace to highlight the current match).
     pub fn select_range(&mut self, range: std::ops::Range<usize>, cx: &mut Context<Self>) {
         let len = self.content.len();
@@ -1348,7 +1355,15 @@ impl EntityInputHandler for CodeEditor {
                     let c = range.start + new_text.len();
                     c..c
                 },
-                |r| r.start + range.start..r.end + range.end,
+                // The IME's selection is relative to the replaced (marked) region — anchor
+                // BOTH ends at `range.start`. (Anchoring the end at `range.end` overshot by
+                // the old marked text's length on every composition update, walking the
+                // selection past the composed text — and potentially past the buffer.)
+                |r| {
+                    let s = (range.start + r.start).min(self.content.len());
+                    let e = (range.start + r.end).min(self.content.len());
+                    s..e
+                },
             );
         self.dirty = true;
         self.recompute_folds(cx);
