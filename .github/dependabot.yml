@@ -21,3 +21,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # dtolnay/rust-toolchain's tag IS the Rust toolchain version, and ours is pinned to
+      # the MSRV (see rust-version in Cargo.toml) on purpose — a dependabot "bump" would
+      # silently raise the MSRV job's toolchain (and once proposed 1.100.0, which doesn't
+      # even exist → 404). MSRV bumps are deliberate, manual changes.
+      - dependency-name: "dtolnay/rust-toolchain"

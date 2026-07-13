@@ -12,11 +12,11 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let count = self.find_matches.len();
+        let count = self.find.matches.len();
         let label = if count == 0 {
             "No results".to_string()
         } else {
-            format!("{}/{}", self.find_idx + 1, count)
+            format!("{}/{}", self.find.idx + 1, count)
         };
         let input_box = |child: gpui::Entity<CodeEditor>| {
             div()
@@ -51,7 +51,7 @@ impl Kyde {
             .flex_row()
             .items_center()
             .gap_2()
-            .child(input_box(self.find_query.clone()))
+            .child(input_box(self.find.query.clone()))
             .child(
                 div()
                     .flex_none()
@@ -85,13 +85,13 @@ impl Kyde {
             .text_size(px(theme::get().ui_font_size))
             .child(find_row);
 
-        if self.find_replace {
+        if self.find.replace {
             let replace_row = div()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(input_box(self.replace_query.clone()))
+                .child(input_box(self.find.replace_query.clone()))
                 .child(
                     div()
                         .id("replace-one")
@@ -146,10 +146,10 @@ impl Kyde {
 
     /// The editor the find/replace bar currently acts on.
     fn find_ed(&self) -> Entity<CodeEditor> {
-        match self.find_target {
-            crate::FindTarget::File => self.file_editor.clone(),
-            crate::FindTarget::DiffLeft => self.diff_left.clone(),
-            crate::FindTarget::DiffRight => self.diff_right.clone(),
+        match self.find.target {
+            crate::FindTarget::File => self.browse.editor.clone(),
+            crate::FindTarget::DiffLeft => self.diff.left.clone(),
+            crate::FindTarget::DiffRight => self.diff.right.clone(),
         }
     }
 
@@ -157,23 +157,23 @@ impl Kyde {
         // Works in the Browse editor (with a file open) and the Show-Diff view's panes.
         let target = if self.diff_view_open {
             // Default to the working (right) pane; the base (left) pane is read-only.
-            if self.diff_left.read(cx).focus_handle.is_focused(window) {
+            if self.diff.left.read(cx).focus_handle.is_focused(window) {
                 crate::FindTarget::DiffLeft
             } else {
                 crate::FindTarget::DiffRight
             }
-        } else if self.mode == Mode::Browse && self.open_path.is_some() {
+        } else if self.mode == Mode::Browse && self.browse.open_path.is_some() {
             crate::FindTarget::File
         } else {
             return;
         };
-        self.find_target = target;
-        self.find_open = true;
+        self.find.target = target;
+        self.find.open = true;
         // Replace needs an editable target — the diff base pane / committed diffs are read-only,
         // so ⌘R there opens find only.
-        self.find_replace = replace && !self.find_ed().read(cx).read_only;
+        self.find.replace = replace && !self.find_ed().read(cx).read_only;
         self.recompute_find(cx);
-        let handle = self.find_query.read(cx).focus_handle.clone();
+        let handle = self.find.query.read(cx).focus_handle.clone();
         window.focus(&handle);
         window.defer(cx, move |window, _cx| window.focus(&handle));
         cx.notify();
@@ -185,12 +185,12 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.find_open = false;
-        self.find_matches.clear();
+        self.find.open = false;
+        self.find.matches.clear();
         let ed = self.find_ed();
         // Only the file editor's `word_bg` is owned by find — the diff panes use `word_bg` for
         // word-level diff highlighting, so don't clobber it there.
-        if self.find_target == crate::FindTarget::File {
+        if self.find.target == crate::FindTarget::File {
             ed.update(cx, |e, _| e.word_bg.clear());
         }
         let handle = ed.read(cx).focus_handle.clone();
@@ -201,9 +201,9 @@ impl Kyde {
     /// Recompute match ranges for the current query (ASCII case-insensitive) and repaint
     /// the highlights + select the current match.
     pub(crate) fn recompute_find(&mut self, cx: &mut Context<Self>) {
-        let q = self.find_query.read(cx).text().to_string();
+        let q = self.find.query.read(cx).text().to_string();
         let content = self.find_ed().read(cx).text().to_string();
-        self.find_matches.clear();
+        self.find.matches.clear();
         if !q.is_empty() && q.len() <= content.len() {
             // `to_ascii_lowercase` preserves byte length, so positions map 1:1 to `content`.
             let hay = content.to_ascii_lowercase();
@@ -211,12 +211,12 @@ impl Kyde {
             let mut from = 0usize;
             while let Some(pos) = hay[from..].find(&needle) {
                 let s = from + pos;
-                self.find_matches.push(s..s + needle.len());
+                self.find.matches.push(s..s + needle.len());
                 from = s + needle.len();
             }
         }
-        if self.find_idx >= self.find_matches.len() {
-            self.find_idx = 0;
+        if self.find.idx >= self.find.matches.len() {
+            self.find.idx = 0;
         }
         self.apply_find_highlight(cx);
     }
@@ -227,7 +227,7 @@ impl Kyde {
         let content = ed.read(cx).text().to_string();
         let mut map: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>> =
             std::collections::HashMap::new();
-        for r in &self.find_matches {
+        for r in &self.find.matches {
             let line = content[..r.start].bytes().filter(|&b| b == b'\n').count();
             let line_start = content[..r.start].rfind('\n').map_or(0, |i| i + 1);
             let line_end = content[line_start..]
@@ -240,43 +240,43 @@ impl Kyde {
         // The diff panes already use `word_bg` for word-level diff highlighting, so only paint
         // the amber match highlight on the file editor; in the diff the selection marks the
         // match (and find_next/prev navigate).
-        if self.find_target == crate::FindTarget::File {
+        if self.find.target == crate::FindTarget::File {
             ed.update(cx, |e, _| {
                 e.word_bg = map;
                 e.word_bg_color = kyde_color::Color::rgb(0x6E5A1E); // amber search highlight
             });
         }
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
+        if let Some(r) = self.find.matches.get(self.find.idx).cloned() {
             ed.update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
 
     pub(crate) fn find_next(&mut self, _: &FindNext, _w: &mut Window, cx: &mut Context<Self>) {
-        if self.find_matches.is_empty() {
+        if self.find.matches.is_empty() {
             return;
         }
-        self.find_idx = (self.find_idx + 1) % self.find_matches.len();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
+        self.find.idx = (self.find.idx + 1) % self.find.matches.len();
+        if let Some(r) = self.find.matches.get(self.find.idx).cloned() {
             self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
 
     pub(crate) fn find_prev(&mut self, _: &FindPrev, _w: &mut Window, cx: &mut Context<Self>) {
-        if self.find_matches.is_empty() {
+        if self.find.matches.is_empty() {
             return;
         }
-        self.find_idx = (self.find_idx + self.find_matches.len() - 1) % self.find_matches.len();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
+        self.find.idx = (self.find.idx + self.find.matches.len() - 1) % self.find.matches.len();
+        if let Some(r) = self.find.matches.get(self.find.idx).cloned() {
             self.find_ed().update(cx, |e, cx| e.select_range(r, cx));
         }
         cx.notify();
     }
 
     pub(crate) fn replace_one(&mut self, _: &ReplaceOne, _w: &mut Window, cx: &mut Context<Self>) {
-        let rep = self.replace_query.read(cx).text().to_string();
-        if let Some(r) = self.find_matches.get(self.find_idx).cloned() {
+        let rep = self.find.replace_query.read(cx).text().to_string();
+        if let Some(r) = self.find.matches.get(self.find.idx).cloned() {
             self.find_ed()
                 .update(cx, |e, cx| e.replace_range_text(r, &rep, cx));
             // The edit fires autosave + Changed; re-scan against the new content.
@@ -285,9 +285,9 @@ impl Kyde {
     }
 
     pub(crate) fn replace_all(&mut self, _: &ReplaceAll, _w: &mut Window, cx: &mut Context<Self>) {
-        let rep = self.replace_query.read(cx).text().to_string();
+        let rep = self.find.replace_query.read(cx).text().to_string();
         // Replace right-to-left so earlier ranges stay valid.
-        let ranges: Vec<_> = self.find_matches.clone();
+        let ranges: Vec<_> = self.find.matches.clone();
         self.find_ed().update(cx, |e, cx| {
             for r in ranges.into_iter().rev() {
                 e.replace_range_text(r, &rep, cx);

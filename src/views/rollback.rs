@@ -21,8 +21,8 @@ impl Kyde {
             is_dir: true,
             depth: 0,
         }];
-        if self.commit_expanded.contains(&PathBuf::new()) {
-            for mut r in self.commit_tree.visible(&self.commit_expanded) {
+        if self.commit.expanded.contains(&PathBuf::new()) {
+            for mut r in self.commit.tree.visible(&self.commit.expanded) {
                 r.depth += 1;
                 visible.push(r);
             }
@@ -50,7 +50,7 @@ impl Kyde {
                         .unwrap_or_default()
                         .into()
                 };
-                let expanded = self.commit_expanded.contains(&r.path);
+                let expanded = self.commit.expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let (p_act, p_check, p_ctx) = (r.path.clone(), r.path.clone(), r.path.clone());
                 ui::tree::item(
@@ -123,15 +123,7 @@ impl Kyde {
                 }),
             );
 
-        let footer = div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_t_1()
-            .border_color(t.divider)
+        let footer = ui::window_footer()
             .child(
                 btn_secondary("rollback-close", "Close")
                     .py_1p5()
@@ -252,12 +244,15 @@ impl Kyde {
                         }
                     }
                     FileStatus::Added => {
-                        let _ = repo.unstage(&f.path);
-                        if delete_added {
-                            repo.delete_file(&f.path)
-                        } else {
-                            Ok(())
-                        }
+                        // A failed unstage means the file is NOT rolled back (still staged) —
+                        // count it as a failure like any other, don't silently drop it.
+                        repo.unstage(&f.path).and_then(|()| {
+                            if delete_added {
+                                repo.delete_file(&f.path)
+                            } else {
+                                Ok(())
+                            }
+                        })
                     }
                     _ => repo.discard(&f.path),
                 };
@@ -268,16 +263,16 @@ impl Kyde {
             }
         }
         self.close_rollback_window(cx);
-        self.refresh();
-        // Set after refresh — a successful status read clears `op_error`, so this would
-        // otherwise be wiped out the moment it's set.
+        // Stash before refresh — the async status read clears `op_error` on success, so a
+        // direct set would be wiped (see `pending_error`); `apply_snapshot` re-applies it.
         if !failures.is_empty() {
-            self.op_error = Some(format!(
+            self.pending_error = Some(format!(
                 "Rollback failed for {} file(s): {}",
                 failures.len(),
                 failures.join(", ")
             ));
         }
+        self.refresh(cx);
         self.exit_commit_if_clean();
         cx.notify();
     }

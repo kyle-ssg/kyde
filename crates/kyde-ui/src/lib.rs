@@ -7,7 +7,11 @@ mod badge;
 mod button;
 mod checkbox;
 mod color;
+mod footer;
 mod menu;
+/// Shared list-picker mechanics (bounded nav + the selected/hover row pill). Call sites
+/// use the explicit `ui::picker::…`.
+pub mod picker;
 mod scrollbar;
 mod select;
 mod tab;
@@ -18,6 +22,7 @@ pub use badge::*;
 pub use button::*;
 pub use checkbox::*;
 pub use color::*;
+pub use footer::*;
 pub use menu::*;
 pub use scrollbar::*;
 pub use select::*;

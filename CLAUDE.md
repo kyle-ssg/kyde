@@ -91,9 +91,10 @@ kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional 
               feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
 kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (kyde-color, serde) — gpui-free
 kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
-              file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, and the file-tree
-              row `tree::item<V>` (generic over the view). Aliased back as `ui` in main.rs.
-              (gpui, kyde-theme)
+              file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, the file-tree
+              row `tree::item<V>` (generic over the view), and `picker` (bounded nav_up/
+              nav_down + the selected/hover row pill every list picker uses — finder,
+              history, push). Aliased back as `ui` in main.rs. (gpui, kyde-theme)
 kyde-syntax   tree-sitter highlight() + fold_regions(); OWNS every grammar crate behind
               per-pack features. Binary depends with default-features=false and forwards
               its own packs (`rust` → `kyde-syntax/rust`); kyde-syntax's own default is
@@ -477,13 +478,22 @@ Opening a project lands in **Browse (code) view**, not git — `open_project`/`n
 - gpui but **Kyde-agnostic**, its own crate: `kyde-ui` (the reusable toolkit — buttons, badge,
   tree row, …; depends only on gpui + kyde-theme).
 - Plain Rust, still in the binary (small OS utils, not yet crated): `platform/{scratch,
-  shellcmd,clipboard}.rs`.
+  shellcmd}.rs`.
 - gpui UI in the binary: core shell `main.rs`/`app.rs`/`render.rs`/`divider.rs`; the `views/`
   feature modules; the `widgets/` (editor, mdview, terminal, remote_img).
-  Compile on gpui 0.2.2. NEXT (optional, not done): the deeper "best practice" step —
-  decompose the `Kyde` god struct (~80 fields) into feature-owned sub-state / gpui entities so
-  features are encapsulated, not just filed separately. Today every `views/` module still
-  mutates one shared `Kyde`.
+  Compile on gpui 0.2.2.
+- **The `Kyde` god struct is decomposed into feature-owned sub-structs** (all defined at the
+  crate root in `main.rs`, fields reachable from the feature modules like `Kyde`'s own):
+  `BrowseView` (`browse` — tree, tabs, file editor, md split), `CommitView` (`commit`),
+  `DiffPanes` (`diff` — both diff editors + model, shared by commit/history/push/Show-Diff),
+  `HistoryView` (`history`), `BranchPopup` (`branch`), `SyncState` (`sync` — ahead/behind +
+  push/pull/fetch), `Finder` (`finder`), `FindBar` (`find`), `Onboarding`, `Fps`, `TermState`
+  (`term` — control state always compiled, PTY tabs feature-gated inside). Each `new(cx)`
+  constructor owns its editors + subscriptions. `Kyde` keeps only core/shared state (repo
+  root, `files`/`selected` repo status, mode, window handles, drags) — ~60 fields, down from
+  ~120. `refresh` reads a `RepoSnapshot` on a background thread (never git on the UI thread);
+  op-errors raised alongside a refresh go through `fail_pending`/`pending_error`, not
+  `op_error`, so the async status read can't wipe them.
 
 ## Performance regression tests (the speed pitch is the whole point)
 "Lightning fast" is a hard requirement, so the hot paths have **perf-guard unit

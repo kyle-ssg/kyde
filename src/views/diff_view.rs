@@ -19,7 +19,8 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let title: SharedString = self
-            .diff_path
+            .diff
+            .path
             .as_ref()
             .map_or_else(|| "Diff".to_string(), |p| p.to_string_lossy().into_owned())
             .into();
@@ -60,7 +61,7 @@ impl Kyde {
             .min_w_0()
             .child(header);
         // The find/replace bar (⌘F / ⌘R), targeting whichever diff pane is focused.
-        if self.find_open {
+        if self.find.open {
             col = col.child(self.render_find_bar(ui, cx));
         }
         col.child(self.render_diff(ui, fs, Some(window), cx))
@@ -105,7 +106,7 @@ impl Kyde {
         }
 
         // Image file selected → preview it centered + scaled (same as Browse), not a text diff.
-        if let Some(rel) = self.diff_image.clone() {
+        if let Some(rel) = self.diff.image.clone() {
             let abs = self.repo_root.as_ref().map(|r| r.join(&rel)).unwrap_or(rel);
             return island()
                 .id("diff-image-scroll")
@@ -119,9 +120,10 @@ impl Kyde {
         }
 
         let Some(d) = self
-            .current_diff
+            .diff
+            .current
             .as_ref()
-            .filter(|_| self.diff_path.is_some())
+            .filter(|_| self.diff.path.is_some())
         else {
             return island()
                 .flex()
@@ -142,7 +144,7 @@ impl Kyde {
         let total_h = row_h * rows.len() as f32;
         // Read-only diffs (push view) show a committed change with no working-tree edit,
         // so there's nothing to revert — drop the gutter chevrons.
-        let chevrons: Vec<gpui::AnyElement> = if self.diff_readonly {
+        let chevrons: Vec<gpui::AnyElement> = if self.diff.readonly {
             Vec::new()
         } else {
             rows.iter()
@@ -195,9 +197,9 @@ impl Kyde {
         // Pane = shared VERTICAL scroll (`diff_scroll`, keeps the two sides' rows aligned)
         // wrapping an INDEPENDENT horizontal scroll around a content-width editor, so long
         // lines scroll sideways per pane without breaking row alignment.
-        let frac = self.diff_split.clamp(0.15, 0.85);
-        let lw = self.diff_left.read(cx).content_width();
-        let rw = self.diff_right.read(cx).content_width();
+        let frac = self.diff.split.clamp(0.15, 0.85);
+        let lw = self.diff.left.read(cx).content_width();
+        let rw = self.diff.right.read(cx).content_width();
         let pane_scroll =
             |id: &'static str, scroll: &ScrollHandle, w: f32, editor: gpui::AnyElement| {
                 div()
@@ -210,20 +212,20 @@ impl Kyde {
             };
         let left_inner = pane_scroll(
             "diff-left-scroll",
-            &self.diff_scroll,
+            &self.diff.scroll,
             lw,
-            self.diff_left.clone().into_any_element(),
+            self.diff.left.clone().into_any_element(),
         );
         let right_inner = pane_scroll(
             "diff-right-scroll",
-            &self.diff_scroll,
+            &self.diff.scroll,
             rw,
-            self.diff_right.clone().into_any_element(),
+            self.diff.right.clone().into_any_element(),
         );
         // One shared horizontal scrollbar driven by `diff_scroll`; its travel is the wider
         // pane's content. Placed on the island (full width) below.
         let h_bar = self.diff_hscrollbar(
-            &self.diff_scroll.clone(),
+            &self.diff.scroll.clone(),
             lw.max(rw),
             SbView::DiffLeftH,
             window.as_deref_mut(),
@@ -233,8 +235,8 @@ impl Kyde {
         // full-width. A side-by-side with one empty pane is noise — and the empty pane drives
         // the shared scroll handle's bounds to ~0, which blanks the viewport-culled editor on a
         // large file. Full-width, the surviving editor owns the layout and paints normally.
-        let left_empty = self.diff_left.read(cx).text().is_empty();
-        let right_empty = self.diff_right.read(cx).text().is_empty();
+        let left_empty = self.diff.left.read(cx).text().is_empty();
+        let right_empty = self.diff.right.read(cx).text().is_empty();
         if left_empty != right_empty {
             let inner = if left_empty { right_inner } else { left_inner };
             let scrollbar = self.diff_vscrollbar(total_h, window.as_deref_mut(), cx);
@@ -272,7 +274,7 @@ impl Kyde {
         // The gutter (chevrons) shares the editors' vertical scroll by translating its content
         // by the SAME offset; it also doubles as the draggable divider (drag to resize the
         // split). Clicks on a `»` still revert their hunk (chevrons are children).
-        let scroll_y = self.diff_scroll.offset().y;
+        let scroll_y = self.diff.scroll.offset().y;
         let gutter = div()
             .id("diff-gutter")
             .w(px(DIFF_GUTTER_W))
@@ -325,7 +327,7 @@ impl Kyde {
     /// A small floating control at the diff's top-right: the change count + prev/next arrows
     /// that jump between hunks. Shown whenever the current diff has at least one change.
     fn render_diff_nav(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let n = self.current_diff.as_ref().map_or(0, |d| d.hunks.len());
+        let n = self.diff.current.as_ref().map_or(0, |d| d.hunks.len());
         // Nothing to navigate with a single (or zero) change — hide the control.
         if n < 2 {
             return None;
@@ -406,7 +408,7 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let t = theme::get();
-        let scroll = self.diff_scroll.clone();
+        let scroll = self.diff.scroll.clone();
         // Viewport height is reliable from the shared handle (both panes are `h_full` in the
         // same island, so they paint the same visible height). The scroll *distance* is the
         // content height beyond the viewport — computed from `total_h`, not `max_offset`.
@@ -591,14 +593,14 @@ impl Kyde {
         let (old_words, new_words) = diff_word_bgs(d);
         let (lf, lf_end, rf, rf_end) = diff_fillers(d);
         let t = theme::get();
-        self.diff_left.update(cx, |e, _| {
+        self.diff.left.update(cx, |e, _| {
             e.line_bg = old_bg;
             e.word_bg = old_words;
             e.word_bg_color = t.diff_word_old_bg;
             e.filler = lf;
             e.filler_end = lf_end;
         });
-        self.diff_right.update(cx, |e, _| {
+        self.diff.right.update(cx, |e, _| {
             e.line_bg = new_bg;
             e.word_bg = new_words;
             e.word_bg_color = t.diff_word_new_bg;
@@ -622,39 +624,41 @@ impl Kyde {
         readonly: bool,
         cx: &mut Context<Self>,
     ) {
-        self.old_spans = highlight::highlight(&before, lang);
-        self.new_spans = highlight::highlight(&after, lang);
+        self.diff.old_spans = highlight::highlight(&before, lang);
+        self.diff.new_spans = highlight::highlight(&after, lang);
         let d = FileDiff::compute(&before, &after);
         // Row of the first change (for the open-at-first-hunk scroll below). The leading
         // region before the first hunk is all-equal, so its display-row count ==
         // the hunk's old_range.start.
         let first_hunk_row = d.hunks.first().map(|h| h.old_range.start);
-        self.diff_path = Some(path);
-        self.diff_readonly = readonly;
-        self.diff_base = before.clone();
+        self.diff.path = Some(path);
+        self.diff.readonly = readonly;
+        self.diff.base = before.clone();
         self.apply_diff_decorations(&d, cx);
-        self.current_diff = Some(d);
+        self.diff.current = Some(d);
         // Content goes in its own update closure — `set_content` leaves the decoration
         // fields set just above intact. Left is always locked (base); right tracks `readonly`.
-        self.diff_left.update(cx, |e, cx| {
+        self.diff.left.update(cx, |e, cx| {
             e.read_only = true;
             e.line_numbers = true;
             e.set_content(before, lang, cx);
         });
-        self.diff_right.update(cx, |e, cx| {
+        self.diff.right.update(cx, |e, cx| {
             e.read_only = readonly;
             e.line_numbers = true;
             e.set_content(after, lang, cx);
         });
         // Both panes scroll via the shared `diff_scroll`, so caret-follow / drag auto-scroll
         // and the first-hunk offset below move both panes + the gutter together.
-        let dh = self.diff_scroll.clone();
-        self.diff_left
+        let dh = self.diff.scroll.clone();
+        self.diff
+            .left
             .update(cx, |e, _| e.set_scroll_handle(dh.clone()));
-        self.diff_right.update(cx, |e, _| e.set_scroll_handle(dh));
+        self.diff.right.update(cx, |e, _| e.set_scroll_handle(dh));
         if let Some(start) = first_hunk_row {
             let row = start.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
-            self.diff_scroll
+            self.diff
+                .scroll
                 .set_offset(gpui::point(px(0.0), px(-row * editor::line_height_px())));
         }
     }
@@ -662,13 +666,17 @@ impl Kyde {
     /// Live-save the editable (right) diff pane to disk, then re-diff + recolor.
     pub(crate) fn diff_autosave(&mut self, cx: &mut Context<Self>) {
         let (Some(rel), text) = (
-            self.diff_path.clone(),
-            self.diff_right.read(cx).text().to_string(),
+            self.diff.path.clone(),
+            self.diff.right.read(cx).text().to_string(),
         ) else {
             return;
         };
         if let Some(repo) = self.repo() {
-            let _ = repo.save_file(&rel, &text);
+            // A failed save means the pane's edits never reached disk — surface it (banner)
+            // instead of silently re-diffing as if they had.
+            if let Err(e) = repo.save_file(&rel, &text) {
+                self.fail("Saving file", e);
+            }
             self.files = repo.status().unwrap_or_default();
         }
         self.recompute_diff(&text, cx);
@@ -677,15 +685,16 @@ impl Kyde {
     /// Re-diff the working text against the cached base and push backgrounds/filler/spans
     /// onto both panes. Shared by live autosave and the `»` revert.
     fn recompute_diff(&mut self, text: &str, cx: &mut Context<Self>) {
-        let d = FileDiff::compute(&self.diff_base, text);
+        let d = FileDiff::compute(&self.diff.base, text);
         let lang = self
-            .diff_path
+            .diff
+            .path
             .clone()
             .map_or(Lang::PlainText, |p| self.effective_lang(&p));
-        self.old_spans = highlight::highlight(&self.diff_base, lang);
-        self.new_spans = highlight::highlight(text, lang);
+        self.diff.old_spans = highlight::highlight(&self.diff.base, lang);
+        self.diff.new_spans = highlight::highlight(text, lang);
         self.apply_diff_decorations(&d, cx);
-        self.current_diff = Some(d);
+        self.diff.current = Some(d);
         self.rebuild_commit_view(false);
         cx.notify();
     }
@@ -693,7 +702,7 @@ impl Kyde {
     /// `»` in the diff gutter: discard one hunk's working change by replacing its new
     /// lines with the base lines, then save + re-diff. (Clean text op, no `git apply`.)
     pub(crate) fn diff_revert_hunk(&mut self, hi: usize, cx: &mut Context<Self>) {
-        let Some(d) = self.current_diff.clone() else {
+        let Some(d) = self.diff.current.clone() else {
             return;
         };
         let Some(h) = d.hunks.get(hi) else {
@@ -704,13 +713,18 @@ impl Kyde {
         lines.splice(h.new_range.clone(), replacement);
         let content = lines.join("\n");
         let lang = self
-            .diff_path
+            .diff
+            .path
             .clone()
             .map_or(Lang::PlainText, |p| self.effective_lang(&p));
-        self.diff_right
+        self.diff
+            .right
             .update(cx, |e, cx| e.set_content(content.clone(), lang, cx));
-        if let (Some(rel), Some(repo)) = (self.diff_path.clone(), self.repo()) {
-            let _ = repo.save_file(&rel, &content);
+        if let (Some(rel), Some(repo)) = (self.diff.path.clone(), self.repo()) {
+            // A failed save means the revert never reached disk — surface it (banner).
+            if let Err(e) = repo.save_file(&rel, &content) {
+                self.fail("Reverting hunk", e);
+            }
             self.files = repo.status().unwrap_or_default();
         }
         self.recompute_diff(&content, cx);
@@ -740,7 +754,7 @@ impl Kyde {
     /// Display-row index where each hunk begins (in the aligned two-pane layout). Drives the
     /// diff's change count + the prev/next navigation.
     fn diff_hunk_rows(&self) -> Vec<usize> {
-        let Some(d) = self.current_diff.as_ref() else {
+        let Some(d) = self.diff.current.as_ref() else {
             return Vec::new();
         };
         crate::aligned_rows(d)
@@ -760,7 +774,7 @@ impl Kyde {
             return;
         }
         let lh = editor::line_height_px();
-        let top = (-f32::from(self.diff_scroll.offset().y) / lh).round() as i64;
+        let top = (-f32::from(self.diff.scroll.offset().y) / lh).round() as i64;
         let anchor = top + SCROLL_CONTEXT_ROWS as i64;
         // `rows` is non-empty (checked above), so first/last are valid by construction — no
         // `.unwrap()` needed (rule: no unwrap in non-test code).
@@ -778,7 +792,8 @@ impl Kyde {
                 .unwrap_or(last) // before the first → wrap to the last
         };
         let row = target.saturating_sub(SCROLL_CONTEXT_ROWS) as f32;
-        self.diff_scroll
+        self.diff
+            .scroll
             .set_offset(gpui::point(gpui::px(0.0), gpui::px(-row * lh)));
         cx.notify();
     }
@@ -786,12 +801,12 @@ impl Kyde {
     /// Empty the diff panes (both sides + cached diff/path) — used when a tab has no file to
     /// show, so a stale file doesn't linger from the other tab.
     pub(crate) fn clear_diff_panes(&mut self, cx: &mut Context<Self>) {
-        self.diff_path = None;
-        self.current_diff = None;
-        self.diff_left.update(cx, |e, cx| {
+        self.diff.path = None;
+        self.diff.current = None;
+        self.diff.left.update(cx, |e, cx| {
             e.set_content(String::new(), Lang::PlainText, cx);
         });
-        self.diff_right.update(cx, |e, cx| {
+        self.diff.right.update(cx, |e, cx| {
             e.set_content(String::new(), Lang::PlainText, cx);
         });
     }

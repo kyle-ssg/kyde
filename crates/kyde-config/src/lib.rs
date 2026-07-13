@@ -11,3 +11,5 @@ pub mod keymap;
 pub mod plugins;
 /// Recent-projects list ([`projects::Recents`]).
 pub mod projects;
+/// Shared JSON config-file persistence (XDG dir + generic load/save).
+pub mod store;

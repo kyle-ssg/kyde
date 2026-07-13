@@ -34,35 +34,24 @@ impl Plugins {
     }
 
     // ── persistence ───────────────────────────────────────────────
+    /// Config file name under the XDG config dir.
+    const FILE: &'static str = "plugins.json";
+
     /// Path to `plugins.json` under the XDG config dir.
+    #[must_use]
     pub fn config_path() -> PathBuf {
-        let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
-            |_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".config")
-            },
-            PathBuf::from,
-        );
-        base.join("kyde").join("plugins.json")
+        crate::store::config_path(Self::FILE)
     }
 
     /// Load the installed-pack list from `plugins.json` (missing/invalid → empty).
+    #[must_use]
     pub fn load() -> Self {
-        match std::fs::read_to_string(Self::config_path()) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Plugins::default(),
-        }
+        crate::store::load_or_default(Self::FILE)
     }
 
     /// Persist the installed-pack list to `plugins.json` (best-effort).
     pub fn save(&self) {
-        let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        crate::store::save(Self::FILE, self);
     }
 }
 

@@ -56,7 +56,11 @@ impl Kyde {
             .pl(px(8.0));
         // Breadcrumb follows the tree selection (folder or file), falling back to the open
         // file. A folder selection shows a folder icon; a file shows its type badge.
-        let crumb = self.selected_path.as_ref().or(self.open_path.as_ref());
+        let crumb = self
+            .browse
+            .selected_path
+            .as_ref()
+            .or(self.browse.open_path.as_ref());
         if let Some(rel) = crumb.filter(|p| !p.as_os_str().is_empty()) {
             // Real filesystem check (not "is it the open file") — single-click selection
             // can point at any file or folder, so the icon must follow the path itself.
@@ -113,9 +117,10 @@ impl Kyde {
 
         // Push button: ↑ + "Push", with an ahead-of-upstream count badge. Tooltip
         // carries the last push error (or a hint). Disabled while a push is running.
-        let pushing = self.pushing;
-        let ahead = self.ahead.unwrap_or(0);
+        let pushing = self.sync.pushing;
+        let ahead = self.sync.ahead.unwrap_or(0);
         let tip_text: SharedString = self
+            .sync
             .push_msg
             .clone()
             .map_or_else(|| "Push to origin".into(), SharedString::from);
@@ -130,7 +135,7 @@ impl Kyde {
             .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_light))
-            .text_color(if self.push_msg.is_some() {
+            .text_color(if self.sync.push_msg.is_some() {
                 t.status_deleted
             } else {
                 bar_text
@@ -160,8 +165,8 @@ impl Kyde {
 
         // Pull chip: ↓ + "Pull", with a behind-of-upstream count badge. Shown only when we
         // know we're behind (or a pull's in flight); the branch popup always offers Pull.
-        let pulling = self.pulling;
-        let behind = self.behind.unwrap_or(0);
+        let pulling = self.sync.pulling;
+        let behind = self.sync.behind.unwrap_or(0);
         let pull_btn = div()
             .id("pull-btn")
             .flex()
@@ -220,11 +225,12 @@ impl Kyde {
                     .flex_none()
                     .gap_2()
                     // Only show Pull when we know we're behind (or one's in flight).
-                    .when(self.behind.unwrap_or(0) > 0 || self.pulling, |d| {
-                        d.child(pull_btn)
-                    })
+                    .when(
+                        self.sync.behind.unwrap_or(0) > 0 || self.sync.pulling,
+                        |d| d.child(pull_btn),
+                    )
                     // Only show Push when there's actually something to push (or one's in flight).
-                    .when(self.ahead.unwrap_or(0) > 0 || self.pushing, |d| {
+                    .when(self.sync.ahead.unwrap_or(0) > 0 || self.sync.pushing, |d| {
                         d.child(push_btn)
                     })
                     .child(chip),
@@ -241,13 +247,14 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let q = self.branch_query.read(cx).text().to_string();
+        let q = self.branch.query.read(cx).text().to_string();
         let ql = q.trim().to_lowercase();
         let current = self.current_branch.clone();
         let matches = |b: &str| ql.is_empty() || b.to_lowercase().contains(&ql);
 
         let recent: Vec<String> = self
-            .branch_list
+            .branch
+            .list
             .iter()
             .filter(|b| current.as_deref() != Some(b.as_str()))
             .filter(|b| matches(b))
@@ -255,14 +262,16 @@ impl Kyde {
             .cloned()
             .collect();
         let mut all: Vec<String> = self
-            .branch_list
+            .branch
+            .list
             .iter()
             .filter(|b| matches(b))
             .cloned()
             .collect();
         all.sort_by_key(|b| b.to_lowercase());
         let remotes: Vec<String> = self
-            .branch_remotes
+            .branch
+            .remotes
             .iter()
             .filter(|b| matches(b))
             .cloned()
@@ -293,8 +302,8 @@ impl Kyde {
 
         // Pull (fetch + rebase). Always available here — it's the repo-ops hub, and a pull
         // fetches first, so it works even when our last-known `behind` count is stale/0.
-        let behind = self.behind.unwrap_or(0);
-        let pull_label = if self.pulling {
+        let behind = self.sync.behind.unwrap_or(0);
+        let pull_label = if self.sync.pulling {
             "↓ Pulling…".to_string()
         } else if behind > 0 {
             format!("↓ Pull  ({behind})")
@@ -331,7 +340,7 @@ impl Kyde {
                     .flex_none()
                     .text_color(t.line_number),
             )
-            .child(div().flex_1().min_w_0().child(self.branch_query.clone()));
+            .child(div().flex_1().min_w_0().child(self.branch.query.clone()));
 
         // Branch tree: Recent + Local sections as expandable roots; `/` → folders.
         // While searching, force everything open so matches are visible.
@@ -339,7 +348,7 @@ impl Kyde {
             &recent,
             &all,
             &remotes,
-            &self.branch_expanded,
+            &self.branch.expanded,
             !ql.is_empty(),
         );
         let tree_rows = self.branch_tree(rows, cx);
@@ -382,7 +391,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, window, cx| {
-                    this.branch_popup_open = false;
+                    this.branch.popup_open = false;
                     window.focus(&this.focus_handle);
                     cx.notify();
                 }),
@@ -482,11 +491,11 @@ impl Kyde {
 
     // ── branch switcher ───────────────────────────────────────────
     pub(crate) fn toggle_branch_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.branch_popup_open {
-            self.branch_popup_open = false;
+        if self.branch.popup_open {
+            self.branch.popup_open = false;
             window.focus(&self.focus_handle);
         } else {
-            self.branch_list = self
+            self.branch.list = self
                 .repo()
                 .and_then(|r| r.branches().ok())
                 .unwrap_or_default();
@@ -494,9 +503,9 @@ impl Kyde {
             // short name (drop the remote prefix) so checkout DWIMs a local tracking branch;
             // skip any that already exist locally and dedupe across remotes (recency order).
             let local: std::collections::HashSet<&str> =
-                self.branch_list.iter().map(String::as_str).collect();
+                self.branch.list.iter().map(String::as_str).collect();
             let mut seen = std::collections::HashSet::new();
-            self.branch_remotes = self
+            self.branch.remotes = self
                 .repo()
                 .and_then(|r| r.remote_branches().ok())
                 .unwrap_or_default()
@@ -504,14 +513,14 @@ impl Kyde {
                 .filter_map(|r| r.split_once('/').map(|(_, s)| s.to_string()))
                 .filter(|s| !local.contains(s.as_str()) && seen.insert(s.clone()))
                 .collect();
-            self.branch_query.update(cx, |e, cx| {
+            self.branch.query.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
             // Recent expanded by default; Local collapsed.
-            self.branch_expanded.insert("sec:recent".into());
-            self.branch_popup_open = true;
+            self.branch.expanded.insert("sec:recent".into());
+            self.branch.popup_open = true;
             // Focus now and next frame: the popup element isn't in the tree on first open.
-            let handle = self.branch_query.read(cx).focus_handle.clone();
+            let handle = self.branch.query.read(cx).focus_handle.clone();
             window.focus(&handle);
             window.defer(cx, move |window, _cx| window.focus(&handle));
         }
@@ -521,16 +530,16 @@ impl Kyde {
     /// Pull = fetch + rebase local commits on top (auto-stashing edits), off the UI thread.
     /// Mirrors `do_push`. Closes the branch popup so the UI never freezes mid-operation.
     pub(crate) fn do_pull(&mut self, cx: &mut Context<Self>) {
-        self.branch_popup_open = false;
+        self.branch.popup_open = false;
         self.context_menu = None;
-        if self.pulling {
+        if self.sync.pulling {
             return;
         }
         let Some(root) = self.repo_root.clone() else {
             return;
         };
-        self.pulling = true;
-        self.push_msg = None;
+        self.sync.pulling = true;
+        self.sync.push_msg = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -538,14 +547,15 @@ impl Kyde {
                 .spawn(async move { Repo::discover(&root).and_then(|r| r.pull_rebase()) })
                 .await;
             this.update(cx, |this, cx| {
-                this.pulling = false;
+                this.sync.pulling = false;
                 let err = result.err().map(|e| e.to_string());
-                this.push_msg = err.clone();
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
+                this.sync.push_msg = err.clone();
+                // Stash before refresh: the async status read clears `op_error` on success,
+                // so a direct set would be wiped (see `pending_error`).
                 if let Some(m) = err {
-                    this.op_error = Some(format!("Pull failed: {m}"));
+                    this.pending_error = Some(format!("Pull failed: {m}"));
                 }
+                this.refresh(cx);
                 cx.notify();
             })
             .ok();
@@ -557,15 +567,15 @@ impl Kyde {
     /// reflect the true remote state. Doesn't touch the working tree (unlike Pull).
     pub(crate) fn do_fetch(&mut self, cx: &mut Context<Self>) {
         self.context_menu = None;
-        self.branch_popup_open = false;
-        if self.fetching {
+        self.branch.popup_open = false;
+        if self.sync.fetching {
             return;
         }
         let Some(root) = self.repo_root.clone() else {
             return;
         };
-        self.fetching = true;
-        self.push_msg = None;
+        self.sync.fetching = true;
+        self.sync.push_msg = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -573,13 +583,13 @@ impl Kyde {
                 .spawn(async move { Repo::discover(&root).and_then(|r| r.fetch()) })
                 .await;
             this.update(cx, |this, cx| {
-                this.fetching = false;
+                this.sync.fetching = false;
                 let err = result.err().map(|e| e.to_string());
-                // refresh() recomputes ahead/behind from the freshly-fetched refs.
-                this.refresh();
                 if let Some(m) = err {
-                    this.op_error = Some(format!("Fetch failed: {m}"));
+                    this.pending_error = Some(format!("Fetch failed: {m}"));
                 }
+                // refresh() recomputes ahead/behind from the freshly-fetched refs.
+                this.refresh(cx);
                 cx.notify();
             })
             .ok();
@@ -588,8 +598,8 @@ impl Kyde {
     }
 
     pub(crate) fn toggle_branch_node(&mut self, key: String, cx: &mut Context<Self>) {
-        if !self.branch_expanded.remove(&key) {
-            self.branch_expanded.insert(key);
+        if !self.branch.expanded.remove(&key) {
+            self.branch.expanded.insert(key);
         }
         cx.notify();
     }
@@ -606,7 +616,7 @@ impl Kyde {
     /// Open the "Create New Branch" dialog (own native window). `branch_query` doubles as the
     /// name field (prefilled with whatever was typed in the branch popup).
     pub(crate) fn open_new_branch(&mut self, cx: &mut Context<Self>) {
-        self.branch_popup_open = false;
+        self.branch.popup_open = false;
         self.new_branch_checkout = true;
         self.new_branch_overwrite = false;
         self.open_modal_window(ModalKind::NewBranch, "Create New Branch", 520.0, 220.0, cx);
@@ -616,7 +626,7 @@ impl Kyde {
     /// Create the branch named in the dialog, honoring the Checkout / Overwrite toggles, then
     /// close the dialog and refresh. Spaces in the name become hyphens (git rejects spaces).
     pub(crate) fn do_create_branch(&mut self, cx: &mut Context<Self>) {
-        let name = slugify_branch(self.branch_query.read(cx).text());
+        let name = slugify_branch(self.branch.query.read(cx).text());
         if name.is_empty() {
             return;
         }
@@ -634,11 +644,10 @@ impl Kyde {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
                 if let Err(e) = res {
-                    this.fail("Create branch", e);
+                    this.fail_pending("Create branch", e);
                 }
+                this.refresh(cx);
                 cx.notify();
             })
             .ok();
@@ -655,7 +664,7 @@ impl Kyde {
         cx: &mut Context<Self>,
         op: impl FnOnce(&Repo) -> kyde_git::Result<()> + Send + 'static,
     ) {
-        self.branch_popup_open = false;
+        self.branch.popup_open = false;
         window.focus(&self.focus_handle);
         cx.notify();
         let Some(root) = self.repo_root.clone() else {
@@ -667,11 +676,10 @@ impl Kyde {
                 .spawn(async move { Repo::discover(&root).and_then(|r| op(&r)) })
                 .await;
             this.update(cx, |this, cx| {
-                this.refresh();
-                // After refresh (which clears `op_error` on a clean status read).
                 if let Err(e) = res {
-                    this.fail("Branch operation", e);
+                    this.fail_pending("Branch operation", e);
                 }
+                this.refresh(cx);
                 cx.notify();
             })
             .ok();
@@ -690,7 +698,7 @@ impl Kyde {
                 .await;
             this.update(cx, |this, cx| {
                 if this.refresh_gen == generation {
-                    this.refresh();
+                    this.refresh(cx);
                     cx.notify();
                 }
             })

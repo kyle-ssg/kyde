@@ -13,9 +13,10 @@ impl Kyde {
         let t = theme::get();
         // gpui only tracks hover on *identified* elements, so each row needs an `.id()` or the
         // `.hover(...)` style never applies (the tree rows that hover all carry an id).
+        // The finder panel itself is `bg_mid`, so the hover shade must be lighter
+        // (`bg_light`) to be visible — `bg_mid` on `bg_mid` shows nothing.
         let row_base = |i: usize, sel: bool| {
-            div()
-                .id(("finder-row", i))
+            ui::picker::row(("finder-row", i), sel, t.bg_light)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -24,21 +25,16 @@ impl Kyde {
                 .mx(px(2.0))
                 .px_3()
                 .py_1()
-                .rounded_md()
-                .cursor_pointer()
                 .text_color(t.text)
-                .when(sel, |d| d.bg(t.selected_bg))
-                // The finder panel itself is `bg_mid`, so hover must be a lighter shade
-                // (`bg_light`) to be visible — `bg_mid` on `bg_mid` shows nothing.
-                .when(!sel, |d| d.hover(|s| s.bg(t.bg_light)))
         };
-        let rows: Vec<gpui::AnyElement> = match self.finder_mode {
+        let rows: Vec<gpui::AnyElement> = match self.finder.mode {
             FinderMode::Files => self
-                .finder_results
+                .finder
+                .results
                 .iter()
                 .enumerate()
                 .map(|(i, p)| {
-                    let sel = i == self.finder_selected;
+                    let sel = i == self.finder.selected;
                     let name: SharedString = p.to_string_lossy().into_owned().into();
                     let pc = p.clone();
                     let icon = div()
@@ -58,7 +54,7 @@ impl Kyde {
                             cx.listener(move |this, _e, window, cx| {
                                 this.open_file(pc.clone(), cx);
                                 this.mode = Mode::Browse;
-                                this.finder_open = false;
+                                this.finder.open = false;
                                 window.focus(&this.focus_handle);
                                 cx.notify();
                             }),
@@ -67,11 +63,12 @@ impl Kyde {
                 })
                 .collect(),
             FinderMode::Content => self
+                .finder
                 .content_results
                 .iter()
                 .enumerate()
                 .map(|(i, hit)| {
-                    let sel = i == self.finder_selected;
+                    let sel = i == self.finder.selected;
                     let path = hit.path.clone();
                     let line = hit.line;
                     let loc: SharedString =
@@ -115,7 +112,7 @@ impl Kyde {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, window, cx| {
-                                this.finder_open = false;
+                                this.finder.open = false;
                                 this.open_file_at_line(path.clone(), line, window, cx);
                             }),
                         )
@@ -123,12 +120,13 @@ impl Kyde {
                 })
                 .collect(),
             FinderMode::Actions => self
+                .finder
                 .action_results
                 .iter()
                 .enumerate()
                 .map(|(row, &ai)| {
                     let (label, kind, key_action) = PALETTE[ai];
-                    let sel = row == self.finder_selected;
+                    let sel = row == self.finder.selected;
                     // Right-aligned shortcut chip, when this action has a bound key.
                     let shortcut = (!key_action.is_empty())
                         .then(|| self.keymap.key_for(key_action))
@@ -160,12 +158,13 @@ impl Kyde {
                 })
                 .collect(),
             FinderMode::Scratch => self
+                .finder
                 .action_results
                 .iter()
                 .enumerate()
                 .map(|(row, &li)| {
                     let (label, ext) = scratch::LANGS[li];
-                    let sel = row == self.finder_selected;
+                    let sel = row == self.finder.selected;
                     let icon = div()
                         .w(px(20.0))
                         .flex_none()
@@ -211,14 +210,15 @@ impl Kyde {
                     .p_2()
                     .border_b_1()
                     .border_color(theme::get().divider)
-                    .child(self.finder_query.clone()),
+                    .child(self.finder.query.clone()),
             )
             .when(
-                matches!(self.finder_mode, FinderMode::Content)
-                    && !self.finder_query.read(cx).text().is_empty(),
+                matches!(self.finder.mode, FinderMode::Content)
+                    && !self.finder.query.read(cx).text().is_empty(),
                 |d| {
-                    let n = self.content_results.len();
+                    let n = self.finder.content_results.len();
                     let files = self
+                        .finder
                         .content_results
                         .iter()
                         .map(|h| &h.path)
@@ -269,13 +269,13 @@ impl Kyde {
     /// run the grep off the UI thread, and apply results only if no newer keystroke
     /// superseded this one (generation check, like the diff-edit autosave).
     pub(crate) fn schedule_content_search(&mut self, cx: &mut Context<Self>) {
-        let q = self.finder_query.read(cx).text().trim().to_string();
-        self.finder_gen = self.finder_gen.wrapping_add(1);
-        let gen = self.finder_gen;
-        self.finder_selected = 0;
+        let q = self.finder.query.read(cx).text().trim().to_string();
+        self.finder.search_gen = self.finder.search_gen.wrapping_add(1);
+        let gen = self.finder.search_gen;
+        self.finder.selected = 0;
         // Too short → clear immediately, never grep (matches almost every line in the repo).
         if q.len() < CONTENT_MIN_QUERY {
-            self.content_results = Vec::new();
+            self.finder.content_results = Vec::new();
             cx.notify();
             return;
         }
@@ -287,7 +287,11 @@ impl Kyde {
                 .timer(CONTENT_SEARCH_DEBOUNCE)
                 .await;
             // Superseded by a newer keystroke during the debounce window? Skip the grep.
-            if this.update(cx, |this, _| this.finder_gen).unwrap_or(gen) != gen {
+            if this
+                .update(cx, |this, _| this.finder.search_gen)
+                .unwrap_or(gen)
+                != gen
+            {
                 return;
             }
             let hits = cx
@@ -300,11 +304,11 @@ impl Kyde {
                 .await;
             this.update(cx, |this, cx| {
                 // Apply only if still the latest search and the finder's still in Content mode.
-                if this.finder_gen == gen
-                    && this.finder_open
-                    && this.finder_mode == FinderMode::Content
+                if this.finder.search_gen == gen
+                    && this.finder.open
+                    && this.finder.mode == FinderMode::Content
                 {
-                    this.content_results = hits
+                    this.finder.content_results = hits
                         .into_iter()
                         .map(|(path, line, text)| ContentHit { path, line, text })
                         .collect();
@@ -317,12 +321,13 @@ impl Kyde {
     }
 
     pub(crate) fn recompute_finder(&mut self, cx: &Context<Self>) {
-        let q = self.finder_query.read(cx).text().to_string();
+        let q = self.finder.query.read(cx).text().to_string();
         let matcher = SkimMatcherV2::default();
-        self.finder_selected = 0;
-        match self.finder_mode {
+        self.finder.selected = 0;
+        match self.finder.mode {
             FinderMode::Files => {
                 let mut scored: Vec<(i64, &PathBuf)> = self
+                    .browse
                     .all_files
                     .iter()
                     .filter_map(|p| {
@@ -335,7 +340,7 @@ impl Kyde {
                     })
                     .collect();
                 scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.finder_results = scored
+                self.finder.results = scored
                     .into_iter()
                     .take(FINDER_RESULT_CAP)
                     .map(|(_, p)| p.clone())
@@ -343,7 +348,8 @@ impl Kyde {
             }
             FinderMode::Actions => {
                 // "Reveal in Finder/Terminal" only make sense with an active/selected file.
-                let have_file = self.open_path.is_some() || self.selected_path.is_some();
+                let have_file =
+                    self.browse.open_path.is_some() || self.browse.selected_path.is_some();
                 let mut scored: Vec<(i64, usize)> = PALETTE
                     .iter()
                     .enumerate()
@@ -363,11 +369,11 @@ impl Kyde {
                     })
                     .collect();
                 scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.action_results = scored.into_iter().map(|(_, i)| i).collect();
+                self.finder.action_results = scored.into_iter().map(|(_, i)| i).collect();
             }
             FinderMode::Content => {
                 // Literal (non-fuzzy) full-text search via `git grep`. Empty query → no hits.
-                self.content_results = if q.is_empty() {
+                self.finder.content_results = if q.is_empty() {
                     Vec::new()
                 } else {
                     self.repo()
@@ -391,7 +397,7 @@ impl Kyde {
                     })
                     .collect();
                 scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-                self.action_results = scored.into_iter().map(|(_, i)| i).collect();
+                self.finder.action_results = scored.into_iter().map(|(_, i)| i).collect();
             }
         }
     }
@@ -402,20 +408,20 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.finder_mode = mode;
-        self.finder_open = true;
+        self.finder.mode = mode;
+        self.finder.open = true;
         let placeholder = match mode {
             FinderMode::Files => "Type to search files…",
             FinderMode::Content => "Type to search file contents…",
             FinderMode::Actions => "Type to search actions…",
             FinderMode::Scratch => "Pick a language…",
         };
-        self.finder_query.update(cx, |e, cx| {
+        self.finder.query.update(cx, |e, cx| {
             e.placeholder = placeholder.into();
             e.set_content(String::new(), Lang::PlainText, cx);
         });
         self.recompute_finder(cx);
-        let handle = self.finder_query.read(cx).focus_handle.clone();
+        let handle = self.finder.query.read(cx).focus_handle.clone();
         window.focus(&handle);
         // First open: the input element isn't in the tree yet, so also focus next frame.
         window.defer(cx, move |window, _cx| window.focus(&handle));
@@ -456,7 +462,7 @@ impl Kyde {
         self.open_file(rel, cx);
         self.mode = Mode::Browse;
         let line0 = line.saturating_sub(1) as usize;
-        self.file_editor.update(cx, |e, cx| {
+        self.browse.editor.update(cx, |e, cx| {
             // Compute the line's byte range first (immutable borrow), then select it.
             let range = {
                 let text = e.text();
@@ -469,7 +475,7 @@ impl Kyde {
         // Scroll so the target line sits a few rows below the top (negative offset = down).
         let lh = editor::line_height_px();
         let y = -(line0.saturating_sub(SCROLL_CONTEXT_ROWS) as f32) * lh;
-        let sh = self.file_scroll.clone();
+        let sh = self.browse.editor_scroll.clone();
         window.defer(cx, move |_w, _cx| {
             sh.set_offset(gpui::point(gpui::px(0.0), gpui::px(y)));
         });
@@ -483,7 +489,7 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.finder_open = false;
+        self.finder.open = false;
         match a {
             PaletteAction::GoToFile => self.open_finder(FinderMode::Files, window, cx),
             PaletteAction::FindInFiles => self.open_finder(FinderMode::Content, window, cx),
@@ -503,17 +509,18 @@ impl Kyde {
                 self.open_rollback_path(PathBuf::new(), cx);
             }
             PaletteAction::Settings => {
-                self.onboarding_choice = self.keymap.preset;
-                self.onboarding_open = true;
+                self.onboarding.choice = self.keymap.preset;
+                self.onboarding.open = true;
                 window.focus(&self.focus_handle);
                 cx.notify();
             }
             PaletteAction::RevealInFinder => {
                 window.focus(&self.focus_handle);
                 if let Some(p) = self
+                    .browse
                     .open_path
                     .clone()
-                    .or_else(|| self.selected_path.clone())
+                    .or_else(|| self.browse.selected_path.clone())
                 {
                     self.reveal_in_os(&p, cx);
                 }
@@ -521,9 +528,10 @@ impl Kyde {
             PaletteAction::RevealInTerminal => {
                 window.focus(&self.focus_handle);
                 if let Some(p) = self
+                    .browse
                     .open_path
                     .clone()
-                    .or_else(|| self.selected_path.clone())
+                    .or_else(|| self.browse.selected_path.clone())
                 {
                     self.reveal_in_terminal(&p, cx);
                 }
@@ -543,25 +551,23 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.finder_open = false;
+        self.finder.open = false;
         window.focus(&self.focus_handle);
         cx.notify();
     }
 
     pub(crate) fn finder_up(&mut self, _: &FinderUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.finder_selected = self.finder_selected.saturating_sub(1);
+        self.finder.selected = ui::picker::nav_up(self.finder.selected);
         cx.notify();
     }
 
     pub(crate) fn finder_down(&mut self, _: &FinderDown, _: &mut Window, cx: &mut Context<Self>) {
-        let len = match self.finder_mode {
-            FinderMode::Files => self.finder_results.len(),
-            FinderMode::Content => self.content_results.len(),
-            FinderMode::Actions | FinderMode::Scratch => self.action_results.len(),
+        let len = match self.finder.mode {
+            FinderMode::Files => self.finder.results.len(),
+            FinderMode::Content => self.finder.content_results.len(),
+            FinderMode::Actions | FinderMode::Scratch => self.finder.action_results.len(),
         };
-        if self.finder_selected + 1 < len {
-            self.finder_selected += 1;
-        }
+        self.finder.selected = ui::picker::nav_down(self.finder.selected, len);
         cx.notify();
     }
 
@@ -571,41 +577,47 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.finder_mode {
+        match self.finder.mode {
             FinderMode::Files => {
-                if let Some(p) = self.finder_results.get(self.finder_selected).cloned() {
+                if let Some(p) = self.finder.results.get(self.finder.selected).cloned() {
                     self.open_file(p, cx);
                     self.mode = Mode::Browse;
                 }
-                self.finder_open = false;
+                self.finder.open = false;
                 window.focus(&self.focus_handle);
                 cx.notify();
             }
             FinderMode::Content => {
-                if let Some(hit) = self.content_results.get(self.finder_selected).cloned() {
-                    self.finder_open = false;
+                if let Some(hit) = self
+                    .finder
+                    .content_results
+                    .get(self.finder.selected)
+                    .cloned()
+                {
+                    self.finder.open = false;
                     self.open_file_at_line(hit.path, hit.line, window, cx);
                 } else {
-                    self.finder_open = false;
+                    self.finder.open = false;
                     window.focus(&self.focus_handle);
                 }
                 cx.notify();
             }
             FinderMode::Actions => {
-                if let Some(&i) = self.action_results.get(self.finder_selected) {
+                if let Some(&i) = self.finder.action_results.get(self.finder.selected) {
                     self.run_palette(PALETTE[i].1, window, cx);
                 } else {
-                    self.finder_open = false;
+                    self.finder.open = false;
                     window.focus(&self.focus_handle);
                     cx.notify();
                 }
             }
             FinderMode::Scratch => {
                 let ext = self
+                    .finder
                     .action_results
-                    .get(self.finder_selected)
+                    .get(self.finder.selected)
                     .map(|&i| scratch::LANGS[i].1);
-                self.finder_open = false;
+                self.finder.open = false;
                 window.focus(&self.focus_handle);
                 if let Some(ext) = ext {
                     self.create_scratch(ext, cx);

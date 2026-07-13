@@ -14,11 +14,11 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let dirty = self.file_editor.read(cx).dirty;
-        let tabs = self.open_tabs.iter().enumerate().map(|(i, p)| {
-            let active = self.open_path.as_ref() == Some(p);
+        let dirty = self.browse.editor.read(cx).dirty;
+        let tabs = self.browse.open_tabs.iter().enumerate().map(|(i, p)| {
+            let active = self.browse.open_path.as_ref() == Some(p);
             // The preview (temporary) tab renders in italics, like VS Code.
-            let preview = self.preview_tab.as_ref() == Some(p);
+            let preview = self.browse.preview_tab.as_ref() == Some(p);
             let name: SharedString = p
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -98,7 +98,7 @@ impl Kyde {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| {
-                        if let Some(p) = this.open_tabs.get(i).cloned() {
+                        if let Some(p) = this.browse.open_tabs.get(i).cloned() {
                             this.open_file(p, cx);
                             cx.notify();
                         }
@@ -145,15 +145,15 @@ impl Kyde {
                     .flex_1()
                     .min_w_0()
                     .overflow_x_scroll()
-                    .track_scroll(&self.tab_scroll)
+                    .track_scroll(&self.browse.tab_scroll)
                     // A plain mouse has only a vertical wheel; map it to horizontal so the
                     // tab strip scrolls. Native horizontal (trackpad) stays with overflow_x.
                     .on_scroll_wheel(cx.listener(|this, e: &gpui::ScrollWheelEvent, _w, cx| {
                         let d = e.delta.pixel_delta(px(18.0));
                         if d.y.abs() > px(0.0) {
-                            let mut off = this.tab_scroll.offset();
+                            let mut off = this.browse.tab_scroll.offset();
                             off.x += d.y;
-                            this.tab_scroll.set_offset(off);
+                            this.browse.tab_scroll.set_offset(off);
                             cx.notify();
                         }
                     }))
@@ -290,18 +290,19 @@ impl Kyde {
     /// Close the tab at `idx`. If it was active, fall to its right neighbour (else left,
     /// else nothing open).
     pub(crate) fn close_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx >= self.open_tabs.len() {
+        if idx >= self.browse.open_tabs.len() {
             return;
         }
-        let closing = self.open_tabs.remove(idx);
-        if self.preview_tab.as_ref() == Some(&closing) {
-            self.preview_tab = None;
+        let closing = self.browse.open_tabs.remove(idx);
+        if self.browse.preview_tab.as_ref() == Some(&closing) {
+            self.browse.preview_tab = None;
         }
-        if self.open_path.as_ref() == Some(&closing) {
+        if self.browse.open_path.as_ref() == Some(&closing) {
             let next = self
+                .browse
                 .open_tabs
                 .get(idx)
-                .or_else(|| self.open_tabs.get(idx.saturating_sub(1)))
+                .or_else(|| self.browse.open_tabs.get(idx.saturating_sub(1)))
                 .cloned();
             match next {
                 Some(p) => self.open_file(p, cx),
@@ -313,38 +314,40 @@ impl Kyde {
 
     /// Close every tab except the one at `idx`, and make it active.
     pub(crate) fn close_other_tabs(&mut self, idx: usize, cx: &mut Context<Self>) {
-        let Some(keep) = self.open_tabs.get(idx).cloned() else {
+        let Some(keep) = self.browse.open_tabs.get(idx).cloned() else {
             return;
         };
-        self.open_tabs = vec![keep.clone()];
+        self.browse.open_tabs = vec![keep.clone()];
         // Drop a stale preview pointer if its tab was among those closed.
-        self.preview_tab = self.preview_tab.take().filter(|p| p == &keep);
+        self.browse.preview_tab = self.browse.preview_tab.take().filter(|p| p == &keep);
         self.open_file(keep, cx);
         self.close_menu(cx);
     }
 
     /// Close all tabs to the right of `idx`. If the active tab was among them, activate `idx`.
     pub(crate) fn close_tabs_right(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx + 1 >= self.open_tabs.len() {
+        if idx + 1 >= self.browse.open_tabs.len() {
             self.close_menu(cx);
             return;
         }
         let active_removed = self
+            .browse
             .open_path
             .as_ref()
-            .and_then(|p| self.open_tabs.iter().position(|t| t == p))
+            .and_then(|p| self.browse.open_tabs.iter().position(|t| t == p))
             .is_some_and(|pos| pos > idx);
-        self.open_tabs.truncate(idx + 1);
+        self.browse.open_tabs.truncate(idx + 1);
         // Drop a stale preview pointer if its tab was truncated away.
         if self
+            .browse
             .preview_tab
             .as_ref()
-            .is_some_and(|p| !self.open_tabs.contains(p))
+            .is_some_and(|p| !self.browse.open_tabs.contains(p))
         {
-            self.preview_tab = None;
+            self.browse.preview_tab = None;
         }
         if active_removed {
-            if let Some(p) = self.open_tabs.get(idx).cloned() {
+            if let Some(p) = self.browse.open_tabs.get(idx).cloned() {
                 self.open_file(p, cx);
             }
         }

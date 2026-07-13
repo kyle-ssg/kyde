@@ -15,8 +15,11 @@ mod divider;
 // `terminal` feature — allow dead code when that's off.
 #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
 mod term_panel;
+// `TermPanel` is ungated — `TermState.panel` is always compiled (see `TermState`), so e.g.
+// `switch_mode` can reset it without a cfg. `ToggleAction` is only used by the gated glue.
+use term_panel::TermPanel;
 #[cfg(feature = "terminal")]
-use term_panel::{TermPanel, ToggleAction};
+use term_panel::ToggleAction;
 mod render;
 pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
 // Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
@@ -25,7 +28,7 @@ pub(crate) use app::{
     CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
     STATUS_REFRESH_DEBOUNCE,
 };
-use kyde_ui as ui;
+pub(crate) use kyde_ui as ui;
 pub(crate) use kyde_ui::{
     badge_inner, btn_primary, btn_primary_state, btn_secondary, checkbox_box, file_badge, lerp_rgb,
     menu_icon, scrollbar_thumb, tab_pill,
@@ -514,6 +517,592 @@ struct ProjectSession {
     expanded: std::collections::HashSet<PathBuf>,
 }
 
+/// The History (git log) view's state, grouped out of the `Kyde` god-struct into its own
+/// sub-state. Defined at the crate root so its fields stay reachable from the `history`
+/// feature module (exactly like `Kyde`'s own fields). Built via [`HistoryView::new`], which
+/// also wires the three search boxes' live-filter subscriptions.
+struct HistoryView {
+    /// Revision being logged — a branch name, or "HEAD" for the current branch.
+    rev: String,
+    /// Path the log is scoped to (a folder/file), or `None` for the whole repo. Set when
+    /// the history view is opened from a Browse-tree folder's right-click menu.
+    path: Option<PathBuf>,
+    /// Commits shown in the log list (newest first).
+    commits: Vec<git::Commit>,
+    /// Selected commit index into `commits`.
+    selected: Option<usize>,
+    /// Files changed by the selected commit under the current compare mode.
+    files: Vec<ChangedFile>,
+    /// Selected file index into `files`.
+    file_selected: Option<usize>,
+    /// Folder tree of `files` (right pane of the history panel).
+    files_tree: tree::Tree,
+    /// Expanded dirs in the history files tree.
+    files_expanded: std::collections::HashSet<PathBuf>,
+    /// Search box filtering the history files tree.
+    files_query: Entity<CodeEditor>,
+    /// Height (px) of the history bottom panel (drag the top edge to resize).
+    panel_h: f32,
+    /// When true the history bottom panel is minimised to just its toolbar (the header
+    /// chevron toggles it), giving the diff the full height.
+    panel_collapsed: bool,
+    /// What the selected commit is diffed against.
+    compare: CompareMode,
+    /// Compare-mode dropdown open in the history view.
+    compare_open: bool,
+    /// Branch-picker dropdown open in the history view.
+    branch_open: bool,
+    /// Local branches for the history branch picker (loaded when the dropdown opens).
+    locals: Vec<String>,
+    /// Remote-tracking branches for the history branch picker.
+    remotes: Vec<String>,
+    /// Search box filtering the history branch dropdown.
+    branch_query: Entity<CodeEditor>,
+    /// Search box filtering the commit list (subject / author / hash).
+    commit_query: Entity<CodeEditor>,
+    /// Scroll position of the commit list.
+    scroll: ScrollHandle,
+    /// Fraction (0..1) of the history panel width given to the commit-list pane on the left
+    /// (resizable); the changed-files pane fills the rest on the right. Defaults to 2/3.
+    commit_frac: f32,
+}
+
+impl HistoryView {
+    /// Build the initial history state and wire the three search boxes' live-filter
+    /// subscriptions (each repaints `Kyde` when its query changes while the relevant view /
+    /// dropdown is active).
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let branch_query = cx.new(|cx| CodeEditor::single_line(cx, "Search branches…"));
+        cx.subscribe(&branch_query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.history.branch_open {
+                cx.notify();
+            }
+        })
+        .detach();
+        let commit_query = cx.new(|cx| CodeEditor::single_line(cx, "Search commits…"));
+        cx.subscribe(&commit_query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.mode == Mode::History {
+                cx.notify();
+            }
+        })
+        .detach();
+        let files_query = cx.new(|cx| CodeEditor::single_line(cx, "Search files…"));
+        cx.subscribe(&files_query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.mode == Mode::History {
+                cx.notify();
+            }
+        })
+        .detach();
+        Self {
+            rev: "HEAD".to_string(),
+            path: None,
+            commits: Vec::new(),
+            selected: None,
+            files: Vec::new(),
+            file_selected: None,
+            files_tree: tree::Tree::default(),
+            files_expanded: std::collections::HashSet::new(),
+            files_query,
+            panel_h: 320.0,
+            panel_collapsed: false,
+            compare: CompareMode::Local,
+            compare_open: false,
+            branch_open: false,
+            locals: Vec::new(),
+            remotes: Vec::new(),
+            branch_query,
+            commit_query,
+            scroll: ScrollHandle::new(),
+            commit_frac: 2.0 / 3.0,
+        }
+    }
+}
+
+/// The branch-switcher popup's state (bottom-right status-bar chip → dropdown), grouped out
+/// of the `Kyde` god-struct. Defined at the crate root so its fields stay reachable from the
+/// feature modules. `current_branch` deliberately stays on `Kyde` — it's repo state read all
+/// over (refresh/history/status bar), not popup UI.
+struct BranchPopup {
+    /// Local branch names, recency order.
+    list: Vec<String>,
+    /// Remote-only branches (short name, e.g. "feature-x") that have no local head yet —
+    /// shown under a "Remote" section so freshly-fetched branches are checkout-able.
+    remotes: Vec<String>,
+    /// Whether the branch dropdown is open.
+    popup_open: bool,
+    /// Search / new-branch-name box (doubles as the create-branch name field).
+    query: Entity<CodeEditor>,
+    /// Expanded nodes in the branch tree (section keys like "sec:recent" and folder
+    /// keys like "sec:local/feat").
+    expanded: std::collections::HashSet<String>,
+}
+
+impl BranchPopup {
+    /// Build initial branch-popup state + wire the search box's live-filter subscription
+    /// (repaints `Kyde` while the popup is open).
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let query = cx.new(|cx| CodeEditor::single_line(cx, "Search / new branch name"));
+        cx.subscribe(&query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.branch.popup_open {
+                cx.notify();
+            }
+        })
+        .detach();
+        Self {
+            list: Vec::new(),
+            remotes: Vec::new(),
+            popup_open: false,
+            query,
+            expanded: std::collections::HashSet::new(),
+        }
+    }
+}
+
+/// The in-editor find/replace bar's state, grouped out of the `Kyde` god-struct. Targets
+/// whichever editor was focused when it opened (`target`). Built via [`FindBar::new`], which
+/// wires the query box's live re-search subscription.
+struct FindBar {
+    /// Whether the find bar is open.
+    open: bool,
+    /// Whether the replace row is shown.
+    replace: bool,
+    /// Which editor the search acts on (Browse file editor vs a diff pane).
+    target: FindTarget,
+    /// Search box.
+    query: Entity<CodeEditor>,
+    /// Replace box.
+    replace_query: Entity<CodeEditor>,
+    /// Byte ranges of the current matches in the target editor.
+    matches: Vec<std::ops::Range<usize>>,
+    /// Index of the active match within `matches`.
+    idx: usize,
+}
+
+impl FindBar {
+    /// Build the find/replace bar (both single-line inputs use the `FindBar` key context for
+    /// their enter/escape bindings) and wire the query box's live re-search subscription.
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let query = cx.new(|cx| {
+            let mut e = CodeEditor::single_line(cx, "Find");
+            e.ctx_override = Some("FindBar");
+            e
+        });
+        let replace_query = cx.new(|cx| {
+            let mut e = CodeEditor::single_line(cx, "Replace");
+            e.ctx_override = Some("FindBar");
+            e
+        });
+        cx.subscribe(&query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.find.open {
+                this.recompute_find(cx);
+            }
+        })
+        .detach();
+        Self {
+            open: false,
+            replace: false,
+            target: FindTarget::File,
+            query,
+            replace_query,
+            matches: Vec::new(),
+            idx: 0,
+        }
+    }
+}
+
+/// The Go-to-File / Find-in-Files / Actions overlay's state (one overlay, several modes),
+/// grouped out of the `Kyde` god-struct. Built via [`Finder::new`], which wires the query
+/// box's change subscription (in-memory fuzzy match inline, `git grep` content search
+/// debounced on a background thread).
+struct Finder {
+    /// Whether the overlay is open.
+    open: bool,
+    /// Files (Go to File) vs Content (Find in Files) vs Actions palette — same overlay.
+    mode: FinderMode,
+    /// Search box.
+    query: Entity<CodeEditor>,
+    /// Fuzzy file-path results (Files mode).
+    results: Vec<PathBuf>,
+    /// Content-search hits (Content mode).
+    content_results: Vec<ContentHit>,
+    /// Matching palette-action indices (Actions mode).
+    action_results: Vec<usize>,
+    /// Highlighted result row.
+    selected: usize,
+    /// Bumped on every Find-in-Files keystroke; the debounced background `git grep` only
+    /// applies its results when its captured generation still matches (drops stale searches).
+    search_gen: u64,
+}
+
+impl Finder {
+    /// Build the finder overlay + wire the query box's change subscription: Content mode
+    /// debounces a background `git grep`, every other mode is an inline fuzzy match.
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let query = cx.new(|cx| CodeEditor::single_line(cx, "Type to search files…"));
+        cx.subscribe(&query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.finder.open {
+                if this.finder.mode == FinderMode::Content {
+                    this.schedule_content_search(cx);
+                } else {
+                    this.recompute_finder(cx);
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        Self {
+            open: false,
+            mode: FinderMode::Files,
+            query,
+            results: Vec::new(),
+            content_results: Vec::new(),
+            action_results: Vec::new(),
+            selected: 0,
+            search_gen: 0,
+        }
+    }
+}
+
+/// The first-run / reopened keymap-picker overlay's state, grouped out of the `Kyde`
+/// god-struct (see `render_onboarding`).
+struct Onboarding {
+    /// Whether the picker overlay is open.
+    open: bool,
+    /// True until the user has picked a keymap — the picker can't be dismissed while set.
+    forced: bool,
+    /// The preset currently highlighted in the picker (confirmed via Continue).
+    choice: Preset,
+    /// Pending state of the "Install shell command" checkbox in the picker;
+    /// applied (symlink created) when the user confirms with Continue.
+    install_cmd: bool,
+    /// Last shell-command install error, shown under the checkbox.
+    shell_cmd_error: Option<String>,
+}
+
+/// The bottom terminal panel's state, grouped out of the `Kyde` god-struct. The control
+/// state (`panel`) is always compiled — it's the pure, unit-tested open/close/toggle/focus
+/// state machine (see `src/term_panel.rs`) — so always-compiled code (e.g. `switch_mode`'s
+/// un-maximize) can touch it without a `cfg` gate. Only the PTY-backed tab views + the
+/// panel height live behind the `terminal` feature, centralising the gates here instead of
+/// scattering them across the `Kyde` struct + constructor.
+struct TermState {
+    /// Control state of the panel — open / active / maximized / focus-pending.
+    panel: TermPanel,
+    /// One PTY-backed `TerminalView` entity per tab, left→right in open order.
+    #[cfg(feature = "terminal")]
+    tabs: Vec<Entity<terminal::TerminalView>>,
+    /// Height (px) of the terminal panel, drag-resizable via its top divider.
+    #[cfg(feature = "terminal")]
+    height: f32,
+}
+
+impl TermState {
+    fn new() -> Self {
+        Self {
+            // Starts closed; the persisted "maximized" preference is restored when it opens
+            // (act_toggle_terminal), so the default (all-false) is correct here.
+            panel: TermPanel::default(),
+            #[cfg(feature = "terminal")]
+            tabs: Vec::new(),
+            #[cfg(feature = "terminal")]
+            height: 260.0,
+        }
+    }
+}
+
+/// The Browse (code) view's state, grouped out of the `Kyde` god-struct: the folder tree,
+/// the editor tabs (incl. the VS Code-style preview tab), the file editor entity, and the
+/// markdown split. Built via [`BrowseView::new`], which wires the editor's autosave
+/// subscription.
+struct BrowseView {
+    /// All tracked+untracked files (git) or the filesystem walk (non-git) — the tree's data.
+    all_files: Vec<PathBuf>,
+    /// The lazy dir→children folder-tree model built from `all_files`.
+    tree: tree::Tree,
+    /// Directories currently expanded in the tree.
+    expanded: std::collections::HashSet<PathBuf>,
+    /// Width of the file-tree pane, drag-resizable via the divider.
+    tree_width: f32,
+    /// True when the file tree is minimized to a thin strip (the `−` button).
+    tree_collapsed: bool,
+    /// The active editor tab (`None` = nothing open).
+    open_path: Option<PathBuf>,
+    /// Open editor tabs, left→right in open order. `open_path` = the active one.
+    open_tabs: Vec<PathBuf>,
+    /// VS Code-style *preview* tab: at most one tab is temporary, shown in italics. A
+    /// single-click in the tree opens here, reusing this same slot for the next single-click;
+    /// a double-click (or editing the file) promotes it to a permanent tab (`= None`).
+    preview_tab: Option<PathBuf>,
+    /// Project-scoped scratch files (absolute paths, outside the repo), shown in the tree.
+    scratches: Vec<PathBuf>,
+    /// Scroll position of the (horizontally scrollable) tab strip, so opening a
+    /// tab that's off-screen can scroll it into view.
+    tab_scroll: ScrollHandle,
+    /// Highlighted row in the tree (file OR folder); drives the breadcrumb.
+    /// Distinct from `open_path` so selecting a folder doesn't change the editor.
+    selected_path: Option<PathBuf>,
+    /// Scroll position of the tree, so "Select Opened File in Tree" can scroll an
+    /// off-screen row into view.
+    tree_scroll: ScrollHandle,
+    /// The file editor entity.
+    editor: Entity<CodeEditor>,
+    /// Scroll handle for the editor pane — drives the hover scrollbars.
+    editor_scroll: ScrollHandle,
+    /// Vertical scroll handle for the markdown split's code (left) pane.
+    md_editor_scroll: ScrollHandle,
+    /// Vertical scroll handle for the markdown split's rendered preview (right) pane.
+    md_preview_scroll: ScrollHandle,
+    /// Persistent selectable rendered-markdown view (holds the preview's text selection).
+    md_view: Option<gpui::Entity<mdview::MarkdownView>>,
+    /// Editor pane width (px) of the markdown side-by-side split (drag-resizable).
+    md_editor_w: f32,
+}
+
+impl BrowseView {
+    /// Build the file editor + wire its autosave subscription: every real edit persists to
+    /// disk immediately (no Save button). Gated on `dirty` so loading a file (`set_content`
+    /// emits `Changed` with `dirty=false`) doesn't rewrite it.
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        // No placeholder: an empty open file should read as empty, not show prompt text.
+        let editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
+        cx.subscribe(&editor, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.browse.editor.read(cx).dirty {
+                // Editing a preview (temporary) tab promotes it to a permanent tab — VS Code
+                // behaviour, so the edit survives the next single-click elsewhere.
+                if this.browse.preview_tab.is_some()
+                    && this.browse.preview_tab == this.browse.open_path
+                {
+                    this.browse.preview_tab = None;
+                }
+                this.autosave(cx);
+            }
+        })
+        .detach();
+        Self {
+            all_files: Vec::new(),
+            tree: tree::Tree::default(),
+            // Root folder starts expanded so the tree shows on open.
+            expanded: std::collections::HashSet::from([PathBuf::new()]),
+            tree_width: 320.0,
+            tree_collapsed: false,
+            open_path: None,
+            open_tabs: Vec::new(),
+            preview_tab: None,
+            scratches: Vec::new(),
+            tab_scroll: ScrollHandle::new(),
+            selected_path: None,
+            tree_scroll: ScrollHandle::new(),
+            editor,
+            editor_scroll: ScrollHandle::new(),
+            md_editor_scroll: ScrollHandle::new(),
+            md_preview_scroll: ScrollHandle::new(),
+            md_view: None,
+            md_editor_w: 480.0,
+        }
+    }
+}
+
+/// The Commit view's state, grouped out of the `Kyde` god-struct: the changed-files
+/// checkbox tree, the commit-message editor, and the view chrome. The changed-files *data*
+/// (`files`/`selected`) stays on `Kyde` — it's repo status written by `refresh` and read
+/// by Browse (tab colors) and rollback too, not commit-view-private UI.
+struct CommitView {
+    /// Changed files highlighted as a group in the commit list (e.g. after a folder
+    /// "Commit" picks every change under it). Cleared on a plain single-file click.
+    focus: std::collections::HashSet<PathBuf>,
+    /// Changed files as a folder tree.
+    tree: tree::Tree,
+    /// Expanded dirs in that tree.
+    expanded: std::collections::HashSet<PathBuf>,
+    /// Which changed files are checked-to-commit.
+    checked: std::collections::HashSet<PathBuf>,
+    /// The commit-message editor.
+    editor: Entity<CodeEditor>,
+    /// Set by `enter_commit`; `render_commit` consumes it to focus the commit-message input
+    /// on the next frame (deferred so the editor element is in the tree first), so opening
+    /// the Commit view drops the caret straight into the message box.
+    focus_msg: bool,
+    /// Changed-files filter (single-line search above the file list).
+    search: Entity<CodeEditor>,
+    /// True when the changed-files panel is minimized to a thin strip (its `−` button),
+    /// giving the side-by-side diff the full width.
+    collapsed: bool,
+    /// True while a `git commit` is in flight (disables the button, shows "Committing…").
+    committing: bool,
+}
+
+impl CommitView {
+    /// Build the commit-message editor + the changed-files search box (with its live-filter
+    /// subscription).
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let editor = cx.new(|cx| {
+            let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Commit message…");
+            e.fill_height = true; // fill the box so the whole area is clickable
+            e.soft_wrap = true; // wrap long commit messages instead of running off the box
+            e
+        });
+        let search = cx.new(|cx| CodeEditor::single_line(cx, "Search files…"));
+        cx.subscribe(&search, |_this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) {
+                cx.notify();
+            }
+        })
+        .detach();
+        Self {
+            focus: std::collections::HashSet::new(),
+            tree: tree::Tree::default(),
+            expanded: std::collections::HashSet::new(),
+            checked: std::collections::HashSet::new(),
+            editor,
+            focus_msg: false,
+            search,
+            collapsed: false,
+            committing: false,
+        }
+    }
+}
+
+/// The side-by-side diff panes' state, grouped out of the `Kyde` god-struct: the two
+/// editor entities (left = base, read-only; right = working copy, editable + live-saving),
+/// the diffed file, the computed diff model + cached syntax spans, and the pane geometry.
+/// Shared by the commit view, the history view, the push modal, and the Show-Diff window.
+struct DiffPanes {
+    /// The computed line/word diff between `base` and the right pane.
+    current: Option<FileDiff>,
+    /// Syntax spans for the selected file's before/after content (cached on select,
+    /// so the diff doesn't re-parse the whole file every render). Empty when the
+    /// file's language pack isn't installed.
+    old_spans: Vec<highlight::Span>,
+    /// See `old_spans`.
+    new_spans: Vec<highlight::Span>,
+    /// Base (before) pane — read-only, line numbers on the right toward the gutter.
+    left: Entity<CodeEditor>,
+    /// Working (after) pane — editable; edits debounce into `diff_autosave`.
+    right: Entity<CodeEditor>,
+    /// The file the panes are showing (`None` disables the autosave — e.g. binary files).
+    path: Option<PathBuf>,
+    /// Selected file is an image → previewed as an image instead of a text diff. Kept
+    /// separate from `path` (which stays `None` for binary files) so the diff autosave
+    /// never fires and truncates the image to empty.
+    image: Option<PathBuf>,
+    /// Read-only diff (push/history views) — suppresses the gutter chevrons + autosave.
+    readonly: bool,
+    /// Base (HEAD/index) text of the diffed file, kept so we can re-diff live as the
+    /// right (working) pane is edited without re-reading git each keystroke.
+    base: String,
+    /// Shared 2D scroll for BOTH panes (single element each → gpui axis-locks the wheel;
+    /// both panes track it → aligned in both axes).
+    scroll: ScrollHandle,
+    /// Left pane's fraction of the diff island width (the draggable center divider sets it).
+    split: f32,
+    /// Bumped on every right-pane edit; the debounced autosave only fires when its captured
+    /// generation still matches (so we don't spawn `git status` + re-diff per keystroke).
+    edit_gen: u64,
+}
+
+impl DiffPanes {
+    /// Build both diff editors and wire the right (working) pane's debounced autosave:
+    /// typing fires `Changed` per keystroke, but the save + `git status` + full re-diff are
+    /// expensive (subprocess!), so they only run after the last keystroke settles.
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let left = cx.new(|cx| {
+            let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
+            e.gutter_right = true;
+            e
+        });
+        let right = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
+        cx.subscribe(&right, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.diff.right.read(cx).dirty {
+                this.diff.edit_gen = this.diff.edit_gen.wrapping_add(1);
+                let gen = this.diff.edit_gen;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(app::DIFF_EDIT_DEBOUNCE)
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.diff.edit_gen == gen {
+                            this.diff_autosave(cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        })
+        .detach();
+        Self {
+            current: None,
+            old_spans: Vec::new(),
+            new_spans: Vec::new(),
+            left,
+            right,
+            path: None,
+            image: None,
+            readonly: false,
+            base: String::new(),
+            scroll: ScrollHandle::new(),
+            split: 0.5,
+            edit_gen: 0,
+        }
+    }
+}
+
+/// Remote-sync state (push/pull/fetch vs `origin`), grouped out of the `Kyde` god-struct:
+/// the ahead/behind counts, the in-flight operation flags, and what a push would send.
+/// Named `SyncState` (not `Sync`) so it doesn't shadow the `std::marker::Sync` trait.
+struct SyncState {
+    /// Commits ahead of the push base — the status-bar Push badge. `None` = unborn HEAD.
+    ahead: Option<usize>,
+    /// Commits behind the upstream — the status-bar Pull badge. `None` = no upstream.
+    behind: Option<usize>,
+    /// True while a push is in flight (disables the button, shows "Pushing…").
+    pushing: bool,
+    /// True while a pull is in flight.
+    pulling: bool,
+    /// True while a fetch is in flight.
+    fetching: bool,
+    /// Last push/pull failure message (also carried into the op-error banner).
+    push_msg: Option<String>,
+    /// Files a push would send (the Push tab's list + count badge), kept live by `refresh`.
+    push_files: Vec<ChangedFile>,
+    /// The revision a push is measured against (see `Repo::push_base`).
+    push_base: String,
+    /// Selected file index in the Push tab's list.
+    push_selected: Option<usize>,
+}
+
+impl SyncState {
+    fn new() -> Self {
+        Self {
+            ahead: None,
+            behind: None,
+            pushing: false,
+            pulling: false,
+            fetching: false,
+            push_msg: None,
+            push_files: Vec::new(),
+            push_base: String::new(),
+            push_selected: None,
+        }
+    }
+}
+
+/// FPS monitor state (toggled from the Kyde menu), grouped out of the `Kyde` god-struct:
+/// smoothed frames-per-second + the throttled snapshot the overlay displays.
+struct Fps {
+    /// Whether the FPS overlay is shown (persisted across launches).
+    show: bool,
+    /// Smoothed frames-per-second, updated every frame.
+    value: f32,
+    /// Throttled snapshot of `value` — the number the overlay displays, held steady for a
+    /// readable beat rather than re-rendering a blurred number every frame.
+    shown: f32,
+    /// Time of the previous frame (drives the per-frame delta).
+    last: Option<std::time::Instant>,
+    /// Throttle timer for the `shown` snapshot (~5/sec).
+    file_last: Option<std::time::Instant>,
+}
+
 struct Kyde {
     /// None = no project open → the Projects landing view.
     repo_root: Option<PathBuf>,
@@ -536,51 +1125,16 @@ struct Kyde {
     // Commit mode
     files: Vec<ChangedFile>,
     selected: Option<usize>,
-    /// Changed files highlighted as a group in the commit list (e.g. after a folder
-    /// "Commit" picks every change under it). Cleared on a plain single-file click.
-    commit_focus: std::collections::HashSet<PathBuf>,
-    /// Commit view: changed files as a folder tree + which are checked-to-commit.
-    commit_tree: tree::Tree,
-    commit_expanded: std::collections::HashSet<PathBuf>,
-    commit_checked: std::collections::HashSet<PathBuf>,
-    current_diff: Option<FileDiff>,
-    /// Syntax spans for the selected file's before/after content (cached on select,
-    /// so the diff doesn't re-parse the whole file every render). Empty when the
-    /// file's language pack isn't installed.
-    old_spans: Vec<highlight::Span>,
-    new_spans: Vec<highlight::Span>,
-    commit_editor: Entity<CodeEditor>,
-    /// Set by `enter_commit`; `render_commit` consumes it to focus the commit-message input
-    /// on the next frame (deferred so the editor element is in the tree first), so opening the
-    /// Commit view drops the caret straight into the message box.
-    focus_commit_msg: bool,
-    /// Side-by-side diff editors: left = base (read-only), right = working (editable,
-    /// live-saves). `diff_path` is the file they're showing.
-    diff_left: Entity<CodeEditor>,
-    diff_right: Entity<CodeEditor>,
-    diff_path: Option<PathBuf>,
-    /// Selected file is an image → commit view previews it (like Browse) instead of running
-    /// it through the text diff. Kept separate from `diff_path` (which stays `None` for binary
-    /// files) so the diff autosave never fires and truncates the image to empty.
-    diff_image: Option<PathBuf>,
-    /// Read-only diff (push view: committed `@{u}` vs `HEAD`). Suppresses the gutter
-    /// revert chevrons + autosave — there's no working-tree change to stage/revert.
-    diff_readonly: bool,
-    /// Base (HEAD/index) text of the diffed file, kept so we can re-diff live as the
-    /// right (working) pane is edited without re-reading git each keystroke.
-    diff_base: String,
-    /// Shared 2D scroll for BOTH diff panes (single element each → gpui axis-locks the wheel,
-    /// so a vertical gesture doesn't drift horizontally; both panes track it → aligned in both
-    /// axes, horizontal scroll shared across the side-by-side).
-    diff_scroll: ScrollHandle,
-    /// Left pane's fraction of the diff island width (the draggable center divider sets it).
-    diff_split: f32,
+    /// Commit view (checkbox tree, message editor, chrome) — grouped into one sub-struct
+    /// (see `CommitView`).
+    commit: CommitView,
+    /// Side-by-side diff panes (both editors, the diff model + cached spans, geometry) —
+    /// grouped into one sub-struct (see `DiffPanes`).
+    diff: DiffPanes,
     /// The single in-flight divider drag, if any: which divider + the grab offset captured at
     /// mouse-down (cursor coord minus the divider's position). One field for every divider —
     /// see `Divider` and `Kyde::drag_divider`.
     divider_drag: Option<(Divider, f32)>,
-    /// Scroll handle for the Browse editor pane — drives the hover scrollbars.
-    file_scroll: ScrollHandle,
     /// Active scrollbar-thumb drag (which scroll handle, axis, grab cursor, grab offset).
     /// Carries the `ScrollHandle` so the shared scrollbar works on any scrollable view.
     sb_drag: Option<SbDrag>,
@@ -588,91 +1142,27 @@ struct Kyde {
     /// schedules exactly one follow-up frame (scroll metrics are only known *after* a paint, so
     /// the first frame after open/resize is stale). Keyed by view; converges, no redraw loop.
     scroll_dims: std::collections::HashMap<SbView, ScrollDims>,
-    /// Vertical scroll handle for the markdown split's code (left) pane.
-    md_editor_scroll: ScrollHandle,
-    /// Vertical scroll handle for the markdown split's rendered preview (right) pane.
-    md_preview_scroll: ScrollHandle,
-    /// Persistent selectable rendered-markdown view (holds the preview's text selection).
-    md_view: Option<gpui::Entity<mdview::MarkdownView>>,
     /// One-shot: has the Projects search box been auto-focused since the landing appeared?
     /// Reset while a project is open, so returning to the landing re-focuses search.
     projects_search_focused: bool,
-    /// Editor pane width (px) of the markdown side-by-side split (drag-resizable).
-    md_editor_w: f32,
 
-    // Browse mode
-    all_files: Vec<PathBuf>,
-    file_tree: tree::Tree,
-    /// Directories currently expanded in the Browse tree.
-    expanded: std::collections::HashSet<PathBuf>,
-    /// Width of the Browse file-tree pane, drag-resizable via the divider.
-    tree_width: f32,
-    /// True when the file tree is minimized to a thin strip (the `−` button).
-    tree_collapsed: bool,
-    /// True when the commit view's changed-files panel is minimized to a thin strip (its `−`
-    /// button), giving the side-by-side diff the full width. Independent of `tree_collapsed`.
-    commit_collapsed: bool,
-    open_path: Option<PathBuf>,
-    /// Open editor tabs, left→right in open order. `open_path` = the active one.
-    open_tabs: Vec<PathBuf>,
-    /// VS Code-style *preview* tab: at most one tab is temporary, shown in italics. A
-    /// single-click in the tree opens here, reusing this same slot for the next single-click;
-    /// a double-click (or editing the file) promotes it to a permanent tab (`= None`).
-    preview_tab: Option<PathBuf>,
-    /// Project-scoped scratch files (absolute paths, outside the repo), shown in the tree.
-    scratches: Vec<PathBuf>,
-    /// Scroll position of the (horizontally scrollable) tab strip, so opening a
-    /// tab that's off-screen can scroll it into view.
-    tab_scroll: ScrollHandle,
-    /// Highlighted row in the Browse tree (file OR folder); drives the breadcrumb.
-    /// Distinct from `open_path` so selecting a folder doesn't change the editor.
-    selected_path: Option<PathBuf>,
-    /// Scroll position of the Browse tree, so "Select Opened File in Tree" can
-    /// scroll an off-screen row into view.
-    tree_scroll: ScrollHandle,
-    file_editor: Entity<CodeEditor>,
+    // Browse mode — folder tree + editor tabs + file editor + markdown split, all grouped
+    // into one sub-struct (see `BrowseView`).
+    browse: BrowseView,
 
-    // In-editor find / replace bar. Targets whichever editor was focused when it opened
-    // (`find_target`) — the Browse file editor, or a diff pane in the Show-Diff view.
-    find_open: bool,
-    find_replace: bool,
-    find_target: FindTarget,
-    find_query: Entity<CodeEditor>,
-    replace_query: Entity<CodeEditor>,
-    find_matches: Vec<std::ops::Range<usize>>,
-    find_idx: usize,
-    /// Bumped on every diff-pane edit; the debounced autosave only fires when its captured
-    /// generation still matches (so we don't spawn `git status` + re-diff per keystroke).
-    diff_edit_gen: u64,
-    /// Bumped on every Find-in-Files keystroke; the debounced background `git grep` only
-    /// applies its results when its captured generation still matches (drops stale searches).
-    finder_gen: u64,
-    /// FPS monitor (toggled from the Kyde menu): smoothed frames-per-second + last frame time.
-    show_fps: bool,
-    fps_value: f32,
-    /// Throttled snapshot of `fps_value` — the value the overlay displays, held steady for a
-    /// readable beat rather than re-rendering a blurred number every frame.
-    fps_shown: f32,
-    fps_last: Option<std::time::Instant>,
-    /// Throttle timer for the `fps_shown` snapshot (~5/sec).
-    fps_file_last: Option<std::time::Instant>,
+    // In-editor find / replace bar — all its state grouped into one sub-struct (see `FindBar`).
+    // Targets whichever editor was focused when it opened (`find.target`).
+    find: FindBar,
+    /// FPS monitor state — grouped into one sub-struct (see `Fps`).
+    fps: Fps,
 
     // Overlays
-    finder_open: bool,
-    /// Files (Go to File) vs Actions (the Cmd+Shift+A palette) — same overlay, two modes.
-    finder_mode: FinderMode,
-    finder_query: Entity<CodeEditor>,
-    /// Commit-view changed-files filter (single-line search above the file list).
-    commit_search: Entity<CodeEditor>,
-    finder_results: Vec<PathBuf>,
-    /// Content-search hits (used when `finder_mode == Content`).
-    content_results: Vec<ContentHit>,
-    /// Matching palette-action indices (used when `finder_mode == Actions`).
-    action_results: Vec<usize>,
-    finder_selected: usize,
-    onboarding_open: bool,
-    /// True until the user has picked a keymap — the picker can't be dismissed while set.
-    onboarding_forced: bool,
+    /// Go-to-File / Find-in-Files / Actions overlay state — grouped into one sub-struct
+    /// (see `Finder`).
+    finder: Finder,
+    /// First-run / reopened keymap-picker overlay — grouped into one sub-struct
+    /// (see `Onboarding`).
+    onboarding: Onboarding,
     /// Language-pack manager: a native modal window (like Rollback/Push), + its search box.
     plugins_win: Option<gpui::WindowHandle<ModalWindow>>,
     plugins_query: Entity<CodeEditor>,
@@ -690,19 +1180,18 @@ struct Kyde {
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
     welcome_frame: u32,
-    /// The preset currently highlighted in the picker (confirmed via Continue).
-    onboarding_choice: Preset,
-    /// Pending state of the "Install shell command" checkbox in the picker;
-    /// applied (symlink created) when the user confirms with Continue.
-    onboarding_install_cmd: bool,
-    /// Last shell-command install error, shown under the checkbox.
-    shell_cmd_error: Option<String>,
     /// Contents of `crash.log` if the previous run crashed — drives the report banner.
     pending_crash: Option<String>,
     /// Last failed git operation (commit/push/rollback/branch/checkout/status), surfaced
     /// in a dismissible banner so a silent failure never looks like success. Cleared on
     /// the next successful `refresh`. `None` = no outstanding error.
     op_error: Option<String>,
+    /// An operation error raised alongside a `refresh` (rollback/pull/fetch/push/branch),
+    /// stashed here instead of `op_error` because `refresh` is now asynchronous: the
+    /// background status read clears `op_error` on success, which would wipe a message set
+    /// synchronously right after. `apply_snapshot` re-applies this once, after the clear, so
+    /// the message survives exactly that refresh cycle (matching the old synchronous order).
+    pending_error: Option<String>,
     /// Open right-click context menu, if any.
     context_menu: Option<ContextMenu>,
     /// Show-Diff viewer — its own native OS window (`None` when closed).
@@ -733,43 +1222,21 @@ struct Kyde {
     name_input: Entity<CodeEditor>,
 
     // Branch switcher (bottom-right status bar + popup)
+    /// Current branch name (repo state — read by refresh/history/status bar, hence kept
+    /// directly on `Kyde` rather than in `BranchPopup`).
     current_branch: Option<String>,
-    branch_list: Vec<String>,
-    /// Remote-only branches (short name, e.g. "feature-x") that have no local head yet —
-    /// shown under a "Remote" section so freshly-fetched branches are checkout-able.
-    branch_remotes: Vec<String>,
-    branch_popup_open: bool,
-    branch_query: Entity<CodeEditor>,
-    /// Expanded nodes in the branch tree (section keys like "sec:recent" and folder
-    /// keys like "sec:local/feat").
-    branch_expanded: std::collections::HashSet<String>,
+    /// Branch-switcher popup state (list/remotes/open/query/expanded — see `BranchPopup`).
+    branch: BranchPopup,
     /// Bumped on every edit; a debounced task only refreshes git status once this
     /// stops changing (so typing stays snappy but status/tab colors catch up).
     refresh_gen: u64,
-    /// Commits the current branch is ahead of its upstream (drives the push badge).
-    ahead: Option<usize>,
-    /// Commits the upstream is ahead of us, last-fetch fresh (drives the pull badge).
-    behind: Option<usize>,
-    /// True while a `git push` is in flight (disables the button, shows "Pushing…").
-    pushing: bool,
-    /// True while a `git commit` is in flight (disables the button, shows "Committing…").
-    committing: bool,
-    /// True while a `git pull` (fetch + rebase) is in flight (shows "Pulling…").
-    pulling: bool,
-    /// True while a `git fetch` is in flight (shows "Fetching…").
-    fetching: bool,
-    /// Last push error, surfaced as the push button's tooltip.
-    push_msg: Option<String>,
+    /// Remote-sync state (ahead/behind, in-flight push/pull/fetch flags, what a push would
+    /// send) — grouped into one sub-struct (see `SyncState`).
+    sync: SyncState,
     /// Push confirmation — its own native OS window (`None` closed).
     push_win: Option<gpui::WindowHandle<ModalWindow>>,
-    /// Files a push would send (`push_base()..HEAD`), shown like the commit/rollback list.
-    push_files: Vec<ChangedFile>,
-    /// Base revision those files are diffed against (`@{u}` or the empty tree).
-    push_base: String,
     /// Which tab the git (Commit) view is showing — staging changes or pushing commits.
     git_tab: GitTab,
-    /// Selected file index in the Push tab's list (drives its read-only diff).
-    push_selected: Option<usize>,
 
     // Self-update
     /// A newer release found on GitHub (drives the update banner); `None` = up to date / unknown.
@@ -777,62 +1244,12 @@ struct Kyde {
     /// True while a download-swap is in flight (disables the button, shows progress).
     updating: bool,
 
-    // History (git log) view
-    /// Revision being logged — a branch name, or "HEAD" for the current branch.
-    history_rev: String,
-    /// Path the log is scoped to (a folder/file), or `None` for the whole repo. Set when
-    /// the history view is opened from a Browse-tree folder's right-click menu.
-    history_path: Option<PathBuf>,
-    /// Commits shown in the log list (newest first).
-    history_commits: Vec<git::Commit>,
-    /// Selected commit index into `history_commits`.
-    history_selected: Option<usize>,
-    /// Files changed by the selected commit under the current compare mode.
-    history_files: Vec<ChangedFile>,
-    /// Selected file index into `history_files`.
-    history_file_selected: Option<usize>,
-    /// Folder tree of `history_files` (right pane of the history panel).
-    history_files_tree: tree::Tree,
-    /// Expanded dirs in the history files tree.
-    history_files_expanded: std::collections::HashSet<PathBuf>,
-    /// Search box filtering the history files tree.
-    history_files_query: Entity<CodeEditor>,
-    /// Height (px) of the history bottom panel (drag the top edge to resize).
-    history_panel_h: f32,
-    /// When true the history bottom panel is minimised to just its toolbar (the header
-    /// chevron toggles it), giving the diff the full height.
-    history_panel_collapsed: bool,
-    /// What the selected commit is diffed against.
-    history_compare: CompareMode,
-    /// Compare-mode dropdown open in the history view.
-    history_compare_open: bool,
-    /// Branch-picker dropdown open in the history view.
-    history_branch_open: bool,
-    /// Local branches for the history branch picker (loaded when the dropdown opens).
-    history_locals: Vec<String>,
-    /// Remote-tracking branches for the history branch picker.
-    history_remotes: Vec<String>,
-    /// Search box filtering the history branch dropdown.
-    history_branch_query: Entity<CodeEditor>,
-    /// Search box filtering the commit list (subject / author / hash).
-    history_commit_query: Entity<CodeEditor>,
-    /// Scroll position of the commit list.
-    history_scroll: ScrollHandle,
-    /// Fraction (0..1) of the history panel width given to the commit-list pane on the left
-    /// (resizable); the changed-files pane fills the rest on the right. Defaults to 2/3.
-    history_commit_frac: f32,
+    // History (git log) view — all its state grouped into one sub-struct (see `HistoryView`).
+    history: HistoryView,
 
-    // Bottom terminal panel (gated behind the `terminal` Cargo feature).
-    /// One `TerminalView` entity per tab, left→right in open order.
-    #[cfg(feature = "terminal")]
-    term_tabs: Vec<Entity<terminal::TerminalView>>,
-    /// Control state of the panel — open / active / maximized / focus-pending. The pure,
-    /// unit-tested state machine (open/close/toggle/focus); see `src/term_panel.rs`.
-    #[cfg(feature = "terminal")]
-    term_panel: TermPanel,
-    /// Height (px) of the terminal panel, drag-resizable via its top divider.
-    #[cfg(feature = "terminal")]
-    term_height: f32,
+    // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
+    // one sub-struct (see `TermState`).
+    term: TermState,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -1675,7 +2092,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             set_packs(view, &["rust"]);
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_go_to_file(&GoToFile, window, cx);
-            view.finder_query.update(cx, |e, cx| {
+            view.finder.query.update(cx, |e, cx| {
                 e.set_content("render".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
@@ -1687,7 +2104,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             set_packs(view, &["rust"]);
             view.open_file(PathBuf::from("src/main.rs"), cx);
             view.act_find_in_files(&FindInFiles, window, cx);
-            view.finder_query.update(cx, |e, cx| {
+            view.finder.query.update(cx, |e, cx| {
                 e.set_content("kyde".to_string(), Lang::PlainText, cx);
             });
             cx.notify();
@@ -1701,12 +2118,13 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // Browse a large file with the FPS monitor on, scrolled partway down.
         "fps" => {
             set_packs(view, &["json"]);
-            view.show_fps = true;
+            view.fps.show = true;
             if let Ok(f) = std::env::var("KYDE_SHOT_FILE") {
                 view.open_file(PathBuf::from(f), cx);
             }
             // Negative Y offset = scrolled down into the file.
-            view.file_scroll
+            view.browse
+                .editor_scroll
                 .set_offset(gpui::point(px(0.0), px(-600.0 * editor::line_height_px())));
             cx.notify();
         }
@@ -1722,9 +2140,9 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         "terminal" => {
             set_packs(view, &["rust"]);
             view.open_file(PathBuf::from("src/terminal.rs"), cx);
-            view.term_panel.open = true;
+            view.term.panel.open = true;
             view.new_terminal_tab(cx);
-            if let Some(t) = view.term_tabs.last() {
+            if let Some(t) = view.term.tabs.last() {
                 t.read(cx).send_input("git status && ls src\n");
             }
             view.focus_active_terminal(window, cx);
@@ -1807,7 +2225,7 @@ fn main() {
                 // and not mid first-run onboarding) → jump straight to the folder picker.
                 if view.repo_root.is_none()
                     && view.recents.paths.is_empty()
-                    && !view.onboarding_open
+                    && !view.onboarding.open
                 {
                     view.pick_folder(cx);
                 }
@@ -1954,7 +2372,7 @@ mod gpui_smoke_tests {
             .update(cx, |k, _w, cx| {
                 k.open_new_branch(cx);
                 // Type a name with a space — it should be slugified on Create.
-                k.branch_query.update(cx, |e, cx| {
+                k.branch.query.update(cx, |e, cx| {
                     e.set_content("new branch".into(), Lang::PlainText, cx);
                 });
             })
@@ -1973,6 +2391,204 @@ mod gpui_smoke_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// Controller state machine: the (now asynchronous) `refresh` must, after the background
+    /// snapshot lands, populate the changed-files list, the file tree, the branch, and
+    /// auto-select the first change into a diff. Guards the whole `refresh` → `RepoSnapshot`
+    /// → `apply_snapshot` → `select` pipeline (`boot` waits for it via `run_until_parked`).
+    #[gpui::test]
+    fn refresh_populates_changed_files_tree_and_selection(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.files.iter().any(|f| f.path.ends_with("app.tsx")),
+                    "the modified file should appear in the changed-files list"
+                );
+                assert!(
+                    k.files.iter().any(|f| f.path.ends_with("new.txt")),
+                    "the untracked file should appear in the changed-files list"
+                );
+                assert!(
+                    k.browse.all_files.iter().any(|p| p.ends_with("app.tsx")),
+                    "the file tree should be populated from ls-files"
+                );
+                assert!(k.current_branch.is_some(), "branch should be read");
+                assert!(k.selected.is_some(), "a change should be auto-selected");
+                assert!(
+                    k.diff.current.is_some(),
+                    "the selected change should load a diff model"
+                );
+                assert!(k.op_error.is_none(), "a clean status read shows no banner");
+            })
+            .unwrap();
+    }
+
+    /// The `pending_error` mechanism: because `refresh` is asynchronous, an operation error
+    /// set alongside it (rollback/pull/push/branch) can't be written straight to `op_error`
+    /// — the background status read would clear it. Stashing it in `pending_error` must
+    /// survive exactly that refresh (re-applied by `apply_snapshot`), then a later clean
+    /// refresh clears the banner.
+    #[gpui::test]
+    fn pending_error_survives_the_refresh_then_clears(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.pending_error = Some("Rollback failed for 1 file(s): x".into());
+                k.refresh(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(
+                    k.op_error.as_deref(),
+                    Some("Rollback failed for 1 file(s): x"),
+                    "the stashed error must be shown after the refresh clears the banner"
+                );
+                assert!(
+                    k.pending_error.is_none(),
+                    "pending_error is consumed exactly once"
+                );
+            })
+            .unwrap();
+        // A subsequent clean refresh clears the transient banner.
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.op_error.is_none(),
+                    "the next successful refresh clears the banner"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Tab state machine: opening files appends unique permanent tabs and activates the last;
+    /// closing a non-active tab leaves the active one; closing the active tab falls back to a
+    /// neighbour; closing the last empties the editor.
+    #[gpui::test]
+    fn open_and_close_tabs_tracks_active_tab(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.open_file(PathBuf::from("new.txt"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.browse.open_tabs.len(), 2, "two distinct files → two tabs");
+                assert!(
+                    k.browse
+                        .open_path
+                        .as_ref()
+                        .is_some_and(|p| p.ends_with("new.txt")),
+                    "the last-opened file is active"
+                );
+                // Close the non-active tab (app.tsx, index 0): active stays new.txt.
+                k.close_tab(0, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.browse.open_tabs.len(), 1);
+                assert!(k
+                    .browse
+                    .open_path
+                    .as_ref()
+                    .is_some_and(|p| p.ends_with("new.txt")));
+                // Close the last (active) tab → editor cleared.
+                k.close_tab(0, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.browse.open_tabs.is_empty(),
+                    "closing the last tab empties the list"
+                );
+                assert!(k.browse.open_path.is_none(), "nothing is active");
+            })
+            .unwrap();
+    }
+
+    /// A snapshot landing while the finder is open must recompute its results: `refresh` is
+    /// asynchronous, so a finder opened before the background read finishes would otherwise
+    /// show empty/stale results (matched against the old `all_files`) until the next
+    /// keystroke. Caught live — the go-to-file screenshot state rendered zero rows.
+    #[gpui::test]
+    fn snapshot_landing_recomputes_open_finder(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                // Simulate "opened before the first snapshot landed": stale-empty file list.
+                k.browse.all_files.clear();
+                k.finder.open = true;
+                k.finder.mode = FinderMode::Files;
+                k.finder
+                    .query
+                    .update(cx, |e, cx| e.set_content("app".into(), Lang::PlainText, cx));
+                k.recompute_finder(cx);
+                assert!(
+                    k.finder.results.is_empty(),
+                    "sanity: nothing to match before the snapshot"
+                );
+                k.refresh(cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // let the background snapshot land
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.finder.results.iter().any(|p| p.ends_with("app.tsx")),
+                    "the landing snapshot must refresh the open finder's results"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Autosave state machine: a dirty editor buffer flushes to disk, the buffer is marked
+    /// clean, and the changed-files list optimistically shows the file as Modified before
+    /// the debounced `git status` lands (so tree/tab colors react instantly).
+    #[gpui::test]
+    fn autosave_flushes_to_disk_and_marks_modified(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // Simulate a real edit: new buffer content + the dirty flag a keystroke sets.
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_content("const a = 3;\n".into(), Lang::PlainText, cx);
+                    e.dirty = true;
+                });
+                k.autosave(cx);
+                assert!(
+                    !k.browse.editor.read(cx).dirty,
+                    "a successful autosave marks the buffer clean"
+                );
+                assert!(
+                    k.files.iter().any(|f| f.path.ends_with("app.tsx")
+                        && f.status == kyde_git::FileStatus::Modified),
+                    "autosave optimistically lists the file as Modified"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+            "const a = 3;\n",
+            "the edit must reach disk"
+        );
     }
 
     /// Clicking "Rollback" in the rollback window must discard the changes AND close the
@@ -2054,7 +2670,7 @@ mod gpui_smoke_tests {
 
         handle
             .update(cx, |k, _w, cx| {
-                let ed = k.file_editor.read(cx);
+                let ed = k.browse.editor.read(cx);
                 let (shaped, rows) = (ed.shaped_row_count(), ed.display_row_count());
                 assert!(rows > 5000, "expected a big file ({rows} display rows)");
                 // Visible band + 12-row overscan each side is well under a few hundred; the
@@ -2084,7 +2700,7 @@ mod gpui_smoke_tests {
 
         // FPS monitor on for the whole sweep (exercises the request_animation_frame +
         // render-timing path on every screen too).
-        handle.update(cx, |k, _w, _cx| k.show_fps = true).unwrap();
+        handle.update(cx, |k, _w, _cx| k.fps.show = true).unwrap();
         settle(cx);
 
         // Browse with a file open in the editor.
@@ -2107,7 +2723,7 @@ mod gpui_smoke_tests {
             .unwrap();
         settle(cx);
         handle
-            .update(cx, |k, _w, _cx| k.finder_open = false)
+            .update(cx, |k, _w, _cx| k.finder.open = false)
             .unwrap();
 
         // Commit view with a changed file selected → the side-by-side diff renders.
@@ -2133,7 +2749,7 @@ mod gpui_smoke_tests {
         handle.update(cx, super::Kyde::toggle_branch_popup).unwrap();
         settle(cx);
         handle
-            .update(cx, |k, _w, _cx| k.branch_popup_open = false)
+            .update(cx, |k, _w, _cx| k.branch.popup_open = false)
             .unwrap();
 
         // Delete-confirmation modal.
@@ -2147,11 +2763,11 @@ mod gpui_smoke_tests {
 
         // Onboarding / keymap picker overlay.
         handle
-            .update(cx, |k, _w, _cx| k.onboarding_open = true)
+            .update(cx, |k, _w, _cx| k.onboarding.open = true)
             .unwrap();
         settle(cx);
         handle
-            .update(cx, |k, _w, _cx| k.onboarding_open = false)
+            .update(cx, |k, _w, _cx| k.onboarding.open = false)
             .unwrap();
 
         // Plugin manager (native modal window).
@@ -2244,8 +2860,8 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
         handle
             .update(cx, |k, _w, _cx| {
-                assert!(k.term_panel.open, "⌃` opens the panel");
-                assert_eq!(k.term_tabs.len(), 1, "first tab spawned on open");
+                assert!(k.term.panel.open, "⌃` opens the panel");
+                assert_eq!(k.term.tabs.len(), 1, "first tab spawned on open");
             })
             .unwrap();
         // A second tab, then ⌘W closes the active one → one remains, panel stays open.
@@ -2255,15 +2871,15 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
         handle
             .update(cx, |k, window, cx| {
-                assert_eq!(k.term_tabs.len(), 2);
+                assert_eq!(k.term.tabs.len(), 2);
                 k.act_close_terminal_tab(&CloseTerminalTab, window, cx);
             })
             .unwrap();
         cx.run_until_parked();
         handle
             .update(cx, |k, _w, _cx| {
-                assert_eq!(k.term_tabs.len(), 1, "⌘W closes the active tab");
-                assert!(k.term_panel.open, "panel stays open while a tab remains");
+                assert_eq!(k.term.tabs.len(), 1, "⌘W closes the active tab");
+                assert!(k.term.panel.open, "panel stays open while a tab remains");
             })
             .unwrap();
         // ⌘W the last tab → the panel hides.
@@ -2275,8 +2891,8 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
         handle
             .update(cx, |k, _w, _cx| {
-                assert!(k.term_tabs.is_empty());
-                assert!(!k.term_panel.open, "closing the last tab hides the panel");
+                assert!(k.term.tabs.is_empty());
+                assert!(!k.term.panel.open, "closing the last tab hides the panel");
             })
             .unwrap();
     }
@@ -2295,7 +2911,7 @@ mod gpui_smoke_tests {
             .unwrap();
         cx.run_until_parked();
         let view = handle
-            .update(cx, |k, _w, _cx| k.term_tabs[k.term_panel.active].clone())
+            .update(cx, |k, _w, _cx| k.term.tabs[k.term.panel.active].clone())
             .unwrap();
         view.update(cx, |_v, cx| {
             cx.emit(terminal::TerminalEvent::CloseRequested);
@@ -2304,7 +2920,7 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, _cx| {
                 assert_eq!(
-                    k.term_tabs.len(),
+                    k.term.tabs.len(),
                     1,
                     "child exit (CloseRequested) closes the tab"
                 );
@@ -2322,7 +2938,7 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, window, cx| {
                 k.act_toggle_terminal(&ToggleTerminal, window, cx);
-                k.term_panel.maximized = true;
+                k.term.panel.maximized = true;
             })
             .unwrap();
         cx.run_until_parked();
@@ -2332,7 +2948,7 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, _cx| {
                 assert!(
-                    !k.term_panel.maximized,
+                    !k.term.panel.maximized,
                     "switching view un-maximizes the terminal"
                 );
                 assert!(k.mode == Mode::Browse);
@@ -2360,8 +2976,8 @@ pub(crate) fn overlay(cx: &mut Context<Kyde>, dismissable: bool) -> gpui::Div {
             MouseButton::Left,
             cx.listener(move |this, _e, window, cx| {
                 if dismissable {
-                    this.finder_open = false;
-                    this.onboarding_open = false;
+                    this.finder.open = false;
+                    this.onboarding.open = false;
                     this.delete_target = None;
                     window.focus(&this.focus_handle);
                     cx.notify();

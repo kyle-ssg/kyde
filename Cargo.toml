@@ -139,7 +139,7 @@ alacritty_terminal = { version = "0.26.0", optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSData", "NSProcessInfo"] }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSImage", "NSResponder", "NSPasteboard", "NSPasteboardItem"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSImage", "NSResponder"] }
 
 # Embeds the app icon + version into kyde.exe at build time (see build.rs).
 # Windows-only; nothing to compile on macOS/Linux.

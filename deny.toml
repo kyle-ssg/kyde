@@ -11,6 +11,22 @@ yanked = "deny"
 # paste, proc-macro-error2, rustls-pemfile, …) with no safe upgrade available. Real
 # *security* vulnerabilities in transitive deps still fail; only the unmaintained lint is scoped.
 unmaintained = "workspace"
+ignore = [
+    # ttf-parser declared unmaintained (2026-06); no security issue. It's our direct dep for
+    # exactly one call (font-preview family-name parsing, `font_family_name` in main.rs) AND
+    # an unavoidable transitive dep of the pinned gpui 0.2.2 (rustybuzz/usvg font pipeline) —
+    # dropping our direct use wouldn't remove it from the binary. Revisit when gpui migrates
+    # (RustSec suggests skrifa) or when we bump gpui.
+    "RUSTSEC-2026-0192",
+    # quick-xml 0.39 DoS vectors (duplicate-attribute quadratic scan / unbounded namespace
+    # allocs). Unreachable here: quick-xml enters only via `wayland-scanner`, a BUILD-TIME
+    # proc-macro (gpui's Linux/Wayland protocol codegen) parsing the wayland crates' own
+    # bundled protocol XML — never untrusted input — and Kyde ships macOS-only besides.
+    # No fix available without a wayland-scanner release (it pins ^0.39; patched is 0.41).
+    # Revisit on the next gpui/wayland bump.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
 
 [licenses]
 version = 2

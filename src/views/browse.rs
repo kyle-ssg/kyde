@@ -14,21 +14,21 @@ impl Kyde {
             is_dir: true,
             depth: 0,
         }];
-        if self.expanded.contains(&PathBuf::new()) {
-            for mut r in self.file_tree.visible(&self.expanded) {
+        if self.browse.expanded.contains(&PathBuf::new()) {
+            for mut r in self.browse.tree.visible(&self.browse.expanded) {
                 r.depth += 1;
                 visible.push(r);
             }
         }
         let scratch_group = scratch_group_path();
-        if !self.scratches.is_empty() {
+        if !self.browse.scratches.is_empty() {
             visible.push(tree::Row {
                 path: scratch_group.clone(),
                 is_dir: true,
                 depth: 0,
             });
-            if self.expanded.contains(&scratch_group) {
-                for s in &self.scratches {
+            if self.browse.expanded.contains(&scratch_group) {
+                for s in &self.browse.scratches {
                     visible.push(tree::Row {
                         path: s.clone(),
                         is_dir: false,
@@ -50,14 +50,14 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let right = if self.open_tabs.is_empty() {
+        let right = if self.browse.open_tabs.is_empty() {
             div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .child(self.render_no_file(ui, cx))
         } else {
-            let image = self.open_path.clone().filter(|p| is_image(p));
+            let image = self.browse.open_path.clone().filter(|p| is_image(p));
             let editor_area = if let Some(rel) = &image {
                 // Inline image preview, centered, scaled to fit the pane.
                 let abs = self
@@ -74,7 +74,12 @@ impl Kyde {
                     .p_4()
                     .child(img(abs).max_w_full().max_h_full())
                     .into_any_element()
-            } else if self.open_path.as_ref().is_some_and(|p| is_font_file(p)) {
+            } else if self
+                .browse
+                .open_path
+                .as_ref()
+                .is_some_and(|p| is_font_file(p))
+            {
                 self.render_font_view(cx).into_any_element()
             } else {
                 // Outer flex item is `flex_1 min_w_0 overflow_hidden` — it shrinks to its flex
@@ -89,18 +94,18 @@ impl Kyde {
                 // The editor sits inside an explicit-width wrapper (its content width) so long
                 // lines overflow this `overflow_scroll` viewport and the horizontal scrollbar
                 // appears; `min_h_full` keeps the click target covering short files.
-                let content_w = self.file_editor.read(cx).content_width();
+                let content_w = self.browse.editor.read(cx).content_width();
                 let editor_pane = div()
                     .id("editor-scroll")
                     .overflow_scroll()
-                    .track_scroll(&self.file_scroll)
+                    .track_scroll(&self.browse.editor_scroll)
                     // A click in the empty area below a short file forwards to the editor,
                     // so the caret jumps to the last line (the editor consumes its own text
                     // clicks via `stop_propagation`, so this only fires for the gap).
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                            let fe = this.file_editor.clone();
+                            let fe = this.browse.editor.clone();
                             fe.update(cx, |ed, cx| {
                                 ed.click_at(e.position, e.modifiers.shift, window, cx);
                             });
@@ -112,12 +117,12 @@ impl Kyde {
                             .flex_none()
                             .w(px(content_w))
                             .min_h_full()
-                            .child(self.file_editor.clone()),
+                            .child(self.browse.editor.clone()),
                     );
                 let island_w = self.editor_island_w(window);
                 let editor = self.with_scrollbars(
                     editor_pane,
-                    self.file_scroll.clone(),
+                    self.browse.editor_scroll.clone(),
                     island_w,
                     SbView::Editor,
                     window,
@@ -125,27 +130,29 @@ impl Kyde {
                 );
                 // Markdown + the markdown plugin installed → editor | live preview side by side.
                 let md = self
+                    .browse
                     .open_path
                     .as_ref()
                     .is_some_and(|p| matches!(Lang::from_path(p), Lang::Markdown))
                     && self.plugins.is_installed("markdown");
                 if md {
-                    let text = self.file_editor.read(cx).text().to_string();
+                    let text = self.browse.editor.read(cx).text().to_string();
                     // Two side-by-side panes, each with its own reusable scrollbars: the code
                     // editor (left, `md_editor_w` wide, drag-resizable divider) and the rendered
                     // preview (right, the remaining width). Each is wrapped in an explicit-width
                     // container so the split keeps its proportions.
-                    let preview_w = (island_w - self.md_editor_w - theme::FRAME_GAP).max(120.0);
+                    let preview_w =
+                        (island_w - self.browse.md_editor_w - theme::FRAME_GAP).max(120.0);
                     let code_pane = div()
                         .id("md-editor-scroll")
                         .overflow_scroll()
-                        .track_scroll(&self.md_editor_scroll)
+                        .track_scroll(&self.browse.md_editor_scroll)
                         .child(
                             div()
                                 .flex_none()
                                 .w(px(content_w))
                                 .min_h_full()
-                                .child(self.file_editor.clone()),
+                                .child(self.browse.editor.clone()),
                         );
                     // `flex flex_col` is load-bearing: the `with_scrollbars` output is `flex_1`,
                     // which only resolves to the pane height when its parent is a flex column.
@@ -154,13 +161,13 @@ impl Kyde {
                         .flex()
                         .flex_col()
                         .flex_none()
-                        .w(px(self.md_editor_w))
+                        .w(px(self.browse.md_editor_w))
                         .h_full()
                         .min_h_0()
                         .child(self.with_scrollbars(
                             code_pane,
-                            self.md_editor_scroll.clone(),
-                            self.md_editor_w,
+                            self.browse.md_editor_scroll.clone(),
+                            self.browse.md_editor_w,
                             SbView::MdEditor,
                             window,
                             cx,
@@ -168,13 +175,14 @@ impl Kyde {
                     // Persistent selectable rendered-markdown view (keeps its text selection
                     // across frames); re-parses only when the source actually changes.
                     // Directory of the open markdown file, for resolving relative image paths.
-                    let base_dir = self.open_path.as_ref().and_then(|p| {
+                    let base_dir = self.browse.open_path.as_ref().and_then(|p| {
                         self.repo_root
                             .as_ref()
                             .map(|r| r.join(p))
                             .and_then(|abs| abs.parent().map(std::path::Path::to_path_buf))
                     });
                     let mv = self
+                        .browse
                         .md_view
                         .get_or_insert_with(|| {
                             cx.new(|cx| mdview::MarkdownView::new(&text, base_dir.clone(), cx))
@@ -184,7 +192,7 @@ impl Kyde {
                     let preview_pane = div()
                         .id("md-preview-scroll")
                         .overflow_y_scroll()
-                        .track_scroll(&self.md_preview_scroll)
+                        .track_scroll(&self.browse.md_preview_scroll)
                         .child(mv);
                     let right = div()
                         .flex()
@@ -195,7 +203,7 @@ impl Kyde {
                         .min_h_0()
                         .child(self.with_scrollbars(
                             preview_pane,
-                            self.md_preview_scroll.clone(),
+                            self.browse.md_preview_scroll.clone(),
                             preview_w,
                             SbView::MdPreview,
                             window,
@@ -236,7 +244,7 @@ impl Kyde {
             };
             // Right-click in the editor pane shows git commands only (Commit / Rollback /
             // Push) for the open file — no file-management items.
-            let menu_path = self.open_path.clone();
+            let menu_path = self.browse.open_path.clone();
             let editor_area = div()
                 .flex()
                 .flex_col()
@@ -268,7 +276,7 @@ impl Kyde {
                 if let Some(pack) = self.pending_pack() {
                     r = r.child(self.render_install_banner(pack, ui, fs, cx));
                 }
-                if self.find_open {
+                if self.find.open {
                     r = r.child(self.render_find_bar(ui, cx));
                 }
             }
@@ -314,8 +322,8 @@ impl Kyde {
                         .unwrap_or_default()
                         .into()
                 };
-                let expanded = self.expanded.contains(&r.path);
-                let selected = self.selected_path.as_ref() == Some(&r.path);
+                let expanded = self.browse.expanded.contains(&r.path);
+                let selected = self.browse.selected_path.as_ref() == Some(&r.path);
                 let (p_act, p_ctx) = (r.path.clone(), r.path.clone());
                 let is_dir = r.is_dir;
                 // Color changed files by their git status (modified/added/…), matching the
@@ -339,7 +347,7 @@ impl Kyde {
                         // Folders toggle expansion. Files (VS Code-style): single click opens in
                         // the temporary *preview* tab (reused by the next single-click), double
                         // click opens a permanent tab.
-                        this.selected_path = Some(p_act.clone());
+                        this.browse.selected_path = Some(p_act.clone());
                         // Focus the app root so the "Kyde"-context Backspace (delete) binding
                         // is live on the selected row. (open_file/preview_file re-focus the
                         // editor below, which is what we want there.)
@@ -384,7 +392,7 @@ impl Kyde {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
-                    this.tree_collapsed = true;
+                    this.browse.tree_collapsed = true;
                     cx.notify();
                 }),
             );
@@ -392,7 +400,7 @@ impl Kyde {
             .flex()
             .flex_col()
             .relative()
-            .w(px(self.tree_width))
+            .w(px(self.browse.tree_width))
             .flex_none()
             .h_full()
             .py_1()
@@ -406,14 +414,14 @@ impl Kyde {
                 let rows_pane = div()
                     .id("browse-tree")
                     .overflow_y_scroll()
-                    .track_scroll(&self.tree_scroll)
+                    .track_scroll(&self.browse.tree_scroll)
                     .flex()
                     .flex_col()
                     .children(rows);
                 self.with_scrollbars(
                     rows_pane,
-                    self.tree_scroll.clone(),
-                    self.tree_width,
+                    self.browse.tree_scroll.clone(),
+                    self.browse.tree_width,
                     SbView::Tree,
                     window,
                     cx,
@@ -447,7 +455,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| {
-                            this.tree_collapsed = false;
+                            this.browse.tree_collapsed = false;
                             cx.notify();
                         }),
                     ),
@@ -486,7 +494,7 @@ impl Kyde {
             .child(right);
 
         let mut row = div().flex().flex_row().flex_1();
-        row = if self.tree_collapsed {
+        row = if self.browse.tree_collapsed {
             row.child(collapsed_strip)
                 .child(div().w(px(theme::FRAME_GAP)).flex_none().h_full())
         } else {
@@ -667,7 +675,7 @@ impl Kyde {
                         src.clone().into()
                     } else {
                         let rel = src.trim_start_matches("./");
-                        let joined = match self.open_path.as_ref().and_then(|p| p.parent()) {
+                        let joined = match self.browse.open_path.as_ref().and_then(|p| p.parent()) {
                             Some(dir) => dir.join(rel),
                             None => PathBuf::from(rel),
                         };
@@ -686,7 +694,7 @@ impl Kyde {
         div()
             .id("md-preview")
             .overflow_y_scroll()
-            .track_scroll(&self.md_preview_scroll)
+            .track_scroll(&self.browse.md_preview_scroll)
             .flex()
             .flex_col()
             .gap_2()
@@ -698,8 +706,8 @@ impl Kyde {
 
     /// Expand/collapse a directory in the Browse tree.
     pub(crate) fn toggle_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
-        if !self.expanded.remove(&dir) {
-            self.expanded.insert(dir);
+        if !self.browse.expanded.remove(&dir) {
+            self.browse.expanded.insert(dir);
         }
         cx.notify();
     }
@@ -709,18 +717,19 @@ impl Kyde {
     /// view. Falls back to the highlighted row if no file is open.
     pub(crate) fn reveal_in_tree(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self
+            .browse
             .open_path
             .clone()
-            .or_else(|| self.selected_path.clone())
+            .or_else(|| self.browse.selected_path.clone())
         else {
             return;
         };
         self.mode = Mode::Browse;
         // Expand every ancestor dir (incl. the root `""`) so the row is visible.
         for anc in target.ancestors().skip(1) {
-            self.expanded.insert(anc.to_path_buf());
+            self.browse.expanded.insert(anc.to_path_buf());
         }
-        self.selected_path = Some(target.clone());
+        self.browse.selected_path = Some(target.clone());
         // Find the target's index in the same flattened order render_browse uses
         // (root row, then tree rows, then scratches) and scroll it into view.
         let mut idx = if target.as_os_str().is_empty() {
@@ -730,7 +739,7 @@ impl Kyde {
         };
         if idx.is_none() {
             let mut i = 1usize;
-            for r in self.file_tree.visible(&self.expanded) {
+            for r in self.browse.tree.visible(&self.browse.expanded) {
                 if r.path == target {
                     idx = Some(i);
                     break;
@@ -738,7 +747,7 @@ impl Kyde {
                 i += 1;
             }
             if idx.is_none() {
-                for s in &self.scratches {
+                for s in &self.browse.scratches {
                     if *s == target {
                         idx = Some(i);
                         break;
@@ -748,7 +757,7 @@ impl Kyde {
             }
         }
         if let Some(i) = idx {
-            self.tree_scroll.scroll_to_item(i);
+            self.browse.tree_scroll.scroll_to_item(i);
         }
         cx.notify();
     }
@@ -784,7 +793,7 @@ impl Kyde {
                 String::new()
             };
             let lang = self.effective_lang(&rel);
-            self.file_editor.update(cx, |e, cx| {
+            self.browse.editor.update(cx, |e, cx| {
                 e.line_numbers = true;
                 e.set_content(content, lang, cx);
             });
@@ -795,42 +804,44 @@ impl Kyde {
             let md = matches!(highlight::Lang::from_path(&rel), highlight::Lang::Markdown)
                 && self.plugins.is_installed("markdown");
             let h = if md {
-                self.md_editor_scroll.clone()
+                self.browse.md_editor_scroll.clone()
             } else {
-                self.file_scroll.clone()
+                self.browse.editor_scroll.clone()
             };
-            self.file_editor.update(cx, |e, _| e.set_scroll_handle(h));
+            self.browse.editor.update(cx, |e, _| e.set_scroll_handle(h));
         }
-        self.selected_path = Some(rel.clone());
-        if self.open_tabs.contains(&rel) {
+        self.browse.selected_path = Some(rel.clone());
+        if self.browse.open_tabs.contains(&rel) {
             // Already open. A permanent open promotes it out of the preview slot; a preview
             // open of an already-permanent tab leaves its permanence alone (just activates).
-            if !preview && self.preview_tab.as_ref() == Some(&rel) {
-                self.preview_tab = None;
+            if !preview && self.browse.preview_tab.as_ref() == Some(&rel) {
+                self.browse.preview_tab = None;
             }
         } else if preview {
             // Reuse the single preview slot: replace its path in place if one exists, else
             // append. The replaced file's tab vanishes — exactly one temporary tab at a time.
             match self
+                .browse
                 .preview_tab
                 .take()
-                .and_then(|prev| self.open_tabs.iter().position(|t| t == &prev))
+                .and_then(|prev| self.browse.open_tabs.iter().position(|t| t == &prev))
             {
-                Some(i) => self.open_tabs[i] = rel.clone(),
-                None => self.open_tabs.push(rel.clone()),
+                Some(i) => self.browse.open_tabs[i] = rel.clone(),
+                None => self.browse.open_tabs.push(rel.clone()),
             }
-            self.preview_tab = Some(rel.clone());
+            self.browse.preview_tab = Some(rel.clone());
         } else {
-            self.open_tabs.push(rel.clone());
+            self.browse.open_tabs.push(rel.clone());
         }
-        self.open_path = Some(rel);
+        self.browse.open_path = Some(rel);
         // Scroll the (possibly off-screen) active tab into view on next paint.
         if let Some(i) = self
+            .browse
             .open_path
             .as_ref()
-            .and_then(|p| self.open_tabs.iter().position(|t| t == p))
+            .and_then(|p| self.browse.open_tabs.iter().position(|t| t == p))
         {
-            self.tab_scroll.scroll_to_item(i);
+            self.browse.tab_scroll.scroll_to_item(i);
         }
         self.load_font_preview(cx);
     }
@@ -839,7 +850,7 @@ impl Kyde {
     /// and register it with the text system so the preview pane can render it. Otherwise
     /// clears the cached preview. Cheap + idempotent (skips re-registering the same path).
     pub(crate) fn load_font_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.open_path.clone().filter(|p| is_font_file(p)) else {
+        let Some(rel) = self.browse.open_path.clone().filter(|p| is_font_file(p)) else {
             self.font_preview = None;
             return;
         };
