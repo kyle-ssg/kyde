@@ -2583,6 +2583,44 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Window-refocus reload, Commit view: the side-by-side panes show a file's working
+    /// copy, and `refresh` deliberately never touches the pane editors (cx=None re-select)
+    /// — so an explicit refocus must reload them, or external edits stay invisible (and an
+    /// editable stale right pane could then clobber them on the next keystroke).
+    #[gpui::test]
+    fn reload_external_refreshes_commit_diff_panes(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.enter_commit(cx);
+                // Select the modified file WITH a context so the panes actually load.
+                let i = k
+                    .files
+                    .iter()
+                    .position(|f| f.path.ends_with("app.tsx"))
+                    .expect("app.tsx is a change");
+                k.select_with(i, Some(cx));
+                assert_eq!(k.diff.right.read(cx).text(), "const a = 2;\n");
+            })
+            .unwrap();
+        cx.run_until_parked();
+        // External tool rewrites the file while Kyde is in the background.
+        std::fs::write(dir.join("app.tsx"), "const a = 7; // external\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(
+                    k.diff.right.read(cx).text(),
+                    "const a = 7; // external\n",
+                    "refocus must reload the commit view's working pane"
+                );
+            })
+            .unwrap();
+    }
+
     /// Autosave state machine: a dirty editor buffer flushes to disk, the buffer is marked
     /// clean, and the changed-files list optimistically shows the file as Modified before
     /// the debounced `git status` lands (so tree/tab colors react instantly).
