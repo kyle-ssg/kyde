@@ -80,9 +80,10 @@ editor/  mdview.rs  terminal.rs  remote_img.rs
 clipboard.rs  scratch.rs  shellcmd.rs
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
-kyde-git      Repo: discover/status/base_content/working_content/stage/unstage/apply_patch/
-              commit + Commit/ChangedFile/FileStatus. Shells out to `git`. (thiserror: GitError)
-kyde-diff     FileDiff::compute() → line Hunks + word ranges; hunk_patch(). (similar)
+kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
+              apply_patch/commit + Commit/ChangedFile/FileStatus. Shells out to `git`.
+              (thiserror: GitError)
+kyde-diff     FileDiff::compute() → line Hunks + word ranges; stats(); hunk_patch(). (similar)
 kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap. (thiserror: UpdateError, serde_json)
@@ -91,8 +92,9 @@ kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional 
               feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
 kyde-theme    runtime dark palette (theme::get/merge, hex JSON). (kyde-color, serde) — gpui-free
 kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
-              file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, the file-tree
-              row `tree::item<V>` (generic over the view), and `picker` (bounded nav_up/
+              file_badge, checkbox, menu_icon, lerp_rgb, scrollbar_thumb, line_stats
+              (`+a −r` label), the file-tree row `tree::item<V>` (generic over the view,
+              optional trailing element), and `picker` (bounded nav_up/
               nav_down + the selected/hover row pill every list picker uses — finder,
               history, push). Aliased back as `ui` in main.rs. (gpui, kyde-theme)
 kyde-syntax   tree-sitter highlight() + fold_regions(); OWNS every grammar crate behind
