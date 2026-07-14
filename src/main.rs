@@ -2359,6 +2359,12 @@ mod gpui_smoke_tests {
             std::process::Command::new("git")
                 .args(args)
                 .current_dir(&dir)
+                // Scrub the repo-pointing env git exports to hooks — inherited (e.g. under
+                // the pre-push hook) it would redirect these commands to the kyde repo
+                // itself instead of the temp dir. Mirrors kyde-git's `git_cmd`.
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
                 .output()
                 .unwrap();
         };

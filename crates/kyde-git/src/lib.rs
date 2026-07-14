@@ -157,8 +157,7 @@ impl Repo {
         // show CAP results, and they arrive from the first files almost immediately, so
         // reading CAP lines then killing turns that into a near-instant, bounded read.
         // `-m 50` also caps matches *per file* so one huge file can't fill the whole cap.
-        let child = Command::new("git")
-            .current_dir(&self.root)
+        let child = git_cmd(&self.root)
             .args([
                 "grep",
                 "--no-color",
@@ -765,12 +764,25 @@ fn push_rejected(err: &str) -> bool {
     .any(|m| e.contains(m))
 }
 
-fn git(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        // Force English output: `stage`'s already-staged-deletion fallback and
-        // `push_rejected` match on git's message text, which localized gits translate.
+/// Base `git` command for `dir`: locale + environment pinned so behavior doesn't depend on
+/// how the app was launched.
+/// - `LC_ALL=C` forces English output — `stage`'s already-staged-deletion fallback and
+///   `push_rejected` match on git's message text, which localized gits translate.
+/// - `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` are scrubbed: git exports them to hooks
+///   (and users set them), and inherited they silently redirect every command to *that*
+///   repository instead of `dir` (e.g. kyde launched from a git hook).
+fn git_cmd(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir)
         .env("LC_ALL", "C")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE");
+    cmd
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String> {
+    let out = git_cmd(dir)
         .args(args)
         .output()
         .map_err(io_err(format!("running git {args:?}")))?;
@@ -785,9 +797,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
     use std::io::Write;
-    let mut child = Command::new("git")
-        .current_dir(dir)
-        .env("LC_ALL", "C") // English output — see `git()`
+    let mut child = git_cmd(dir)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
