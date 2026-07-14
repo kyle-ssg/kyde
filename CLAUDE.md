@@ -81,9 +81,10 @@ clipboard.rs  scratch.rs  shellcmd.rs
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
-              apply_patch/commit + Commit/ChangedFile/FileStatus. Shells out to `git`.
-              (thiserror: GitError)
-kyde-diff     FileDiff::compute() → line Hunks + word ranges; stats(); hunk_patch(). (similar)
+              stage_content/apply_patch/commit + Commit/ChangedFile/FileStatus. Shells out
+              to `git`. (thiserror: GitError)
+kyde-diff     FileDiff::compute() → line Hunks + word ranges; stats();
+              partial_new_content(); hunk_patch(). (similar)
 kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap. (thiserror: UpdateError, serde_json)
@@ -261,7 +262,7 @@ Privacy & Security → Screen Recording) — grant it if you want to script scre
 1. ✅ gpui window + 3-pane layout
 2. ✅ live `git status` → colored changed-files tree
 3. ✅ side-by-side diff with line-hunk backgrounds + word-range model
-4. ✅ clickable center-gutter `»`/`☐` → `Repo::apply_patch()` (stage/revert hunk)
+4. ✅ clickable center-gutter `»`/`☐` (revert hunk / include hunk in commit)
 5. ✅ editable commit message + Commit button → `Repo::commit()`
 6. ✅ Browse mode: expandable folder tree (`src/tree.rs`), tree-sitter highlighter
    (`src/highlight.rs`), real editor (`src/editor.rs`), `Repo::save_file`.
@@ -321,8 +322,11 @@ gutter chevrons line up with their hunk (gutter content only on the `hunk_start`
 `row_h` = 18px → alignment holds). Lines are syntax-colored with `editor::line_runs` +
 `gpui::StyledText::with_runs`, using spans cached on `Kyde.old_spans/new_spans`
 (computed in `select()` via `effective_lang`, so no per-render reparse; empty when the
-file's pack isn't installed). Clicking any changed line cell stages that hunk (= include);
-gutter `»` reverts. `render_diff_modal` reuses `render_diff`. `line_byte_starts` maps line
+file's pack isn't installed). Each hunk's gutter row has a checkbox (include this hunk in
+the commit — unticked hunks stay on disk but out of the commit, IntelliJ/VSCode-style
+partial commit; state = `CommitView.excluded_hunks`, applied by `commit_now` via
+`FileDiff::partial_new_content` + `Repo::stage_content`) and a `»` (revert the hunk).
+`render_diff_modal` reuses `render_diff`. `line_byte_starts` maps line
 index → byte offset so per-line span slicing matches `highlight::highlight`'s indices.
 
 ## Browse file tree (src/tree.rs + render_browse)

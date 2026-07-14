@@ -317,6 +317,21 @@ impl Repo {
         }
     }
 
+    /// Stage `content` as `rel`'s index entry WITHOUT touching the working tree
+    /// (`git hash-object -w` + `git update-index --add --cacheinfo`) — the partial-commit
+    /// primitive: commit a subset of a file's changes while the rest stays on disk.
+    /// The entry's mode follows the working file's executable bit.
+    pub fn stage_content(&self, rel: &Path, content: &str) -> Result<()> {
+        let oid = git_stdin(&self.root, &["hash-object", "-w", "--stdin"], content)?;
+        let mode = if is_executable(&self.root.join(rel)) {
+            "100755"
+        } else {
+            "100644"
+        };
+        let info = format!("{mode},{},{}", oid.trim(), rel.to_string_lossy());
+        git(&self.root, &["update-index", "--add", "--cacheinfo", &info]).map(|_| ())
+    }
+
     /// Unstage a file (`git restore --staged -- <rel>`).
     pub fn unstage(&self, rel: &Path) -> Result<()> {
         git(
@@ -832,6 +847,19 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether the on-disk file has any executable bit set (false when absent).
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether the on-disk file has any executable bit set (always false off-unix).
+#[cfg(not(unix))]
+fn is_executable(_path: &Path) -> bool {
+    false
+}
+
 fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
     use std::io::Write;
     let mut child = git_cmd(dir)
@@ -1038,6 +1066,71 @@ mod tests {
         assert_eq!(stats.get(Path::new("gone.txt")), Some(&(0, 2)));
         assert_eq!(stats.get(Path::new("new.txt")), Some(&(3, 0)));
         assert!(!stats.contains_key(Path::new("blob.bin")));
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// `stage_content` stages GIVEN content for a path (not the working copy), leaving the
+    /// working tree untouched — the partial-commit primitive.
+    #[test]
+    fn stage_content_stages_given_text_without_touching_the_worktree() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-partial-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+
+        // Two edits on disk; stage only the first one.
+        fs::write(work.join("f.txt"), "ONE\ntwo\nTHREE\n").unwrap();
+        let repo = Repo::discover(&work).unwrap();
+        repo.stage_content(Path::new("f.txt"), "ONE\ntwo\nthree\n")
+            .expect("staging partial content");
+        repo.commit("partial").expect("committing the staged half");
+
+        assert_eq!(g(&work, &["show", "HEAD:f.txt"]), "ONE\ntwo\nthree\n");
+        assert_eq!(
+            fs::read_to_string(work.join("f.txt")).unwrap(),
+            "ONE\ntwo\nTHREE\n"
+        );
+        let status = repo.status().unwrap();
+        assert_eq!(status.len(), 1);
+        assert_eq!(status[0].path, PathBuf::from("f.txt"));
+
+        // A brand-new (untracked) file can be partially staged the same way.
+        fs::write(work.join("new.txt"), "a\nb\n").unwrap();
+        repo.stage_content(Path::new("new.txt"), "a\n")
+            .expect("staging partial content of an untracked file");
+        repo.commit("partial new")
+            .expect("committing the staged part");
+        assert_eq!(g(&work, &["show", "HEAD:new.txt"]), "a\n");
+        assert_eq!(fs::read_to_string(work.join("new.txt")).unwrap(), "a\nb\n");
+
+        // An executable's mode survives partial staging (100755, not 100644).
+        fs::write(work.join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
+        g(&work, &["update-index", "--add", "--chmod=+x", "run.sh"]);
+        g(&work, &["commit", "-m", "script"]);
+        fs::write(work.join("run.sh"), "#!/bin/sh\necho hi\necho more\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(work.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        repo.stage_content(Path::new("run.sh"), "#!/bin/sh\necho hi\necho more\n")
+            .expect("staging executable content");
+        let ls = g(&work, &["ls-files", "--stage", "--", "run.sh"]);
+        assert!(
+            ls.starts_with("100755"),
+            "executable bit must survive stage_content, got: {ls}"
+        );
 
         let _ = fs::remove_dir_all(&work);
     }
