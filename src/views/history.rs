@@ -367,6 +367,7 @@ impl Kyde {
                     name,
                     name_color,
                     None,
+                    None,
                     move |this, _e, _w, cx| {
                         if is_dir {
                             if !this.history.files_expanded.remove(&p_act) {

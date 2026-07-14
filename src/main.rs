@@ -1124,6 +1124,9 @@ struct Kyde {
 
     // Commit mode
     files: Vec<ChangedFile>,
+    /// Per-file `(added, removed)` line counts (numstat), refreshed with `files`. Files
+    /// absent here (binaries) just render without the count.
+    stats: std::collections::HashMap<PathBuf, (usize, usize)>,
     selected: Option<usize>,
     /// Commit view (checkbox tree, message editor, chrome) — grouped into one sub-struct
     /// (see `CommitView`).

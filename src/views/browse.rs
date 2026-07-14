@@ -343,6 +343,7 @@ impl Kyde {
                     name,
                     name_color,
                     None,
+                    None,
                     move |this, e, window, cx| {
                         // Folders toggle expansion. Files (VS Code-style): single click opens in
                         // the temporary *preview* tab (reused by the next single-click), double

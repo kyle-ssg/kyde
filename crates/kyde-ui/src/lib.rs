@@ -14,6 +14,7 @@ mod menu;
 pub mod picker;
 mod scrollbar;
 mod select;
+mod stats;
 mod tab;
 /// Call sites use the explicit `ui::tree::item(…)`.
 pub mod tree;
@@ -26,4 +27,5 @@ pub use footer::*;
 pub use menu::*;
 pub use scrollbar::*;
 pub use select::*;
+pub use stats::*;
 pub use tab::*;

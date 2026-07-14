@@ -237,6 +237,17 @@ impl Kyde {
                 };
                 let expanded = self.commit.expanded.contains(&r.path);
                 let is_dir = r.is_dir;
+                // The whole change set's `+a −r` total on the root row only — per-file counts
+                // live in the diff's floating pill, so filenames keep the full row width.
+                let stats = is_root
+                    .then(|| {
+                        let (a, d) = self
+                            .stats
+                            .values()
+                            .fold((0, 0), |(a, d), (fa, fd)| (a + fa, d + fd));
+                        ui::line_stats(a, d)
+                    })
+                    .flatten();
                 let (p_act, p_check, p_ctx) = (r.path.clone(), r.path.clone(), r.path.clone());
                 ui::tree::item(
                     cx,
@@ -249,6 +260,7 @@ impl Kyde {
                     name,
                     name_color,
                     Some(checked),
+                    stats,
                     move |this, _e, _w, cx| {
                         if is_dir {
                             this.toggle_commit_dir(p_act.clone(), cx);

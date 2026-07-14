@@ -151,6 +151,15 @@ impl FileDiff {
 
         FileDiff { old, new, hunks }
     }
+
+    /// Total `(added, removed)` line counts, summed over the hunks (a modified region
+    /// counts on both sides). Matches `git diff --numstat` for the same pair of texts.
+    #[must_use]
+    pub fn stats(&self) -> (usize, usize) {
+        self.hunks.iter().fold((0, 0), |(add, rem), h| {
+            (add + h.new_range.len(), rem + h.old_range.len())
+        })
+    }
 }
 
 /// `(line_idx, byte_range)` pairs for one diff side's word-level highlights.
@@ -265,6 +274,19 @@ mod tests {
         assert_eq!(deleted.hunks[0].kind, HunkKind::Deleted);
 
         assert!(FileDiff::compute("a\nb\n", "a\nb\n").hunks.is_empty());
+    }
+
+    #[test]
+    fn stats_counts_added_and_removed_lines_across_hunks() {
+        // b→B is +1 −1, the appended d/e is +2 — totals must span hunks.
+        assert_eq!(
+            FileDiff::compute("a\nb\nc\n", "a\nB\nc\nd\ne\n").stats(),
+            (3, 1)
+        );
+        assert_eq!(FileDiff::compute("a\nb\n", "a\n").stats(), (0, 1));
+        assert_eq!(FileDiff::compute("x\n", "x\n").stats(), (0, 0));
+        // A new file is all additions.
+        assert_eq!(FileDiff::compute("", "a\nb\n").stats(), (2, 0));
     }
 
     #[test]
