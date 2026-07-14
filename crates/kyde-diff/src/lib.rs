@@ -355,7 +355,7 @@ mod tests {
         let d = FileDiff::compute("", "x\ny\n");
         assert_eq!(d.hunks.len(), 1);
         assert_eq!(d.partial_new_content(|_| true), "x\ny\n");
-        assert_eq!(d.partial_new_content(|_| false), "")
+        assert_eq!(d.partial_new_content(|_| false), "");
     }
 
     #[test]
