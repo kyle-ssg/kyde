@@ -4,7 +4,7 @@ name = "kyde"
 # `[package].version` and needs a real string here. The shared `[workspace.package].version`
 # below is kept in lockstep via release-please-config.json `extra-files`, so the internal
 # crates that inherit it stay on the same number.
-version = "2.0.1"
+version = "2.1.0"
 edition.workspace = true
 rust-version.workspace = true
 description = "Fast native macOS git commit/diff tool, IDE-style, built on gpui"
@@ -25,7 +25,7 @@ members = ["crates/*"]
 # in lockstep with the root `[package].version` via the `extra-files` updater in
 # release-please-config.json (it can't bump an inherited `version.workspace` directly).
 [workspace.package]
-version = "2.0.1"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.96"
 license = "Apache-2.0"
