@@ -324,17 +324,26 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// A small floating control at the diff's top-right: the change count + prev/next arrows
-    /// that jump between hunks. Shown whenever the current diff has at least one change.
+    /// A small floating pill at the diff's top-right: the change count + the file's `+a −r`
+    /// line stats, plus prev/next arrows that jump between hunks (only when there are 2+ to
+    /// jump between). Shown whenever the current diff has at least one change.
     fn render_diff_nav(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let n = self.diff.current.as_ref().map_or(0, |d| d.hunks.len());
-        // Nothing to navigate with a single (or zero) change — hide the control.
-        if n < 2 {
+        if n == 0 {
             return None;
         }
+        let nav = n >= 2;
         let t = theme::get();
         let ui = theme::font::UI_FAMILY;
-        let label = format!("{n} changes");
+        let label = if n == 1 {
+            "1 change".to_string()
+        } else {
+            format!("{n} changes")
+        };
+        let stats = self.diff.current.as_ref().and_then(|d| {
+            let (a, r) = d.stats();
+            crate::ui::line_stats(a, r)
+        });
         let arrow = |id: &'static str, icon: &'static str, tip: &'static str, next: bool| {
             div()
                 .id(id)
@@ -379,18 +388,21 @@ impl Kyde {
                 .text_size(px(t.ui_font_size))
                 .text_color(t.secondary_text)
                 .child(div().mr_1().child(label))
-                .child(arrow(
-                    "diff-prev",
-                    "icons/arrow-up.svg",
-                    "Previous change",
-                    false,
-                ))
-                .child(arrow(
-                    "diff-next",
-                    "icons/arrow-down.svg",
-                    "Next change",
-                    true,
-                ))
+                .when_some(stats, |d, s| d.child(div().mr_1().child(s)))
+                .when(nav, |d| {
+                    d.child(arrow(
+                        "diff-prev",
+                        "icons/arrow-up.svg",
+                        "Previous change",
+                        false,
+                    ))
+                    .child(arrow(
+                        "diff-next",
+                        "icons/arrow-down.svg",
+                        "Next change",
+                        true,
+                    ))
+                })
                 .into_any_element(),
         )
     }

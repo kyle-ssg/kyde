@@ -22,6 +22,7 @@ pub fn item<V: 'static>(
     name: SharedString,
     name_color: kyde_color::Color,
     checkbox: Option<bool>,
+    trailing: Option<gpui::AnyElement>,
     on_activate: impl Fn(&mut V, &gpui::MouseDownEvent, &mut Window, &mut Context<V>) + 'static,
     on_check: impl Fn(&mut V, &mut Context<V>) + 'static,
     on_context: impl Fn(&mut V, gpui::Point<Pixels>, &mut Context<V>) + 'static,
@@ -104,7 +105,8 @@ pub fn item<V: 'static>(
                 .truncate()
                 .text_color(name_color)
                 .child(name),
-        );
+        )
+        .when_some(trailing, gpui::ParentElement::child);
 
     div()
         .flex()

@@ -224,6 +224,43 @@ impl Repo {
         Ok(files)
     }
 
+    /// Added/removed line counts per changed file — one `git diff --numstat` against HEAD
+    /// (worktree + index, matching the working-vs-HEAD diff the commit view shows), plus a
+    /// line count for each untracked file (all additions). Binary files are omitted: numstat
+    /// reports `-` for them and `+0 −0` would be a lie. An unborn HEAD yields no diff, so a
+    /// brand-new repo just gets the untracked counts.
+    pub fn numstat(&self) -> Result<std::collections::HashMap<PathBuf, (usize, usize)>> {
+        let mut stats = std::collections::HashMap::new();
+        // Each `-z` record is `added TAB removed TAB path NUL` (`--no-renames` keeps the
+        // single-path shape; renames would splice a second path field into the record).
+        let raw = git(
+            &self.root,
+            &["diff", "--numstat", "--no-renames", "-z", "HEAD"],
+        )
+        .unwrap_or_default();
+        for rec in raw.split('\0').filter(|s| !s.is_empty()) {
+            let mut it = rec.splitn(3, '\t');
+            let (Some(add), Some(rem), Some(path)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            // Binary file → `-\t-` → both parses fail → skipped.
+            if let (Ok(a), Ok(r)) = (add.parse(), rem.parse()) {
+                stats.insert(PathBuf::from(path), (a, r));
+            }
+        }
+        let untracked = git(
+            &self.root,
+            &["ls-files", "--others", "--exclude-standard", "-z"],
+        )?;
+        for path in untracked.split('\0').filter(|s| !s.is_empty()) {
+            // Binary/non-UTF-8 content errors here — omit it, same as tracked binaries.
+            if let Ok(content) = self.working_content(Path::new(path)) {
+                stats.insert(PathBuf::from(path), (content.lines().count(), 0));
+            }
+        }
+        Ok(stats)
+    }
+
     /// HEAD version of a file = the "before" side of the commit diff. We compare the working
     /// tree against HEAD (not the index) so the diff always shows the *full* change that will
     /// be committed — `commit_now` re-stages each checked file's working copy before
@@ -816,6 +853,44 @@ mod tests {
             repo.stage(Path::new("ignored.txt")).is_err(),
             "staging an ignored (existing) file must still surface git's error"
         );
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// One `numstat` call must size every kind of change in the list: a tracked edit, a
+    /// worktree deletion, and an untracked file (all additions). Binary files can't be
+    /// line-counted, so they're omitted rather than reported as `+0 −0`.
+    #[test]
+    fn numstat_reports_added_and_removed_lines_per_file() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-numstat-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("kept.txt"), "one\ntwo\nthree\n").unwrap();
+        fs::write(work.join("gone.txt"), "a\nb\n").unwrap();
+        fs::write(work.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+
+        // One line changed + two added; a deletion; an untracked file; a binary edit.
+        fs::write(work.join("kept.txt"), "one\nTWO\nthree\nfour\nfive\n").unwrap();
+        fs::remove_file(work.join("gone.txt")).unwrap();
+        fs::write(work.join("new.txt"), "x\ny\nz\n").unwrap();
+        fs::write(work.join("blob.bin"), [0u8, 9, 9, 9]).unwrap();
+
+        let repo = Repo::discover(&work).unwrap();
+        let stats = repo.numstat().unwrap();
+        assert_eq!(stats.get(Path::new("kept.txt")), Some(&(3, 1)));
+        assert_eq!(stats.get(Path::new("gone.txt")), Some(&(0, 2)));
+        assert_eq!(stats.get(Path::new("new.txt")), Some(&(3, 0)));
+        assert!(!stats.contains_key(Path::new("blob.bin")));
 
         let _ = fs::remove_dir_all(&work);
     }

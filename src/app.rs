@@ -81,6 +81,8 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
 struct RepoSnapshot {
     /// Changed files from `git status` (empty when `status_err` is set).
     files: Vec<ChangedFile>,
+    /// Per-file `(added, removed)` line counts for `files` (see [`Repo::numstat`]).
+    stats: std::collections::HashMap<std::path::PathBuf, (usize, usize)>,
     /// `Some(message)` when `git status` failed — surfaced as the op-error banner while
     /// the previous file list is kept (so a transient failure doesn't blank the tree).
     status_err: Option<String>,
@@ -112,6 +114,7 @@ impl RepoSnapshot {
             // git-only state stays empty.
             return Self {
                 files: Vec::new(),
+                stats: std::collections::HashMap::new(),
                 status_err: None,
                 all_files: list_dir_files(root),
                 current_branch: None,
@@ -131,6 +134,7 @@ impl RepoSnapshot {
         };
         Self {
             files,
+            stats: repo.numstat().unwrap_or_default(),
             status_err,
             all_files: repo.list_files().unwrap_or_default(),
             current_branch: repo.current_branch(),
@@ -195,6 +199,7 @@ impl Kyde {
             recents: Recents::load(),
             project_search,
             files: Vec::new(),
+            stats: std::collections::HashMap::new(),
             selected: None,
             commit: CommitView::new(cx),
             diff: DiffPanes::new(cx),
@@ -293,6 +298,7 @@ impl Kyde {
             // Landing view / project closed: no repo to read — clear git-derived state so a
             // stale tree/branch never lingers behind the landing view.
             self.files.clear();
+            self.stats.clear();
             self.sync.push_files.clear();
             self.current_branch = None;
             self.sync.ahead = None;
@@ -348,10 +354,12 @@ impl Kyde {
                 self.op_error = Some(msg);
             } else {
                 self.files = snap.files;
+                self.stats = snap.stats;
                 self.op_error = None;
             }
         } else {
             self.files.clear();
+            self.stats.clear();
             self.sync.push_files.clear();
             self.op_error = None;
         }

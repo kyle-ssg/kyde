@@ -64,6 +64,7 @@ impl Kyde {
                     name,
                     name_color,
                     Some(checked),
+                    None,
                     // Click toggles the row's checkbox (folders expand); the diff is reached
                     // by right-click → View Diff, not a plain click.
                     move |this, _e, _w, cx| {
