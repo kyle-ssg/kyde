@@ -946,6 +946,10 @@ struct CommitView {
     expanded: std::collections::HashSet<PathBuf>,
     /// Which changed files are checked-to-commit.
     checked: std::collections::HashSet<PathBuf>,
+    /// Per-file hunks unticked in the diff gutter (by hunk index) — those changes stay out
+    /// of the commit (partial commit). Absent/empty = the whole file commits. Cleared per
+    /// file on re-diff (indices shift with edits) and wholesale after a commit.
+    excluded_hunks: std::collections::HashMap<PathBuf, std::collections::HashSet<usize>>,
     /// The commit-message editor.
     editor: Entity<CodeEditor>,
     /// Set by `enter_commit`; `render_commit` consumes it to focus the commit-message input
@@ -983,6 +987,7 @@ impl CommitView {
             tree: tree::Tree::default(),
             expanded: std::collections::HashSet::new(),
             checked: std::collections::HashSet::new(),
+            excluded_hunks: std::collections::HashMap::new(),
             editor,
             focus_msg: false,
             search,

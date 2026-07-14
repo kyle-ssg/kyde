@@ -532,12 +532,13 @@ impl Kyde {
                 self.commit.expanded.insert(anc.to_path_buf());
             }
         }
+        let live: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
         if check_all {
-            self.commit.checked = paths.into_iter().collect();
+            self.commit.checked = live.clone();
         } else {
-            let live: std::collections::HashSet<PathBuf> = paths.into_iter().collect();
             self.commit.checked.retain(|p| live.contains(p));
         }
+        self.commit.excluded_hunks.retain(|p, _| live.contains(p));
     }
 
     /// Whether every changed file under `path` (a folder, or `""` = root) is checked.
@@ -576,6 +577,20 @@ impl Kyde {
             }
         } else if !self.commit.checked.remove(&path) {
             self.commit.checked.insert(path);
+        }
+        cx.notify();
+    }
+
+    /// Tick/untick a hunk's include-in-commit checkbox (diff gutter). Unticked hunks are
+    /// kept out of the commit: `commit_now` stages the file's content with them reverted
+    /// to base, leaving the working tree untouched.
+    pub(crate) fn toggle_hunk_included(&mut self, hi: usize, cx: &mut Context<Self>) {
+        let Some(path) = self.diff.path.clone() else {
+            return;
+        };
+        let set = self.commit.excluded_hunks.entry(path).or_default();
+        if !set.remove(&hi) {
+            set.insert(hi);
         }
         cx.notify();
     }
@@ -640,6 +655,7 @@ impl Kyde {
         // (staging + commit shell out per file — keep the button responsive + show feedback).
         let checked: Vec<PathBuf> = self.commit.checked.iter().cloned().collect();
         let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
+        let excluded = self.commit.excluded_hunks.clone();
         self.commit.committing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -648,10 +664,13 @@ impl Kyde {
                 .spawn(async move {
                     let repo = Repo::discover(&root)?;
                     for p in &all {
-                        if checked.contains(p) {
-                            repo.stage(p)?;
-                        } else {
+                        if !checked.contains(p) {
                             repo.unstage(p)?;
+                            continue;
+                        }
+                        match excluded.get(p).filter(|s| !s.is_empty()) {
+                            None => repo.stage(p)?,
+                            Some(excl) => stage_partial(&repo, p, excl)?,
                         }
                     }
                     repo.commit(&msg)
@@ -664,6 +683,9 @@ impl Kyde {
                         this.commit.editor.update(cx, |e, cx| {
                             e.set_content(String::new(), Lang::PlainText, cx);
                         });
+                        // Committed hunks are gone and the survivors renumber — reset to
+                        // fully-included rather than let stale unticks land on new hunks.
+                        this.commit.excluded_hunks.clear();
                         this.refresh(cx);
                         // Tab may be empty now → flip to Push if it has work.
                         this.normalize_git_tab(cx);
@@ -744,5 +766,98 @@ impl Kyde {
             });
         }
         cx.notify();
+    }
+}
+
+/// Stage `path` with the hunks in `excl` reverted to base (partial commit). The diff is
+/// recomputed from disk here — commit time — not taken from the UI's cached model, so the
+/// staged text always matches what's on disk. All-excluded → unstage; unreadable
+/// (binary/deleted, which never show checkboxes) → whole-file stage.
+fn stage_partial(
+    repo: &Repo,
+    path: &std::path::Path,
+    excl: &std::collections::HashSet<usize>,
+) -> git::Result<()> {
+    let Ok(after) = repo.working_content(path) else {
+        return repo.stage(path);
+    };
+    let before = repo.base_content(path).unwrap_or_default();
+    let d = FileDiff::compute(&before, &after);
+    if (0..d.hunks.len()).all(|i| excl.contains(&i)) {
+        return repo.unstage(path);
+    }
+    repo.stage_content(path, &d.partial_new_content(|i| !excl.contains(&i)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stage_partial;
+    use crate::git::Repo;
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn g(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .env("LC_ALL", "C")
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// End-to-end partial commit: two separated edits, one unticked → the commit carries
+    /// only the included hunk, the other edit stays on disk as a pending change.
+    #[test]
+    fn stage_partial_commits_only_the_included_hunks() {
+        let work = std::env::temp_dir().join(format!("kyde-stagepart-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("f.txt"), "one\ntwo\nthree\nfour\nfive\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+
+        fs::write(work.join("f.txt"), "ONE\ntwo\nthree\nfour\nFIVE\n").unwrap();
+        let repo = Repo::discover(&work).unwrap();
+        // Hunk 0 = ONE, hunk 1 = FIVE; untick hunk 1.
+        stage_partial(&repo, Path::new("f.txt"), &HashSet::from([1])).unwrap();
+        repo.commit("partial").unwrap();
+        assert_eq!(
+            g(&work, &["show", "HEAD:f.txt"]),
+            "ONE\ntwo\nthree\nfour\nfive\n"
+        );
+        assert_eq!(
+            fs::read_to_string(work.join("f.txt")).unwrap(),
+            "ONE\ntwo\nthree\nfour\nFIVE\n"
+        );
+        assert_eq!(
+            repo.status().unwrap().len(),
+            1,
+            "the FIVE edit is still pending"
+        );
+
+        // Every hunk unticked → the file is unstaged, nothing of it in the next commit.
+        fs::write(work.join("g.txt"), "x\n").unwrap();
+        g(&work, &["add", "g.txt"]); // pre-staged, so unstaging is observable
+        stage_partial(&repo, Path::new("f.txt"), &HashSet::from([0])).unwrap();
+        repo.commit("rest").unwrap();
+        assert_eq!(
+            g(&work, &["show", "HEAD:f.txt"]),
+            "ONE\ntwo\nthree\nfour\nfive\n",
+            "an all-unticked file must not be committed"
+        );
+
+        let _ = fs::remove_dir_all(&work);
     }
 }

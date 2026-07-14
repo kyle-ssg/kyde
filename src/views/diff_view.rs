@@ -147,10 +147,70 @@ impl Kyde {
         let chevrons: Vec<gpui::AnyElement> = if self.diff.readonly {
             Vec::new()
         } else {
+            // Include-in-commit checkboxes only make sense for a working change (the file is
+            // in `self.files`) — not e.g. a Show-Diff opened outside the commit flow.
+            let staging = self
+                .diff
+                .path
+                .as_ref()
+                .is_some_and(|p| self.files.iter().any(|f| &f.path == p));
+            let excluded = self
+                .diff
+                .path
+                .as_ref()
+                .and_then(|p| self.commit.excluded_hunks.get(p))
+                .cloned()
+                .unwrap_or_default();
             rows.iter()
                 .enumerate()
                 .filter_map(|(i, r)| {
                     let hi = r.hunk_start.then_some(r.hunk).flatten()?;
+                    // Flex-center the glyph in a fixed box so it's truly centered
+                    // (a line-height hack left it sitting low).
+                    let revert = div()
+                        .id(SharedString::from(format!("revert-{hi}")))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .size(px(24.0))
+                        .rounded_sm()
+                        .text_size(px(20.0))
+                        .line_height(px(20.0))
+                        .text_color(t.line_number)
+                        .hover(|s| s.bg(t.bg_light).text_color(t.primary))
+                        .cursor_pointer()
+                        .child("»")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.diff_revert_hunk(hi, cx);
+                            }),
+                        );
+                    // Checkbox = include this hunk in the commit (IntelliJ-style partial
+                    // commit); unticked hunks stay on disk but out of the commit.
+                    let include = staging.then(|| {
+                        div()
+                            .id(SharedString::from(format!("include-{hi}")))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(24.0))
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(t.bg_light))
+                            .tooltip(|_w, cx| {
+                                cx.new(|_| Tip("Include this change in the commit".into()))
+                                    .into()
+                            })
+                            .child(checkbox_box(!excluded.contains(&hi)))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_hunk_included(hi, cx);
+                                }),
+                            )
+                    });
                     Some(
                         // Position the row's line box exactly over the editor line (`line_height`
                         // = `row_h`), so the `»` baselines with the line's text instead of being
@@ -165,29 +225,9 @@ impl Kyde {
                             .flex_row()
                             .items_center()
                             .justify_center()
-                            .child(
-                                // Flex-center the glyph in a fixed box so it's truly centered
-                                // (a line-height hack left it sitting low).
-                                div()
-                                    .id(SharedString::from(format!("revert-{hi}")))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size(px(24.0))
-                                    .rounded_sm()
-                                    .text_size(px(20.0))
-                                    .line_height(px(20.0))
-                                    .text_color(t.line_number)
-                                    .hover(|s| s.bg(t.bg_light).text_color(t.primary))
-                                    .cursor_pointer()
-                                    .child("»")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, _e, _w, cx| {
-                                            this.diff_revert_hunk(hi, cx);
-                                        }),
-                                    ),
-                            )
+                            .gap_0p5()
+                            .children(include)
+                            .child(revert)
                             .into_any_element(),
                     )
                 })
@@ -697,6 +737,11 @@ impl Kyde {
     /// Re-diff the working text against the cached base and push backgrounds/filler/spans
     /// onto both panes. Shared by live autosave and the `»` revert.
     fn recompute_diff(&mut self, text: &str, cx: &mut Context<Self>) {
+        // An edit shifts hunk indices, so any include-in-commit unticks no longer point at
+        // the hunks the user meant — reset the file to fully-included.
+        if let Some(p) = &self.diff.path {
+            self.commit.excluded_hunks.remove(p);
+        }
         let d = FileDiff::compute(&self.diff.base, text);
         let lang = self
             .diff
