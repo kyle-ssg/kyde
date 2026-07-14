@@ -233,6 +233,11 @@ impl Kyde {
                     .when(self.sync.ahead.unwrap_or(0) > 0 || self.sync.pushing, |d| {
                         d.child(push_btn)
                     })
+                    // Worktree chip only when the repo has linked worktrees (list = main +
+                    // linked, so > 1) — zero chrome otherwise.
+                    .when(self.worktree.list.len() > 1, |d| {
+                        d.child(self.render_worktree_chip(cx))
+                    })
                     .child(chip),
             )
             .into_any_element()
@@ -452,6 +457,12 @@ impl Kyde {
                     }
                     BranchNode::Leaf { full } => {
                         let is_current = current.as_deref() == Some(full.as_str());
+                        // Checked out in another worktree → clicking jumps there (see
+                        // `checkout_branch`); mark the row with its worktree's dir name.
+                        let elsewhere = self
+                            .other_worktree_for_branch(&full)
+                            .and_then(|w| w.path.file_name())
+                            .map(|s| s.to_string_lossy().into_owned());
                         let nm = full.clone();
                         div()
                             .flex()
@@ -473,6 +484,24 @@ impl Kyde {
                                     .truncate()
                                     .child(SharedString::from(r.label)),
                             )
+                            .when_some(elsewhere, |d, wt| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .flex_none()
+                                        .text_color(t.line_number)
+                                        .child(
+                                            svg()
+                                                .path("icons/layers.svg")
+                                                .size(px(13.0))
+                                                .text_color(t.line_number),
+                                        )
+                                        .child(SharedString::from(wt)),
+                                )
+                            })
                             .when(is_current, |d| {
                                 d.child(div().flex_none().text_color(t.line_number).child("✓"))
                             })
@@ -495,6 +524,7 @@ impl Kyde {
             self.branch.popup_open = false;
             window.focus(&self.focus_handle);
         } else {
+            self.worktree.popup_open = false;
             self.branch.list = self
                 .repo()
                 .and_then(|r| r.branches().ok())
@@ -610,6 +640,17 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A branch checked out in another worktree can't be checked out here (git fatals
+        // with "already checked out at …") — jump to that worktree instead.
+        if let Some(path) = self
+            .other_worktree_for_branch(&name)
+            .map(|w| w.path.clone())
+        {
+            self.branch.popup_open = false;
+            window.focus(&self.focus_handle);
+            self.open_project(path, cx);
+            return;
+        }
         self.run_branch_op(window, cx, move |r| r.checkout(&name));
     }
 

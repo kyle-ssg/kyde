@@ -19,3 +19,4 @@ mod settings;
 mod tabs;
 #[cfg(feature = "terminal")]
 mod terminal_panel;
+mod worktree;

@@ -658,6 +658,36 @@ impl BranchPopup {
     }
 }
 
+/// The worktree-switcher popup's state (status-bar chip → dropdown, next to the branch
+/// chip), grouped out of the `Kyde` god-struct like `BranchPopup`. The worktree list comes
+/// from the refresh snapshot (one `git worktree list` per refresh, off the UI thread); the
+/// per-worktree changed-file counts are gathered only when the popup opens — one `git
+/// status` per linked worktree, never on the render path.
+struct WorktreePopup {
+    /// Whether the dropdown is open.
+    popup_open: bool,
+    /// All worktrees of the open repo, main first (from the last refresh snapshot).
+    /// Length ≤ 1 ⇔ no linked worktrees ⇔ the chip is hidden.
+    list: Vec<git::Worktree>,
+    /// Changed-file count per worktree path, filled asynchronously on popup open
+    /// (missing entry = still loading). Keyed by the worktree's root path.
+    counts: std::collections::HashMap<PathBuf, usize>,
+    /// Bumped on each popup open so a stale background count-gather can't overwrite
+    /// a newer one.
+    counts_gen: u64,
+}
+
+impl WorktreePopup {
+    fn new() -> Self {
+        Self {
+            popup_open: false,
+            list: Vec::new(),
+            counts: std::collections::HashMap::new(),
+            counts_gen: 0,
+        }
+    }
+}
+
 /// The in-editor find/replace bar's state, grouped out of the `Kyde` god-struct. Targets
 /// whichever editor was focused when it opened (`target`). Built via [`FindBar::new`], which
 /// wires the query box's live re-search subscription.
@@ -1227,6 +1257,8 @@ struct Kyde {
     current_branch: Option<String>,
     /// Branch-switcher popup state (list/remotes/open/query/expanded — see `BranchPopup`).
     branch: BranchPopup,
+    /// Worktree-switcher popup state (status-bar chip → dropdown — see `WorktreePopup`).
+    worktree: WorktreePopup,
     /// Bumped on every edit; a debounced task only refreshes git status once this
     /// stops changing (so typing stays snappy but status/tab colors catch up).
     refresh_gen: u64,
@@ -2849,6 +2881,32 @@ mod gpui_smoke_tests {
         settle(cx);
         handle
             .update(cx, |k, _w, _cx| k.branch.popup_open = false)
+            .unwrap();
+
+        // Worktree popup (seed a fake linked worktree so the rows render; the badge
+        // gather runs its background statuses harmlessly against these paths).
+        handle
+            .update(cx, |k, w, cx| {
+                k.worktree.list = vec![
+                    git::Worktree {
+                        path: dir.clone(),
+                        branch: Some("main".into()),
+                        head: "0000000000000000000000000000000000000000".into(),
+                        is_main: true,
+                    },
+                    git::Worktree {
+                        path: dir.join("linked-wt"),
+                        branch: Some("agent/task".into()),
+                        head: "1111111111111111111111111111111111111111".into(),
+                        is_main: false,
+                    },
+                ];
+                k.toggle_worktree_popup(w, cx);
+            })
+            .unwrap();
+        settle(cx);
+        handle
+            .update(cx, |k, _w, _cx| k.worktree.popup_open = false)
             .unwrap();
 
         // Delete-confirmation modal.

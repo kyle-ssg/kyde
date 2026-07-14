@@ -88,6 +88,9 @@ struct RepoSnapshot {
     all_files: Vec<PathBuf>,
     /// Current branch (`None` when detached / non-git).
     current_branch: Option<String>,
+    /// All worktrees of the repo, main first (empty when non-git). Drives the status-bar
+    /// worktree chip and the branch popup's checked-out-elsewhere markers.
+    worktrees: Vec<git::Worktree>,
     /// Commits ahead of the push base (`None` when non-git / unborn).
     ahead: Option<usize>,
     /// Commits behind the upstream (`None` when non-git / no upstream).
@@ -115,6 +118,7 @@ impl RepoSnapshot {
                 status_err: None,
                 all_files: list_dir_files(root),
                 current_branch: None,
+                worktrees: Vec::new(),
                 ahead: None,
                 behind: None,
                 push_base: String::new(),
@@ -134,6 +138,7 @@ impl RepoSnapshot {
             status_err,
             all_files: repo.list_files().unwrap_or_default(),
             current_branch: repo.current_branch(),
+            worktrees: repo.worktrees().unwrap_or_default(),
             ahead: repo.ahead_count(),
             behind: repo.behind_count(),
             push_base: repo.push_base(),
@@ -249,6 +254,7 @@ impl Kyde {
             rollback_delete_added: false,
             current_branch: None,
             branch: BranchPopup::new(cx),
+            worktree: WorktreePopup::new(),
             refresh_gen: 0,
             sync: SyncState::new(),
             push_win: None,
@@ -295,6 +301,8 @@ impl Kyde {
             self.files.clear();
             self.sync.push_files.clear();
             self.current_branch = None;
+            self.worktree.list.clear();
+            self.worktree.popup_open = false;
             self.sync.ahead = None;
             self.sync.behind = None;
             self.op_error = None;
@@ -334,6 +342,7 @@ impl Kyde {
         self.browse.all_files = snap.all_files;
         self.browse.tree = tree::Tree::build(&self.browse.all_files);
         self.current_branch = snap.current_branch;
+        self.worktree.list = snap.worktrees;
         self.sync.ahead = snap.ahead;
         self.sync.behind = snap.behind;
         self.browse.scratches = snap.scratches;
@@ -581,6 +590,8 @@ impl Kyde {
             self.delete_target = None;
         } else if self.branch.popup_open {
             self.branch.popup_open = false;
+        } else if self.worktree.popup_open {
+            self.worktree.popup_open = false;
         } else if self.onboarding.open && !self.onboarding.forced {
             self.onboarding.open = false;
         } else if self.mode == Mode::Commit {

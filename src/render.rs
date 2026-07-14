@@ -395,6 +395,9 @@ impl Render for Kyde {
         if self.branch.popup_open {
             root = root.child(self.render_branch_popup(ui, fs, cx));
         }
+        if self.worktree.popup_open {
+            root = root.child(self.render_worktree_popup(ui, fs, cx));
+        }
         // Rollback / Push / Diff are now separate native windows (`ModalWindow`), not overlays.
         if self.delete_target.is_some() {
             root = root.child(self.render_delete_modal(ui, cx));

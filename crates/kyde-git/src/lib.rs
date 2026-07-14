@@ -105,6 +105,20 @@ pub struct Commit {
     pub refs: String,
 }
 
+/// One working tree of a repository (`git worktree list`): the main checkout or a
+/// linked worktree. Bare and prunable entries are filtered out by [`Repo::worktrees`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Worktree {
+    /// Absolute path of the worktree's root.
+    pub path: PathBuf,
+    /// Checked-out branch (short name), or `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// The worktree's HEAD commit hash.
+    pub head: String,
+    /// Whether this is the main worktree (always listed first by git).
+    pub is_main: bool,
+}
+
 /// A git repository rooted at a working-tree top level. All operations shell out to `git`.
 pub struct Repo {
     root: PathBuf,
@@ -601,6 +615,14 @@ impl Repo {
             .collect())
     }
 
+    /// All working trees of this repository (`git worktree list --porcelain`), main
+    /// worktree first. Bare and prunable entries are skipped — they have no checkout
+    /// to open.
+    pub fn worktrees(&self) -> Result<Vec<Worktree>> {
+        let raw = git(&self.root, &["worktree", "list", "--porcelain"])?;
+        Ok(parse_worktrees(&raw))
+    }
+
     /// Switch to an existing local branch.
     pub fn checkout(&self, branch: &str) -> Result<()> {
         let branch = valid_ref(branch)?;
@@ -657,6 +679,52 @@ fn parse_name_status(raw: &str) -> Vec<ChangedFile> {
     files
 }
 
+/// Parse `git worktree list --porcelain` output. Entries are blank-line-separated blocks
+/// of `<attr> [value]` lines: `worktree <path>` opens a block; `HEAD <sha>`, `branch
+/// refs/heads/<name>`, `detached`, `bare`, `prunable [reason]` follow. Bare and prunable
+/// blocks are dropped. The first surviving entry is the main worktree.
+fn parse_worktrees(raw: &str) -> Vec<Worktree> {
+    let mut out = Vec::new();
+    let mut first_block = true;
+    for block in raw.split("\n\n").filter(|b| !b.trim().is_empty()) {
+        let is_main = first_block;
+        first_block = false;
+        let mut path = None;
+        let mut head = String::new();
+        let mut branch = None;
+        let mut skip = false;
+        for line in block.lines() {
+            let (attr, value) = line.split_once(' ').unwrap_or((line, ""));
+            match attr {
+                "worktree" => path = Some(PathBuf::from(value)),
+                "HEAD" => head = value.to_string(),
+                "branch" => {
+                    branch = Some(
+                        value
+                            .strip_prefix("refs/heads/")
+                            .unwrap_or(value)
+                            .to_string(),
+                    );
+                }
+                "bare" | "prunable" => skip = true,
+                _ => {}
+            }
+        }
+        if skip {
+            continue;
+        }
+        if let Some(path) = path {
+            out.push(Worktree {
+                path,
+                branch,
+                head,
+                is_main,
+            });
+        }
+    }
+    out
+}
+
 fn classify(x: char, y: char) -> FileStatus {
     match (x, y) {
         ('?', '?') => FileStatus::Untracked,
@@ -700,6 +768,9 @@ fn push_rejected(err: &str) -> bool {
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(dir)
+        // Force English output: `stage`'s already-staged-deletion fallback and
+        // `push_rejected` match on git's message text, which localized gits translate.
+        .env("LC_ALL", "C")
         .args(args)
         .output()
         .map_err(io_err(format!("running git {args:?}")))?;
@@ -716,6 +787,7 @@ fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
     use std::io::Write;
     let mut child = Command::new("git")
         .current_dir(dir)
+        .env("LC_ALL", "C") // English output — see `git()`
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -761,6 +833,71 @@ mod tests {
         assert!(!push_rejected(
             "fatal: unable to access: Could not resolve host"
         ));
+    }
+
+    #[test]
+    fn parse_worktrees_skips_bare_and_prunable_and_reads_branches() {
+        let raw = "worktree /repos/main\nHEAD 1111111111111111111111111111111111111111\n\
+                   branch refs/heads/main\n\n\
+                   worktree /repos/wt-feat\nHEAD 2222222222222222222222222222222222222222\n\
+                   branch refs/heads/feat/x\n\n\
+                   worktree /repos/wt-detached\nHEAD 3333333333333333333333333333333333333333\n\
+                   detached\n\n\
+                   worktree /repos/bare.git\nbare\n\n\
+                   worktree /repos/gone\nHEAD 4444444444444444444444444444444444444444\n\
+                   branch refs/heads/gone\nprunable gitdir file points to non-existent location\n";
+        let wts = parse_worktrees(raw);
+        assert_eq!(wts.len(), 3, "bare + prunable entries are dropped");
+        assert_eq!(wts[0].path, PathBuf::from("/repos/main"));
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(wts[0].is_main);
+        assert_eq!(wts[1].branch.as_deref(), Some("feat/x"));
+        assert!(!wts[1].is_main);
+        assert_eq!(wts[2].branch, None, "detached HEAD → no branch");
+        assert_eq!(wts[2].head, "3333333333333333333333333333333333333333");
+    }
+
+    /// `worktrees()` against a real repo with one linked worktree: two entries, main
+    /// first, each with the right branch.
+    #[test]
+    fn worktrees_lists_main_and_linked() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let base = std::env::temp_dir().join(format!("kyde-worktrees-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let work = base.join("work");
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("a.txt"), "1\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+        let linked = base.join("wt-agent");
+        g(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "agent/task",
+                linked.to_str().unwrap(),
+            ],
+        );
+
+        let repo = Repo::discover(&work).unwrap();
+        let wts = repo.worktrees().unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(wts[0].is_main);
+        assert_eq!(wts[0].branch.as_deref(), Some("main"));
+        assert!(!wts[1].is_main);
+        assert_eq!(wts[1].branch.as_deref(), Some("agent/task"));
+        assert!(wts[1].path.ends_with("wt-agent"));
+
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
