@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [2.1.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.0.1...kyde-v2.1.0) (2026-07-14)
+
+
+### Features
+
+* partial commits — stage selected hunks from the diff gutter ([#33](https://github.com/kyle-ssg/kyde/issues/33)) ([ed00c1a](https://github.com/kyle-ssg/kyde/commit/ed00c1a27d886772875b335b53e45255599e644e))
+* show +/− line stats — change-set total on the tree root, per-file in the diff pill ([#36](https://github.com/kyle-ssg/kyde/issues/36)) ([9a2d84b](https://github.com/kyle-ssg/kyde/commit/9a2d84bef075722c380d2d50cdc56bdb123a367e))
+* worktree switcher — jump between worktrees without leaving the app ([#37](https://github.com/kyle-ssg/kyde/issues/37)) ([bcd3222](https://github.com/kyle-ssg/kyde/commit/bcd3222aaea425d36ce4efa117f0936f2dd111cf))
+
 ## [2.0.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.0.0...kyde-v2.0.1) (2026-07-13)
 
 
