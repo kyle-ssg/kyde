@@ -160,6 +160,43 @@ impl FileDiff {
             (add + h.new_range.len(), rem + h.old_range.len())
         })
     }
+
+    /// Reconstruct the "after" text with only the hunks for which `include(hunk_index)`
+    /// returns true applied; excluded hunks keep the base ("before") lines.
+    ///
+    /// This is the partial-commit primitive: the returned text is what gets staged when
+    /// some of a file's changes are unticked in the diff gutter, so a commit can carry a
+    /// subset of a file's changes (VSCode/IntelliJ-style partial commit).
+    ///
+    /// ```
+    /// use kyde_diff::FileDiff;
+    /// let d = FileDiff::compute("a\nb\nc\n", "a\nB\nc\n");
+    /// assert_eq!(d.partial_new_content(|_| true), "a\nB\nc\n");
+    /// assert_eq!(d.partial_new_content(|_| false), "a\nb\nc\n");
+    /// ```
+    pub fn partial_new_content(&self, include: impl Fn(usize) -> bool) -> String {
+        let mut out: Vec<&str> = Vec::with_capacity(self.new.len());
+        let mut cursor = 0usize; // consumed prefix of `old`
+        for (i, h) in self.hunks.iter().enumerate() {
+            // Unchanged region before this hunk (identical on both sides).
+            out.extend(
+                self.old[cursor..h.old_range.start]
+                    .iter()
+                    .map(String::as_str),
+            );
+            let side = if include(i) {
+                &self.new[h.new_range.clone()]
+            } else {
+                &self.old[h.old_range.clone()]
+            };
+            out.extend(side.iter().map(String::as_str));
+            cursor = h.old_range.end;
+        }
+        out.extend(self.old[cursor..].iter().map(String::as_str));
+        // `compute` split both sides on '\n', so joining restores the text (and its
+        // trailing newline, carried as a final empty element) byte-for-byte.
+        out.join("\n")
+    }
 }
 
 /// `(line_idx, byte_range)` pairs for one diff side's word-level highlights.
@@ -287,6 +324,38 @@ mod tests {
         assert_eq!(FileDiff::compute("x\n", "x\n").stats(), (0, 0));
         // A new file is all additions.
         assert_eq!(FileDiff::compute("", "a\nb\n").stats(), (2, 0));
+    }
+
+    #[test]
+    fn partial_content_all_or_nothing_reproduces_each_side() {
+        let d = FileDiff::compute("a\nb\nc\n", "a\nB\nc\nd\n");
+        assert_eq!(d.partial_new_content(|_| true), "a\nB\nc\nd\n");
+        assert_eq!(d.partial_new_content(|_| false), "a\nb\nc\n");
+    }
+
+    #[test]
+    fn partial_content_applies_only_the_included_hunks() {
+        // Two separated changes: a modification (b→B) and an insertion (x after d).
+        let d = FileDiff::compute("a\nb\nc\nd\ne\n", "a\nB\nc\nd\nx\ne\n");
+        assert_eq!(d.hunks.len(), 2);
+        // Only the first hunk: the modification lands, the insertion doesn't.
+        assert_eq!(d.partial_new_content(|i| i == 0), "a\nB\nc\nd\ne\n");
+        // Only the second hunk: the insertion lands, the modification doesn't.
+        assert_eq!(d.partial_new_content(|i| i == 1), "a\nb\nc\nd\nx\ne\n");
+    }
+
+    #[test]
+    fn partial_content_handles_deletions_and_new_files() {
+        // Excluded deletion keeps the line; included deletion drops it.
+        let d = FileDiff::compute("a\nb\nc\n", "a\nc\n");
+        assert_eq!(d.partial_new_content(|_| false), "a\nb\nc\n");
+        assert_eq!(d.partial_new_content(|_| true), "a\nc\n");
+
+        // New (untracked) file: base is empty, the whole content is one Added hunk.
+        let d = FileDiff::compute("", "x\ny\n");
+        assert_eq!(d.hunks.len(), 1);
+        assert_eq!(d.partial_new_content(|_| true), "x\ny\n");
+        assert_eq!(d.partial_new_content(|_| false), "")
     }
 
     #[test]
