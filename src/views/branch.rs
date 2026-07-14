@@ -409,6 +409,10 @@ impl Kyde {
     fn branch_tree(&self, rows: Vec<BranchRow>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let t = theme::get();
         let current = self.current_branch.clone();
+        // In a linked worktree, plain checkouts are disabled (the worktree is pinned to
+        // its branch — that's the point of worktrees); rows that jump to another worktree
+        // and the current branch stay active.
+        let pinned = self.in_linked_worktree();
         rows.into_iter()
             .map(|r| {
                 let indent = px(8.0 + r.depth as f32 * 14.0);
@@ -464,6 +468,9 @@ impl Kyde {
                             .and_then(|w| w.path.file_name())
                             .map(|s| s.to_string_lossy().into_owned());
                         let nm = full.clone();
+                        // Disabled = a plain checkout in a pinned (linked) worktree; jump
+                        // rows (`elsewhere`) and the current branch stay interactive.
+                        let disabled = pinned && elsewhere.is_none() && !is_current;
                         div()
                             .flex()
                             .flex_row()
@@ -473,9 +480,10 @@ impl Kyde {
                             .pl(indent)
                             .pr_2()
                             .rounded_md()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.selected_bg))
-                            .text_color(t.text)
+                            .when(!disabled, |d| {
+                                d.cursor_pointer().hover(|s| s.bg(t.selected_bg))
+                            })
+                            .text_color(if disabled { t.line_number } else { t.text })
                             .child(div().flex_none().text_color(t.line_number).child("⎇"))
                             .child(
                                 div()
@@ -505,12 +513,14 @@ impl Kyde {
                             .when(is_current, |d| {
                                 d.child(div().flex_none().text_color(t.line_number).child("✓"))
                             })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _e, window, cx| {
-                                    this.checkout_branch(nm.clone(), window, cx);
-                                }),
-                            )
+                            .when(!disabled, |d| {
+                                d.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e, window, cx| {
+                                        this.checkout_branch(nm.clone(), window, cx);
+                                    }),
+                                )
+                            })
                             .into_any_element()
                     }
                 }
@@ -649,6 +659,11 @@ impl Kyde {
             self.branch.popup_open = false;
             window.focus(&self.focus_handle);
             self.open_project(path, cx);
+            return;
+        }
+        // Linked worktrees are pinned to their branch — the popup disables these rows, but
+        // guard here too so no other path can checkout inside one.
+        if self.in_linked_worktree() {
             return;
         }
         self.run_branch_op(window, cx, move |r| r.checkout(&name));

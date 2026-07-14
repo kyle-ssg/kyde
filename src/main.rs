@@ -1831,6 +1831,7 @@ impl gpui::AssetSource for Assets {
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
             "icons/git-branch.svg" => include_bytes!("../assets/icons/git-branch.svg"),
             "icons/history.svg" => include_bytes!("../assets/icons/history.svg"),
+            "icons/layers.svg" => include_bytes!("../assets/icons/layers.svg"),
             #[cfg(feature = "terminal")]
             "icons/terminal.svg" => include_bytes!("../assets/icons/terminal.svg"),
             "icons/file-lines.svg" => include_bytes!("../assets/icons/file-lines.svg"),

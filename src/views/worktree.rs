@@ -19,6 +19,19 @@ impl Kyde {
             .find(|w| w.branch.as_deref() == Some(branch))
     }
 
+    /// True when the active project is a *linked* worktree (not the main checkout).
+    /// Branch checkouts are disabled there — a linked worktree is pinned to its branch;
+    /// switch branches from the main checkout, or jump between worktrees instead.
+    pub(crate) fn in_linked_worktree(&self) -> bool {
+        let Some(root) = self.repo_root.as_deref() else {
+            return false;
+        };
+        self.worktree
+            .list
+            .iter()
+            .any(|w| !w.is_main && same_dir(&w.path, root))
+    }
+
     /// Toggle the worktree popup. On open, kick off one background `git status` per
     /// worktree to fill the changed-count badges (never on the render path).
     pub(crate) fn toggle_worktree_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -88,7 +101,9 @@ impl Kyde {
             .as_deref()
             .and_then(dir_name)
             .unwrap_or_else(|| "(worktree)".into());
+        let count = self.worktree.list.len();
         div()
+            .id("worktree-chip")
             .flex()
             .flex_row()
             .items_center()
@@ -99,6 +114,7 @@ impl Kyde {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_light))
             .text_color(bar_text)
+            .tooltip(|_w, cx| cx.new(|_| Tip("Worktrees".into())).into())
             .child(
                 div().flex_none().child(
                     svg()
@@ -108,6 +124,17 @@ impl Kyde {
                 ),
             )
             .child(SharedString::from(label))
+            // Worktree-count badge (like the Push/Pull count badges): signals this chip is
+            // the *set* of worktrees, not just the current one's name.
+            .child(
+                div()
+                    .flex_none()
+                    .px_1p5()
+                    .rounded_md()
+                    .bg(t.bg_light)
+                    .text_color(t.text)
+                    .child(SharedString::from(count.to_string())),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, window, cx| this.toggle_worktree_popup(window, cx)),

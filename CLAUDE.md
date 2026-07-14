@@ -288,7 +288,12 @@ the active one; clicking a row → `switch_worktree` → `open_project(path)` (s
 save/restore preserves per-worktree UI state). The **branch popup is worktree-aware**:
 a branch checked out in another worktree shows a layers-icon + dir-name marker, and
 `checkout_branch` jumps to that worktree (`other_worktree_for_branch`) instead of letting
-`git checkout` fail with "already checked out at …".
+`git checkout` fail with "already checked out at …". Inside a *linked* worktree
+(`in_linked_worktree`) plain checkouts are disabled — rows render dimmed/inert (the
+worktree is pinned to its branch); jump rows, the current branch, and + New Branch
+(`checkout -b` doesn't touch files) stay active. The chip carries a worktree-count badge +
+"Worktrees" tooltip. New icons go in the `Assets` `include_bytes!` match in main.rs — an
+unregistered path renders as NOTHING, silently (layers.svg was caught in QA).
 
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {
