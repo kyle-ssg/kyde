@@ -233,6 +233,11 @@ impl Kyde {
                     .when(self.sync.ahead.unwrap_or(0) > 0 || self.sync.pushing, |d| {
                         d.child(push_btn)
                     })
+                    // Worktree chip only when the repo has linked worktrees (list = main +
+                    // linked, so > 1) — zero chrome otherwise.
+                    .when(self.worktree.list.len() > 1, |d| {
+                        d.child(self.render_worktree_chip(cx))
+                    })
                     .child(chip),
             )
             .into_any_element()
@@ -404,6 +409,10 @@ impl Kyde {
     fn branch_tree(&self, rows: Vec<BranchRow>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let t = theme::get();
         let current = self.current_branch.clone();
+        // In a linked worktree, plain checkouts are disabled (the worktree is pinned to
+        // its branch — that's the point of worktrees); rows that jump to another worktree
+        // and the current branch stay active.
+        let pinned = self.in_linked_worktree();
         rows.into_iter()
             .map(|r| {
                 let indent = px(8.0 + r.depth as f32 * 14.0);
@@ -452,7 +461,16 @@ impl Kyde {
                     }
                     BranchNode::Leaf { full } => {
                         let is_current = current.as_deref() == Some(full.as_str());
+                        // Checked out in another worktree → clicking jumps there (see
+                        // `checkout_branch`); mark the row with its worktree's dir name.
+                        let elsewhere = self
+                            .other_worktree_for_branch(&full)
+                            .and_then(|w| w.path.file_name())
+                            .map(|s| s.to_string_lossy().into_owned());
                         let nm = full.clone();
+                        // Disabled = a plain checkout in a pinned (linked) worktree; jump
+                        // rows (`elsewhere`) and the current branch stay interactive.
+                        let disabled = pinned && elsewhere.is_none() && !is_current;
                         div()
                             .flex()
                             .flex_row()
@@ -462,9 +480,10 @@ impl Kyde {
                             .pl(indent)
                             .pr_2()
                             .rounded_md()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(t.selected_bg))
-                            .text_color(t.text)
+                            .when(!disabled, |d| {
+                                d.cursor_pointer().hover(|s| s.bg(t.selected_bg))
+                            })
+                            .text_color(if disabled { t.line_number } else { t.text })
                             .child(div().flex_none().text_color(t.line_number).child("⎇"))
                             .child(
                                 div()
@@ -473,15 +492,35 @@ impl Kyde {
                                     .truncate()
                                     .child(SharedString::from(r.label)),
                             )
+                            .when_some(elsewhere, |d, wt| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .flex_none()
+                                        .text_color(t.line_number)
+                                        .child(
+                                            svg()
+                                                .path("icons/layers.svg")
+                                                .size(px(13.0))
+                                                .text_color(t.line_number),
+                                        )
+                                        .child(SharedString::from(wt)),
+                                )
+                            })
                             .when(is_current, |d| {
                                 d.child(div().flex_none().text_color(t.line_number).child("✓"))
                             })
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _e, window, cx| {
-                                    this.checkout_branch(nm.clone(), window, cx);
-                                }),
-                            )
+                            .when(!disabled, |d| {
+                                d.on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e, window, cx| {
+                                        this.checkout_branch(nm.clone(), window, cx);
+                                    }),
+                                )
+                            })
                             .into_any_element()
                     }
                 }
@@ -495,6 +534,7 @@ impl Kyde {
             self.branch.popup_open = false;
             window.focus(&self.focus_handle);
         } else {
+            self.worktree.popup_open = false;
             self.branch.list = self
                 .repo()
                 .and_then(|r| r.branches().ok())
@@ -610,6 +650,22 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A branch checked out in another worktree can't be checked out here (git fatals
+        // with "already checked out at …") — jump to that worktree instead.
+        if let Some(path) = self
+            .other_worktree_for_branch(&name)
+            .map(|w| w.path.clone())
+        {
+            self.branch.popup_open = false;
+            window.focus(&self.focus_handle);
+            self.open_project(path, cx);
+            return;
+        }
+        // Linked worktrees are pinned to their branch — the popup disables these rows, but
+        // guard here too so no other path can checkout inside one.
+        if self.in_linked_worktree() {
+            return;
+        }
         self.run_branch_op(window, cx, move |r| r.checkout(&name));
     }
 

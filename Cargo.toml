@@ -78,6 +78,8 @@ large_types_passed_by_value = "allow" # `Theme` is `Copy`; by-value snapshots ar
 fn_params_excessive_bools = "allow"   # a few git ops take checkout/overwrite/... flags
 format_collect = "allow"          # one-off `map(format!).collect()` is clear enough
 needless_raw_string_hashes = "allow" # grammar query strings keep `r#"…"#` for consistency
+wildcard_imports = "allow"        # `use crate::*` is the documented convention for the
+                                  # binary's feature modules (see CLAUDE.md module wiring)
 
 [dependencies]
 # GUI — Zed's framework. Apache-2.0. Pinned + Cargo.lock committed (see [workspace.dependencies]).

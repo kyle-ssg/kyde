@@ -278,6 +278,25 @@ box, **+ New Branch** (`create_branch` = `git checkout -b`, name from the query)
 (top 5 by recency, current excluded), **All Branches** (alphabetical, current marked `✓`).
 Clicking a branch → `checkout_branch` (`git checkout`) then `refresh`.
 
+## Worktree switcher (src/views/worktree.rs + kyde-git `Repo::worktrees`)
+A `layers.svg` chip next to the branch chip (hidden when the repo has no linked worktrees —
+`worktree.list.len() ≤ 1`). `Repo::worktrees()` wraps `git worktree list --porcelain`
+(`Worktree { path, branch, head, is_main }`, bare/prunable skipped; parser =
+`parse_worktrees`, unit-tested) and is read in the refresh `RepoSnapshot` (off the UI
+thread) into `Kyde.worktree: WorktreePopup`. Clicking → `toggle_worktree_popup`: rows show
+dir name, `⎇ branch`, a changed-files count badge (one background `git status` per worktree,
+gathered ON POPUP OPEN only — `counts`/`counts_gen`, never on the render path) and `✓` on
+the active one; clicking a row → `switch_worktree` → `open_project(path)` (session
+save/restore preserves per-worktree UI state). The **branch popup is worktree-aware**:
+a branch checked out in another worktree shows a layers-icon + dir-name marker, and
+`checkout_branch` jumps to that worktree (`other_worktree_for_branch`) instead of letting
+`git checkout` fail with "already checked out at …". Inside a *linked* worktree
+(`in_linked_worktree`) plain checkouts are disabled — rows render dimmed/inert (the
+worktree is pinned to its branch); jump rows, the current branch, and + New Branch
+(`checkout -b` doesn't touch files) stay active. The chip carries a worktree-count badge +
+"Worktrees" tooltip. New icons go in the `Assets` `include_bytes!` match in main.rs — an
+unregistered path renders as NOTHING, silently (layers.svg was caught in QA).
+
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {
 appears_transparent: true, traffic_light_position: point(16,16) }`) so our `frame_bg` chrome
