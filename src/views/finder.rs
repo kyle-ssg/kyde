@@ -542,6 +542,14 @@ impl Kyde {
             PaletteAction::Fonts => {
                 self.open_modal_window(ModalKind::Fonts, "Fonts", 760.0, 620.0, cx);
             }
+            PaletteAction::SortLines => {
+                window.focus(&self.focus_handle);
+                self.sort_selected_lines(cx);
+            }
+            PaletteAction::SortKeys => {
+                window.focus(&self.focus_handle);
+                self.sort_object_keys_at_caret(cx);
+            }
         }
     }
 

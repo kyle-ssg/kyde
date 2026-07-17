@@ -92,6 +92,8 @@ actions!(
         ModeBrowse,
         Actions,
         NewScratch,
+        SortLines,
+        SortKeys,
         EscapeKey,
         ToggleTerminal,
         NewTerminalTab,
@@ -222,6 +224,8 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "open_keymap", OpenKeymap);
     bind_app(cx, km, "actions", Actions);
     bind_app(cx, km, "new_scratch", NewScratch);
+    bind_app(cx, km, "sort_lines", SortLines);
+    bind_app(cx, km, "sort_keys", SortKeys);
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
     // Backspace: delete the selected Browse-tree file/folder (fixed key). Bound to the
@@ -393,6 +397,8 @@ enum PaletteAction {
     RevealInTerminal,
     Plugins,
     Fonts,
+    SortLines,
+    SortKeys,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -415,6 +421,8 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
         "mode_browse",
     ),
     ("Rollback changes", PaletteAction::Rollback, ""),
+    ("Sort Lines", PaletteAction::SortLines, "sort_lines"),
+    ("Sort Object Keys", PaletteAction::SortKeys, "sort_keys"),
     ("Settings / Keymap", PaletteAction::Settings, "open_keymap"),
     ("Manage Plugins", PaletteAction::Plugins, ""),
     ("Preview Fonts", PaletteAction::Fonts, ""),
@@ -425,8 +433,11 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
 enum MenuTarget {
     /// A path in the Browse tree (`bool` = `is_dir`), or the open editor file.
     BrowseFile(PathBuf, bool),
-    /// Right-click inside the editor pane — git commands only (no file ops).
-    EditorGit(PathBuf),
+    /// Right-click inside the editor pane — git commands plus the buffer sort
+    /// ops. The bools (computed at menu-open, so the menu never parses per
+    /// frame) gate the items: `.0` = selection spans ≥2 lines (Sort Lines),
+    /// `.1` = caret inside a JSON/JS/TS object (Sort Object Keys).
+    EditorGit(PathBuf, bool, bool),
     /// A path (file or folder) in the Commit tree — `bool` = `is_dir`.
     CommitPath(PathBuf, bool),
     /// A changed file in the Rollback modal, by index into `files` (→ View Diff).
@@ -2331,6 +2342,24 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.open_file(PathBuf::from(f), cx);
             }
         }
+        // Browse a JSON file (KYDE_SHOT_FILE) with a multi-line selection and the editor
+        // context menu open → the Sort Lines / Sort Object Keys items above the git commands.
+        "sort-menu" => {
+            set_packs(view, &["json"]);
+            if let Ok(f) = std::env::var("KYDE_SHOT_FILE") {
+                view.open_file(PathBuf::from(f), cx);
+            }
+            view.browse
+                .editor
+                .update(cx, |e, cx| e.select_range(2..30, cx));
+            if let Some(p) = view.browse.open_path.clone() {
+                view.open_menu(
+                    gpui::point(px(560.0), px(200.0)),
+                    MenuTarget::EditorGit(p, true, true),
+                    cx,
+                );
+            }
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {
@@ -2855,6 +2884,51 @@ mod gpui_smoke_tests {
                     );
                     assert!(e.selection().end <= e.text().len());
                 });
+            })
+            .unwrap();
+    }
+
+    /// The sort ops (issues #43/#41): Sort Lines rewrites the selected block
+    /// alphabetically and keeps it selected; Sort Object Keys rewrites the object
+    /// at the caret. Both go through `replace_range_text` (one undo step) and are
+    /// gated to Browse with a file open.
+    #[gpui::test]
+    fn sort_ops_rewrite_selection_and_object(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx); // sets open_path (the op gate)
+                                                           // Sort Lines on a plain buffer.
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_content("b\nB\na\n".into(), Lang::PlainText, cx);
+                    e.select_range(0..6, cx);
+                });
+                k.sort_selected_lines(cx);
+                let ed = k.browse.editor.read(cx);
+                assert_eq!(ed.text(), "a\nB\nb\n");
+                assert_eq!(ed.selection(), 0..5, "sorted block stays selected");
+                // Sort Object Keys at the caret (lang set explicitly — the op must
+                // not depend on the machine's installed-plugins config).
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_content("{\n  \"b\": 1,\n  \"a\": 2\n}".into(), Lang::Json, cx);
+                    e.select_range(1..1, cx);
+                });
+                k.sort_object_keys_at_caret(cx);
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "{\n  \"a\": 2,\n  \"b\": 1\n}"
+                );
+                // Guard: outside Browse the ops are inert.
+                k.mode = Mode::Commit;
+                k.browse
+                    .editor
+                    .update(cx, |e, cx| e.select_range(0..10, cx));
+                k.sort_selected_lines(cx);
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "{\n  \"a\": 2,\n  \"b\": 1\n}",
+                    "no sorting outside Browse"
+                );
             })
             .unwrap();
     }

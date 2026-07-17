@@ -550,6 +550,25 @@ Launch: `kyde` shell function in `~/.zshrc` runs the newest of
 `target/{release,debug}/kyde`, args passed through (bare = Projects view).
 (`gs` is ghostscript — not aliased.)
 
+## Sort ops (issues #43/#41 — Sort Lines + Sort Object Keys)
+Right-clicking the editor pane (the `MenuTarget::EditorGit` menu) offers, above the git
+commands: **Sort Lines** when the selection spans ≥2 lines, and **Sort Object Keys** when
+the caret sits in a JSON/JS/TS object literal. Availability is computed at MENU-OPEN in
+browse.rs (never in the render arm — an open menu must not re-parse per frame) and rides
+two bools on the `EditorGit` variant; the right-click first moves the caret under the
+pointer via `CodeEditor::caret_to` (kept if clicking inside the selection — IDE
+convention). Both are also configurable keymap actions (`sort_lines` ⌥⌘L / `sort_keys`
+⌥⌘S, both presets) and ⌘⇧A palette entries; handlers are gated to Browse with a file
+open. Logic is pure + unit-tested: `editor::sort_lines_in` (expand selection to whole
+lines, case-insensitive stable sort, selection ending at a line start excludes that
+line) and `kyde_syntax::sort_object_keys` (innermost `object` node at the caret,
+recursive, formatting-preserving — entry texts move verbatim, comma/indent separators
+stay in their slots, arrays keep element order, objects with spreads/methods/comments/
+errors never reorder). Both apply via `replace_range_text` (one undo step, no-op when
+already sorted / read-only) and re-select the sorted block. Smoke test:
+`sort_ops_rewrite_selection_and_object`. Debug shot: `KYDE_SHOT=sort-menu` +
+`KYDE_SHOT_FILE=<json>`.
+
 ## Views & right-click flow (main.rs)
 Opening a project lands in **Browse (code) view**, not git — `open_project`/`new` default
 `Mode::Browse`. Git is reached on demand:

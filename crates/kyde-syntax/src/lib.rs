@@ -654,6 +654,136 @@ pub fn error_ranges(source: &str, lang: Lang) -> Vec<std::ops::Range<usize>> {
     merged
 }
 
+// ── sort object keys (JSON / JS / TS object literals) ─────────────
+
+/// The sort key for an object entry: the key node's text with string quotes
+/// stripped, lowercased for the primary comparison (raw text breaks ties, so
+/// `"A"` and `"a"` order deterministically).
+fn entry_key(node: tree_sitter::Node, src: &str) -> Option<(String, String)> {
+    let key = match node.kind() {
+        "pair" => node.child_by_field_name("key")?,
+        // JS shorthand `{ foo, bar }` — the entry IS its key.
+        "shorthand_property_identifier" => node,
+        _ => return None,
+    };
+    let raw = src
+        .get(key.byte_range())?
+        .trim_matches(|c| c == '"' || c == '\'')
+        .to_string();
+    Some((raw.to_lowercase(), raw))
+}
+
+/// Rebuild `node`'s text with every descendant object's keys sorted.
+/// Returns `None` when nothing under `node` changed (callers then reuse the
+/// original slice — no allocation for already-sorted subtrees).
+///
+/// An object is only REORDERED when every named child is a `pair`/shorthand
+/// entry — a spread (`...x`), method, comment, or parse error means order can
+/// carry meaning, so that object keeps its order (children still recurse).
+/// Entry texts move as-is; the separator texts between entries (comma +
+/// newline + indent) stay in their original slots, so formatting survives.
+fn sorted_text(node: tree_sitter::Node, src: &str) -> Option<String> {
+    // Generic splice for non-objects (and non-reorderable objects): recurse into
+    // children; if none changed, report unchanged.
+    fn splice(node: tree_sitter::Node, src: &str) -> Option<String> {
+        let mut out: Option<String> = None;
+        let mut done = node.start_byte();
+        for i in 0..node.child_count() {
+            let Some(c) = node.child(i) else { continue };
+            if let Some(new) = sorted_text(c, src) {
+                let s = out.get_or_insert_with(|| String::with_capacity(src.len() / 8));
+                *s += &src[done..c.start_byte()];
+                *s += &new;
+                done = c.end_byte();
+            }
+        }
+        let mut s = out?;
+        s += &src[done..node.end_byte()];
+        Some(s)
+    }
+
+    if node.kind() != "object" {
+        return splice(node, src);
+    }
+    let entries: Vec<tree_sitter::Node> = (0..node.named_child_count())
+        .filter_map(|i| node.named_child(i))
+        .collect();
+    let keys: Vec<Option<(String, String)>> = entries.iter().map(|e| entry_key(*e, src)).collect();
+    if entries.is_empty() || keys.iter().any(Option::is_none) {
+        return splice(node, src); // not a plain key/value object — never reorder
+    }
+    let mut order: Vec<usize> = (0..entries.len()).collect();
+    order.sort_by(|&a, &b| keys[a].cmp(&keys[b])); // stable; None already excluded
+                                                   // Each entry's text, with ITS nested objects sorted first.
+    let texts: Vec<String> = entries
+        .iter()
+        .map(|e| sorted_text(*e, src).unwrap_or_else(|| src[e.byte_range()].to_string()))
+        .collect();
+    let unchanged = order.iter().enumerate().all(|(slot, &i)| slot == i)
+        && texts
+            .iter()
+            .zip(&entries)
+            .all(|(t, e)| t == &src[e.byte_range()]);
+    if unchanged {
+        return None;
+    }
+    // Rebuild: original prefix, then per slot the sorted entry followed by the
+    // ORIGINAL separator that sat after that slot (comma/newline/indent layout).
+    let mut s = String::with_capacity(node.end_byte() - node.start_byte() + 16);
+    s += &src[node.start_byte()..entries[0].start_byte()];
+    for (slot, &i) in order.iter().enumerate() {
+        s += &texts[i];
+        let sep_from = entries[slot].end_byte();
+        let sep_to = entries
+            .get(slot + 1)
+            .map_or(node.end_byte(), tree_sitter::Node::start_byte);
+        s += &src[sep_from..sep_to];
+    }
+    Some(s)
+}
+
+/// Sort the keys of the innermost object literal containing `caret`,
+/// recursively (nested objects sort too; arrays keep their element order but
+/// their object elements still sort). Formatting is preserved: entry texts move
+/// verbatim and the comma/indent layout stays put. Objects containing anything
+/// other than plain key/value entries (spreads, methods, comments, parse
+/// errors) keep their order. Returns the object's byte range plus its new text
+/// — equal to the original when already sorted — or `None` when the language
+/// isn't JSON/JS/TS or no object encloses `caret`.
+///
+/// ```
+/// use kyde_syntax::{sort_object_keys, Lang};
+/// let (r, s) = sort_object_keys("{\"b\": 1, \"a\": 2}", Lang::Json, 3).unwrap();
+/// assert_eq!(r, 0..16);
+/// assert_eq!(s, "{\"a\": 2, \"b\": 1}");
+/// assert!(sort_object_keys("[1, 2]", Lang::Json, 1).is_none());
+/// ```
+pub fn sort_object_keys(
+    source: &str,
+    lang: Lang,
+    caret: usize,
+) -> Option<(std::ops::Range<usize>, String)> {
+    // Only grammars whose object literals we understand (`object` + `pair`).
+    if !matches!(lang, Lang::Json | Lang::Js | Lang::Ts | Lang::Tsx) {
+        return None;
+    }
+    let grammar = lang.grammar()?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&grammar).ok()?;
+    let tree = parser.parse(source, None)?;
+    let caret = caret.min(source.len());
+    let mut node = tree.root_node().descendant_for_byte_range(caret, caret)?;
+    let obj = loop {
+        if node.kind() == "object" {
+            break node;
+        }
+        node = node.parent()?;
+    };
+    let range = obj.byte_range();
+    let text = sorted_text(obj, source).unwrap_or_else(|| source[range.clone()].to_string());
+    Some((range, text))
+}
+
 /// Iterate `(byte_start, line)` over `source`, tracking byte offsets including '\n'.
 fn lines_with_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut off = 0usize;
@@ -925,6 +1055,67 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "error_ranges on ~4000-line files took {elapsed:?} (budget 2s) — perf regression?"
         );
+    }
+
+    #[test]
+    fn sort_keys_nested_json_preserves_formatting() {
+        let src = "{\n  \"b\": {\n    \"z\": 1,\n    \"a\": 2\n  },\n  \"a\": [\n    3,\n    { \"y\": 1, \"x\": 2 }\n  ]\n}";
+        let (range, out) = sort_object_keys(src, Lang::Json, 5).unwrap();
+        assert_eq!(
+            range,
+            0..src.len(),
+            "innermost object at caret 5 is the root"
+        );
+        let want = "{\n  \"a\": [\n    3,\n    { \"x\": 2, \"y\": 1 }\n  ],\n  \"b\": {\n    \"a\": 2,\n    \"z\": 1\n  }\n}";
+        assert_eq!(
+            out, want,
+            "keys sort recursively, arrays keep element order, layout survives"
+        );
+    }
+
+    #[test]
+    fn sort_keys_innermost_object_only() {
+        let src = "{\"b\": 1, \"a\": {\"d\": 1, \"c\": 2}}";
+        // Caret inside the nested object → only that object's range.
+        let inner_start = src.find("{\"d\"").unwrap();
+        let (range, out) = sort_object_keys(src, Lang::Json, inner_start + 2).unwrap();
+        assert_eq!(range, inner_start..src.len() - 1);
+        assert_eq!(out, "{\"c\": 2, \"d\": 1}");
+    }
+
+    #[test]
+    fn sort_keys_js_shorthand_and_spread() {
+        // Shorthand entries sort by their own name.
+        let (_, out) = sort_object_keys("const o = { b, a, c: 1 };", Lang::Js, 14).unwrap();
+        assert_eq!(out, "{ a, b, c: 1 }");
+        // A spread means order can matter — never reorder that object…
+        let src = "const o = { z: 1, ...rest, a: 2 };";
+        let (_, out) = sort_object_keys(src, Lang::Js, 14).unwrap();
+        assert_eq!(out, "{ z: 1, ...rest, a: 2 }");
+        // …but an object nested under it still sorts.
+        let src = "const o = { ...rest, v: { b: 1, a: 2 } };";
+        let (_, out) = sort_object_keys(src, Lang::Js, 13).unwrap();
+        assert_eq!(out, "{ ...rest, v: { a: 2, b: 1 } }");
+    }
+
+    #[test]
+    fn sort_keys_none_cases_and_already_sorted() {
+        // No object at caret (array root) / unsupported lang.
+        assert!(sort_object_keys("[1, 2, 3]", Lang::Json, 2).is_none());
+        assert!(sort_object_keys("{\"b\":1,\"a\":2}", Lang::PlainText, 2).is_none());
+        assert!(sort_object_keys("b: 1\na: 2\n", Lang::Yaml, 2).is_none());
+        // Already sorted → text comes back identical (caller no-ops).
+        let src = "{\"a\": 1, \"b\": 2}";
+        let (range, out) = sort_object_keys(src, Lang::Json, 3).unwrap();
+        assert_eq!(&src[range], out);
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn sort_keys_typescript_object() {
+        let src = "const x: T = { beta: 2, alpha: 1 };";
+        let (_, out) = sort_object_keys(src, Lang::Ts, 16).unwrap();
+        assert_eq!(out, "{ alpha: 1, beta: 2 }");
     }
 
     #[test]

@@ -65,6 +65,18 @@ pub const ACTIONS: &[ActionDef] = &[
         vscode: "cmd-shift-n",
         label: "New Scratch File",
     },
+    ActionDef {
+        name: "sort_lines",
+        webstorm: "cmd-alt-l",
+        vscode: "cmd-alt-l",
+        label: "Sort Lines",
+    },
+    ActionDef {
+        name: "sort_keys",
+        webstorm: "cmd-alt-s",
+        vscode: "cmd-alt-s",
+        label: "Sort Object Keys",
+    },
 ];
 
 /// A configurable action: its stable name, the default keystroke under each preset, and a
