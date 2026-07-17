@@ -373,14 +373,27 @@ impl Kyde {
             self.op_error = None;
         }
         self.rebuild_commit_view(false);
-        match self.selected {
-            Some(i) if i < self.files.len() => self.select(i),
-            _ if !self.files.is_empty() => self.select(0),
-            _ => {
+        // Re-selecting keeps the COMMIT view's working diff in sync — but the panes are
+        // shared with History/Push (committed content). Leave those alone, or a clean-tree
+        // refresh blanks an open history diff to "Select a file" on window refocus (#39).
+        // History's "Local" compare is editable, hence the mode check on top of `readonly`.
+        let panes_foreign =
+            self.diff.readonly || (self.mode == Mode::History && !self.diff_view_open);
+        if panes_foreign {
+            // Just keep the commit-view selection index in range.
+            if self.selected.is_some_and(|i| i >= self.files.len()) {
                 self.selected = None;
-                self.diff.current = None;
-                self.diff.old_spans.clear();
-                self.diff.new_spans.clear();
+            }
+        } else {
+            match self.selected {
+                Some(i) if i < self.files.len() => self.select(i),
+                _ if !self.files.is_empty() => self.select(0),
+                _ => {
+                    self.selected = None;
+                    self.diff.current = None;
+                    self.diff.old_spans.clear();
+                    self.diff.new_spans.clear();
+                }
             }
         }
         // The fuzzy finder matches against `all_files` — if it's open while this snapshot
@@ -430,7 +443,12 @@ impl Kyde {
         // refocus the panes must pick up external edits like the Browse editor does: reload
         // them under the same never-clobber rules (no unsaved pane edits, bytes actually
         // changed on disk).
-        if self.mode == Mode::Commit && !self.diff.right.read(cx).dirty {
+        // Commit TAB only — on the Push tab the panes hold a committed diff, and reloading
+        // would swap in an unrelated working-tree file.
+        if self.mode == Mode::Commit
+            && self.git_tab == GitTab::Commit
+            && !self.diff.right.read(cx).dirty
+        {
             if let (Some(i), Some(repo)) = (self.selected, self.repo()) {
                 let changed = self
                     .files
@@ -439,6 +457,27 @@ impl Kyde {
                     .is_some_and(|c| self.diff.right.read(cx).text() != c);
                 if changed {
                     self.select_with(i, Some(cx));
+                }
+            }
+        }
+        // History's working-tree compares ("Local"/"Before → Local") show the working copy
+        // in the right pane too — reload it under the same never-clobber rules.
+        if self.mode == Mode::History
+            && matches!(
+                self.history.compare,
+                CompareMode::Local | CompareMode::BeforeLocal
+            )
+            && !self.diff.right.read(cx).dirty
+        {
+            if let (Some(i), Some(repo)) = (self.history.file_selected, self.repo()) {
+                let changed = self
+                    .history
+                    .files
+                    .get(i)
+                    .and_then(|f| repo.working_content(&f.path).ok())
+                    .is_some_and(|c| self.diff.right.read(cx).text() != c);
+                if changed {
+                    self.select_history_file(i, cx);
                 }
             }
         }

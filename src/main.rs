@@ -2354,6 +2354,18 @@ mod gpui_smoke_tests {
     use super::*;
     use gpui::TestAppContext;
 
+    /// Run a git command in `dir`, scrubbing the repo-pointing env (see `boot`).
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+    }
+
     /// Build a `Kyde` window against a throwaway git repo, return its handle + a visual cx.
     fn boot(cx: &mut TestAppContext) -> (gpui::WindowHandle<Kyde>, std::path::PathBuf) {
         // A real temp git repo with one change, so the commit/diff/rollback screens populate.
@@ -2695,6 +2707,128 @@ mod gpui_smoke_tests {
                     "const a = 7; // external\n",
                     "refocus must reload the commit view's working pane"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Refocus with a clean tree while a history diff is open (#39): the empty-status
+    /// refresh must not clear the shared diff panes back to "Select a file".
+    #[gpui::test]
+    fn reload_external_keeps_history_diff_open(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        // Clean tree + 2 commits.
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "second"]);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.history.compare = CompareMode::Before;
+                k.enter_history(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.diff.current.is_some(), "sanity: history diff loaded");
+                assert_eq!(k.history.file_selected, Some(0));
+            })
+            .unwrap();
+        // Refocus = the activation observer's callback.
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.diff.current.is_some(),
+                    "refocus must not blank the open history diff"
+                );
+                assert!(k.diff.path.is_some());
+                assert_eq!(k.history.file_selected, Some(0));
+            })
+            .unwrap();
+    }
+
+    /// Refocus with a dirty tree while a history diff is open: the refresh must not
+    /// overwrite the committed diff model with the working-tree diff.
+    #[gpui::test]
+    fn reload_external_keeps_history_diff_model(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "second"]);
+        std::fs::write(dir.join("app.tsx"), "const a = 3;\n").unwrap(); // dirty again
+        handle
+            .update(cx, |k, _w, cx| {
+                k.history.compare = CompareMode::Before;
+                k.enter_history(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let new_side = |k: &Kyde| {
+            k.diff
+                .current
+                .as_ref()
+                .expect("history diff loaded")
+                .new
+                .join("\n")
+        };
+        handle
+            .update(cx, |k, _w, _cx| {
+                // Newest commit vs parent: the new side is the committed "a = 2".
+                assert!(new_side(k).contains("const a = 2;"));
+            })
+            .unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    new_side(k).contains("const a = 2;"),
+                    "refocus overwrote the history diff with the working-tree diff: {:?}",
+                    new_side(k)
+                );
+            })
+            .unwrap();
+    }
+
+    /// Refocus in History "Local" compare: the right pane shows the working copy, so
+    /// external edits must reload it (same never-clobber rules as the Commit pane).
+    #[gpui::test]
+    fn reload_external_refreshes_history_local_pane(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "second"]);
+        std::fs::write(dir.join("app.tsx"), "const a = 3;\n").unwrap(); // dirty again
+        handle
+            .update(cx, |k, _w, cx| {
+                k.history.compare = CompareMode::Local;
+                k.enter_history(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.history.file_selected, Some(0), "sanity: file selected");
+                assert_eq!(k.diff.right.read(cx).text(), "const a = 3;\n");
+            })
+            .unwrap();
+        // External tool rewrites the file while Kyde is in the background.
+        std::fs::write(dir.join("app.tsx"), "const a = 4;\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.reload_external(cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(
+                    k.diff.right.read(cx).text(),
+                    "const a = 4;\n",
+                    "refocus must reload the history Local-compare working pane"
+                );
+                assert!(k.diff.current.is_some(), "the diff must stay open");
+                assert_eq!(k.history.file_selected, Some(0));
             })
             .unwrap();
     }
