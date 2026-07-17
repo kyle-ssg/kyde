@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [2.2.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.1.0...kyde-v2.2.0) (2026-07-17)
+
+
+### Features
+
+* merge view — branch merging with IntelliJ-style conflict resolution ([#46](https://github.com/kyle-ssg/kyde/issues/46)) ([f3ff30b](https://github.com/kyle-ssg/kyde/commit/f3ff30b7df1c010b5f2ecad8e632152262778334))
+
+
+### Bug Fixes
+
+* keep history/push diff panes open across window refocus ([#40](https://github.com/kyle-ssg/kyde/issues/40)) ([4d43bd6](https://github.com/kyle-ssg/kyde/commit/4d43bd62bca358c2ad92f308ce1ed756406bd3ae))
+
 ## [2.1.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.0.1...kyde-v2.1.0) (2026-07-14)
 
 
