@@ -188,11 +188,13 @@ pub struct CodeEditor {
     /// scrolling/caret-moving no longer re-highlights the entire file each frame.
     spans: Vec<highlight::Span>,
     /// Cached parse-error byte ranges (sorted, non-overlapping), recomputed with
-    /// `spans` — but ONLY when `errors_on`; empty otherwise, so editors without
-    /// the opt-in never pay the extra parse.
+    /// `spans` — but ONLY when `errors_on`; empty otherwise, so editors with the
+    /// flag off never pay the extra parse.
     error_ranges: Vec<Range<usize>>,
-    /// Error highlighting opt-in for this editor's language (set by the app from
-    /// the pack's plugins.json toggle; default off).
+    /// Error highlighting for this editor's language — the app pushes it from the
+    /// pack's plugins.json toggle (on by default for installed packs, per-pack
+    /// opt-out). Editors nothing ever pushes to (commit box, single-line inputs,
+    /// diff/merge panes) stay false.
     errors_on: bool,
     /// Longest line length in bytes (recomputed on content change) — drives the element's
     /// content width so long lines scroll horizontally instead of clipping.

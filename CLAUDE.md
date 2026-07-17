@@ -478,13 +478,14 @@ Shell (bash), CSS, SCSS (reuses CSS grammar), `.env`, `.gitignore`. `.env`/`.git
 use small builtin line highlighters (no grammar). tree-sitter core bumped to **0.25**
 because tree-sitter-md 0.5 emits grammar ABI 15 (0.24's highlighter caps at ABI 14).
 
-### Error highlighting (per-pack opt-in — issue #47)
-Wavy red squiggles under parse errors (tree-sitter `ERROR` + `MISSING` nodes), OFF by
-default and opted in **per pack**: an "Error highlighting" checkbox on each installed
-pack's row in the Language Plugins window (`toggle_pack_errors`; hidden for "font" —
-not a language). A second gate on top of `installed`, persisted as `errors_enabled` in
-plugins.json (`Plugins::errors_on/set_errors`; uninstall drops the opt-in, reinstall
-does NOT resurrect it). Pipeline: `kyde_syntax::error_ranges(source, lang)` (pure —
+### Error highlighting (on by default per pack — issue #47)
+Wavy red squiggles under parse errors (tree-sitter `ERROR` + `MISSING` nodes), **ON by
+default for every installed pack**, with a per-pack opt-OUT: the "Error highlighting"
+checkbox on each installed pack's row in the Language Plugins window
+(`toggle_pack_errors`; hidden for "font" — not a language). Persisted as
+`errors_disabled` in plugins.json (`Plugins::errors_on/set_errors`; empty set — and any
+pre-existing plugins.json — means all on; uninstall drops the opt-out, so reinstall
+returns to default-on). Pipeline: `kyde_syntax::error_ranges(source, lang)` (pure —
 parses, prunes clean subtrees via `node.has_error()`, merges overlaps, widens
 zero-width MISSING to one char; perf guard `perf_error_ranges_large_files_stay_fast`)
 → cached on `CodeEditor.error_ranges`, recomputed with `spans` in `recompute_folds`

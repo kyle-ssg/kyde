@@ -14,10 +14,12 @@ pub struct Plugins {
     /// Set of installed pack ids (see `highlight::PACKS`).
     #[serde(default)]
     installed: BTreeSet<String>,
-    /// Pack ids with error highlighting opted in (a second gate on top of
-    /// `installed`: the pack's parse already runs, this adds the error walk).
+    /// Pack ids with error highlighting opted OUT. Error highlighting is ON by
+    /// default for every installed pack (the pack's parse already runs; the
+    /// error walk is the cheap part) — this records the per-pack "no thanks",
+    /// so an empty set (and any pre-existing plugins.json) means all on.
     #[serde(default)]
-    errors_enabled: BTreeSet<String>,
+    errors_disabled: BTreeSet<String>,
 }
 
 impl Plugins {
@@ -33,24 +35,26 @@ impl Plugins {
 
     /// Remove a pack from the installed set (its grammar is still compiled in, but the
     /// editor falls back to `PlainText` for that language until re-installed).
-    /// Also drops the pack's error-highlighting opt-in.
+    /// Also drops the pack's error-highlighting opt-out (reinstall = fresh defaults).
     pub fn uninstall(&mut self, pack_id: &str) {
         self.installed.remove(pack_id);
-        self.errors_enabled.remove(pack_id);
+        self.errors_disabled.remove(pack_id);
     }
 
-    /// Whether error highlighting is opted in for `pack_id`. Only meaningful when
-    /// the pack is installed — callers gate on `is_installed` first.
+    /// Whether error highlighting is on for `pack_id` — the default unless the
+    /// user opted out. Only meaningful when the pack is installed — callers gate
+    /// on `is_installed` first.
     pub fn errors_on(&self, pack_id: &str) -> bool {
-        self.errors_enabled.contains(pack_id)
+        !self.errors_disabled.contains(pack_id)
     }
 
-    /// Turn error highlighting on/off for `pack_id` (opt-in, default off).
+    /// Turn error highlighting on/off for `pack_id` (default on; `false` records
+    /// a per-pack opt-out).
     pub fn set_errors(&mut self, pack_id: &str, on: bool) {
         if on {
-            self.errors_enabled.insert(pack_id.to_string());
+            self.errors_disabled.remove(pack_id);
         } else {
-            self.errors_enabled.remove(pack_id);
+            self.errors_disabled.insert(pack_id.to_string());
         }
     }
 
@@ -93,22 +97,27 @@ mod tests {
     }
 
     #[test]
-    fn errors_opt_in_round_trips_and_defaults_off() {
+    fn errors_default_on_and_opt_out_round_trips() {
         let mut p = Plugins::default();
         p.install("json");
-        assert!(!p.errors_on("json"), "error highlighting must default OFF");
+        assert!(p.errors_on("json"), "error highlighting must default ON");
+        // Opt out → persists across a save/load round trip.
+        p.set_errors("json", false);
+        assert!(!p.errors_on("json"));
+        let back: Plugins = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(!back.errors_on("json"));
+        // Opting back in clears the opt-out.
         p.set_errors("json", true);
         assert!(p.errors_on("json"));
-        let back: Plugins = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
-        assert!(back.errors_on("json"));
-        // Old plugins.json without the field still parses (serde default).
+        // Old plugins.json without the field still parses → default on.
         let old: Plugins = serde_json::from_str(r#"{"installed":["json"]}"#).unwrap();
-        assert!(old.is_installed("json") && !old.errors_on("json"));
-        // Uninstall drops the opt-in too.
-        let mut q = p.clone();
-        q.uninstall("json");
-        assert!(!q.errors_on("json"));
+        assert!(old.is_installed("json") && old.errors_on("json"));
+        // Uninstall drops the opt-out → reinstall returns to the default (on).
+        let mut q = Plugins::default();
         q.install("json");
-        assert!(!q.errors_on("json"), "reinstall must not resurrect opt-in");
+        q.set_errors("json", false);
+        q.uninstall("json");
+        q.install("json");
+        assert!(q.errors_on("json"), "reinstall must return to default-on");
     }
 }
