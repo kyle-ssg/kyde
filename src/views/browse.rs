@@ -268,7 +268,7 @@ impl Kyde {
                                 let ed = this.browse.editor.read(cx);
                                 let sel = ed.selection();
                                 let keys =
-                                    highlight::sort_object_keys(ed.text(), ed.lang, sel.start)
+                                    highlight::sort_object_keys(ed.text(), ed.lang, sel.clone())
                                         .is_some();
                                 // Sort Lines also shows inside an object — there it
                                 // delegates to the key sort (issue #43).
@@ -956,7 +956,7 @@ impl Kyde {
     fn object_sort(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((r, text)) = ({
             let ed = self.browse.editor.read(cx);
-            highlight::sort_object_keys(ed.text(), ed.lang, ed.selection().start)
+            highlight::sort_object_keys(ed.text(), ed.lang, ed.selection())
         }) else {
             return false;
         };

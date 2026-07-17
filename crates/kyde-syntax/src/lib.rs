@@ -742,26 +742,48 @@ fn sorted_text(node: tree_sitter::Node, src: &str) -> Option<String> {
     Some(s)
 }
 
-/// Sort the keys of the innermost object literal containing `caret`,
-/// recursively (nested objects sort too; arrays keep their element order but
-/// their object elements still sort). Formatting is preserved: entry texts move
-/// verbatim and the comma/indent layout stays put. Objects containing anything
-/// other than plain key/value entries (spreads, methods, comments, parse
-/// errors) keep their order. Returns the object's byte range plus its new text
-/// — equal to the original when already sorted — or `None` when the language
-/// isn't JSON/JS/TS or no object encloses `caret`.
+/// Does `node`'s subtree contain any object literal?
+fn contains_object(node: tree_sitter::Node) -> bool {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "object" {
+            return true;
+        }
+        for i in 0..n.child_count() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    false
+}
+
+/// Sort object keys around `sel`, recursively (nested objects sort too; arrays
+/// keep their element order but object elements inside them still sort).
+///
+/// Target: a collapsed `sel` (a caret) sorts the innermost object containing
+/// it. A ranged `sel` first trims surrounding whitespace (so selecting a block
+/// including its indent targets the block, not the enclosing object), then
+/// sorts the smallest node covering it — when that node isn't itself an object
+/// (a selection across sibling objects in an array, say), EVERY object inside
+/// it sorts while the node's own order stays put. Formatting is preserved:
+/// entry texts move verbatim and the comma/indent layout stays put. Objects
+/// containing anything other than plain key/value entries (spreads, methods,
+/// comments, parse errors) keep their order. Returns the rewritten byte range
+/// plus its new text — equal to the original when already sorted — or `None`
+/// when the language isn't JSON/JS/TS or there is no object at/under `sel`.
 ///
 /// ```
 /// use kyde_syntax::{sort_object_keys, Lang};
-/// let (r, s) = sort_object_keys("{\"b\": 1, \"a\": 2}", Lang::Json, 3).unwrap();
+/// let (r, s) = sort_object_keys("{\"b\": 1, \"a\": 2}", Lang::Json, 3..3).unwrap();
 /// assert_eq!(r, 0..16);
 /// assert_eq!(s, "{\"a\": 2, \"b\": 1}");
-/// assert!(sort_object_keys("[1, 2]", Lang::Json, 1).is_none());
+/// assert!(sort_object_keys("[1, 2]", Lang::Json, 1..1).is_none());
 /// ```
 pub fn sort_object_keys(
     source: &str,
     lang: Lang,
-    caret: usize,
+    sel: std::ops::Range<usize>,
 ) -> Option<(std::ops::Range<usize>, String)> {
     // Only grammars whose object literals we understand (`object` + `pair`).
     if !matches!(lang, Lang::Json | Lang::Js | Lang::Ts | Lang::Tsx) {
@@ -771,16 +793,33 @@ pub fn sort_object_keys(
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&grammar).ok()?;
     let tree = parser.parse(source, None)?;
-    let caret = caret.min(source.len());
-    let mut node = tree.root_node().descendant_for_byte_range(caret, caret)?;
-    let obj = loop {
-        if node.kind() == "object" {
-            break node;
-        }
-        node = node.parent()?;
-    };
-    let range = obj.byte_range();
-    let text = sorted_text(obj, source).unwrap_or_else(|| source[range.clone()].to_string());
+    // Trim the selection to its non-whitespace core; an all-whitespace or
+    // collapsed selection degenerates to a caret.
+    let (mut a, mut b) = (sel.start.min(source.len()), sel.end.min(source.len()));
+    if let Some(i) = source[a..b].find(|c: char| !c.is_whitespace()) {
+        a += i;
+        b = a
+            + source[a..b]
+                .rfind(|c: char| !c.is_whitespace())
+                .unwrap_or(0)
+            + 1;
+    } else {
+        b = a;
+    }
+    let mut node = tree.root_node().descendant_for_byte_range(a, b)?;
+    // A ranged selection whose covering node holds objects sorts them all in
+    // place; otherwise (caret, or a selection inside a leaf) fall back to the
+    // innermost ENCLOSING object.
+    if a == b || !contains_object(node) {
+        node = loop {
+            if node.kind() == "object" {
+                break node;
+            }
+            node = node.parent()?;
+        };
+    }
+    let range = node.byte_range();
+    let text = sorted_text(node, source).unwrap_or_else(|| source[range.clone()].to_string());
     Some((range, text))
 }
 
@@ -1060,7 +1099,7 @@ mod tests {
     #[test]
     fn sort_keys_nested_json_preserves_formatting() {
         let src = "{\n  \"b\": {\n    \"z\": 1,\n    \"a\": 2\n  },\n  \"a\": [\n    3,\n    { \"y\": 1, \"x\": 2 }\n  ]\n}";
-        let (range, out) = sort_object_keys(src, Lang::Json, 5).unwrap();
+        let (range, out) = sort_object_keys(src, Lang::Json, 5..5).unwrap();
         assert_eq!(
             range,
             0..src.len(),
@@ -1078,35 +1117,59 @@ mod tests {
         let src = "{\"b\": 1, \"a\": {\"d\": 1, \"c\": 2}}";
         // Caret inside the nested object → only that object's range.
         let inner_start = src.find("{\"d\"").unwrap();
-        let (range, out) = sort_object_keys(src, Lang::Json, inner_start + 2).unwrap();
+        let (range, out) =
+            sort_object_keys(src, Lang::Json, inner_start + 2..inner_start + 2).unwrap();
         assert_eq!(range, inner_start..src.len() - 1);
         assert_eq!(out, "{\"c\": 2, \"d\": 1}");
     }
 
     #[test]
+    fn sort_keys_selection_targets_the_selected_object() {
+        // The user's release-please case: an object inside an array, selected
+        // WITH its leading indent — the selection must sort THAT object, not
+        // the enclosing one (the whitespace trim), and nested objects inside a
+        // ranged selection sort too.
+        let src = "{\n  \"outer\": [\n    {\n      \"type\": \"toml\",\n      \"path\": \"x\",\n      \"jsonpath\": \"$.v\"\n    }\n  ]\n}";
+        let sel_start = src.find("    {").unwrap(); // line start incl. indent
+        let sel_end = src.find("\n  ]").unwrap();
+        let (range, out) = sort_object_keys(src, Lang::Json, sel_start..sel_end).unwrap();
+        assert_eq!(range, src.find("{\n      ").unwrap()..sel_end);
+        assert_eq!(
+            out,
+            "{\n      \"jsonpath\": \"$.v\",\n      \"path\": \"x\",\n      \"type\": \"toml\"\n    }"
+        );
+        // A selection spanning SIBLING objects in an array sorts each of them
+        // (array element order untouched).
+        let src = "[\n  {\"b\": 1, \"a\": 2},\n  {\"d\": 3, \"c\": 4}\n]";
+        let (range, out) = sort_object_keys(src, Lang::Json, 2..src.len() - 1).unwrap();
+        assert_eq!(range, 0..src.len());
+        assert_eq!(out, "[\n  {\"a\": 2, \"b\": 1},\n  {\"c\": 4, \"d\": 3}\n]");
+    }
+
+    #[test]
     fn sort_keys_js_shorthand_and_spread() {
         // Shorthand entries sort by their own name.
-        let (_, out) = sort_object_keys("const o = { b, a, c: 1 };", Lang::Js, 14).unwrap();
+        let (_, out) = sort_object_keys("const o = { b, a, c: 1 };", Lang::Js, 14..14).unwrap();
         assert_eq!(out, "{ a, b, c: 1 }");
         // A spread means order can matter — never reorder that object…
         let src = "const o = { z: 1, ...rest, a: 2 };";
-        let (_, out) = sort_object_keys(src, Lang::Js, 14).unwrap();
+        let (_, out) = sort_object_keys(src, Lang::Js, 14..14).unwrap();
         assert_eq!(out, "{ z: 1, ...rest, a: 2 }");
         // …but an object nested under it still sorts.
         let src = "const o = { ...rest, v: { b: 1, a: 2 } };";
-        let (_, out) = sort_object_keys(src, Lang::Js, 13).unwrap();
+        let (_, out) = sort_object_keys(src, Lang::Js, 13..13).unwrap();
         assert_eq!(out, "{ ...rest, v: { a: 2, b: 1 } }");
     }
 
     #[test]
     fn sort_keys_none_cases_and_already_sorted() {
         // No object at caret (array root) / unsupported lang.
-        assert!(sort_object_keys("[1, 2, 3]", Lang::Json, 2).is_none());
-        assert!(sort_object_keys("{\"b\":1,\"a\":2}", Lang::PlainText, 2).is_none());
-        assert!(sort_object_keys("b: 1\na: 2\n", Lang::Yaml, 2).is_none());
+        assert!(sort_object_keys("[1, 2, 3]", Lang::Json, 2..2).is_none());
+        assert!(sort_object_keys("{\"b\":1,\"a\":2}", Lang::PlainText, 2..2).is_none());
+        assert!(sort_object_keys("b: 1\na: 2\n", Lang::Yaml, 2..2).is_none());
         // Already sorted → text comes back identical (caller no-ops).
         let src = "{\"a\": 1, \"b\": 2}";
-        let (range, out) = sort_object_keys(src, Lang::Json, 3).unwrap();
+        let (range, out) = sort_object_keys(src, Lang::Json, 3..3).unwrap();
         assert_eq!(&src[range], out);
     }
 
@@ -1114,7 +1177,7 @@ mod tests {
     #[test]
     fn sort_keys_typescript_object() {
         let src = "const x: T = { beta: 2, alpha: 1 };";
-        let (_, out) = sort_object_keys(src, Lang::Ts, 16).unwrap();
+        let (_, out) = sort_object_keys(src, Lang::Ts, 16..16).unwrap();
         assert_eq!(out, "{ alpha: 1, beta: 2 }");
     }
 
