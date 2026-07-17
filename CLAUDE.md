@@ -518,6 +518,29 @@ CVD variants ride the conflict accent) — the squiggle paints inside the normal
 appear wherever the editor's flag is on (Browse; diff/merge panes never set it).
 Debug shot: `KYDE_SHOT=error-highlight` + `KYDE_SHOT_FILE=<invalid .json>`.
 
+### ⌘-click imports (on by default per pack — issue #26)
+Hold ⌘ and hover an import → it underlines in the accent color with a pointer cursor;
+⌘-click opens the target file. ON by default for every installed pack that supports it
+(Rust, TypeScript/TSX, JavaScript, Python), per-pack opt-OUT via the "⌘-click imports"
+checkbox on the pack's row (persisted as `links_disabled` in plugins.json,
+`Plugins::links_on/set_links` — same model as error highlighting). Pipeline:
+`kyde_syntax::import_links(source, lang)` (pure — Rust `mod x;`/`use` paths incl.
+wildcards + `as`, TS/JS `import`/`export from`/`require()`/dynamic `import()`, Python
+`import a.b`/`from .rel import c`; perf guard `perf_import_links_large_file_stays_fast`)
+→ cached on `CodeEditor.import_links`, recomputed with `spans` only when `links_on`
+(`set_link_navigation`, pushed by the app from `Kyde::links_enabled_for(lang)` at the
+same four sites as the error flag). The editor tracks ⌘ via `on_modifiers_changed`
+(`cmd_held`) and hover via `on_mouse_move` (`hover_link`); the hovered link underlines
+through `apply_underline_ranges` (the generalized run-splitter behind the error
+squiggles) and the div cursor flips to PointingHand. ⌘-click emits
+`EditorEvent::OpenImport(link)` → `Kyde::open_import_link` resolves it with
+`kyde_syntax::resolve_import` (pure: TS relative specifiers + extension/index
+candidates, Python dotted/relative → `x.py`/`__init__.py`, Rust `mod` → sibling and
+`crate::`/`super::`/`self::` → progressively-shorter `src/` paths; bare specifiers =
+external → `None`) against `browse.all_files` and opens the hit. Smoke test:
+`cmd_click_import_opens_the_target_file`. Debug shot: `KYDE_SHOT=imports`
+(`CodeEditor::force_link_hover` fakes the ⌘-hover).
+
 ### Two independent layers — Cargo features (build) vs install list (runtime)
 The plugin system is **two separate gates**, do not conflate them:
 - **Cargo features** (`Cargo.toml [features]`, one per pack: `rust`, `typescript`,

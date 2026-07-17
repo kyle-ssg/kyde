@@ -848,11 +848,13 @@ impl Kyde {
             };
             let lang = self.effective_lang(&rel);
             let errs = self.errors_enabled_for(lang);
+            let links = self.links_enabled_for(lang);
             self.browse.editor.update(cx, |e, cx| {
                 e.line_numbers = true;
-                // Flag first so `set_content`'s recompute already parses (or skips)
-                // errors for the new file's opt-in.
+                // Flags first so `set_content`'s recompute already parses (or
+                // skips) errors/links for the new file's toggles.
                 e.set_error_highlight(errs, cx);
+                e.set_link_navigation(links, cx);
                 e.set_content(content, lang, cx);
             });
             // Point the editor at whichever scroll container it renders in, so caret-follow
@@ -1015,5 +1017,19 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         self.sort_object_keys_at_caret(cx);
+    }
+
+    // ── ⌘-click import navigation (issue #26) ─────────────────────
+    /// Resolve a ⌘-clicked import against the project's file list and open the
+    /// target file. Unresolvable specifiers (npm packages, external crates,
+    /// stdlib modules) are a silent no-op.
+    pub(crate) fn open_import_link(&mut self, link: highlight::ImportLink, cx: &mut Context<Self>) {
+        let Some(cur) = self.browse.open_path.clone() else {
+            return;
+        };
+        let lang = self.browse.editor.read(cx).lang;
+        if let Some(target) = highlight::resolve_import(&link, lang, &cur, &self.browse.all_files) {
+            self.open_file(target, cx);
+        }
     }
 }

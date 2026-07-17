@@ -565,6 +565,13 @@ impl Kyde {
             .is_some_and(|p| self.plugins.is_installed(p.id) && self.plugins.errors_on(p.id))
     }
 
+    /// Whether ⌘-click import navigation is on for `lang` (pack installed AND
+    /// the pack's links toggle on — default on, per-pack opt-out).
+    pub(crate) fn links_enabled_for(&self, lang: Lang) -> bool {
+        lang.pack()
+            .is_some_and(|p| self.plugins.is_installed(p.id) && self.plugins.links_on(p.id))
+    }
+
     /// Persist `rel`'s `text` to disk: through the repo's working tree in a git repo, else
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
     /// files) write to themselves, since `join` keeps an absolute right-hand side. Returns

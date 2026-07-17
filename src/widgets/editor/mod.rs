@@ -119,6 +119,9 @@ pub fn bind_keys(cx: &mut App) {
 /// Emitted whenever the text changes (used by the file finder to re-query live).
 pub enum EditorEvent {
     Changed,
+    /// ⌘-click landed on an import link — the app resolves the target against
+    /// the project's file list and opens it (issue #26).
+    OpenImport(highlight::ImportLink),
 }
 
 /// A point-in-time editor state for the undo/redo stacks.
@@ -196,6 +199,18 @@ pub struct CodeEditor {
     /// opt-out). Editors nothing ever pushes to (commit box, single-line inputs,
     /// diff/merge panes) stay false.
     errors_on: bool,
+    /// Cached import links (sorted by position), recomputed with `spans` — but
+    /// ONLY when `links_on`, so editors without the toggle never pay the parse.
+    import_links: Vec<highlight::ImportLink>,
+    /// ⌘-click import navigation for this editor's language (same push model as
+    /// `errors_on`: per-pack toggle, on by default for installed packs).
+    links_on: bool,
+    /// Live ⌘-held state (tracked via `ModifiersChanged`) — gates the link hover
+    /// affordance and the click intercept.
+    cmd_held: bool,
+    /// Index into `import_links` under the pointer while ⌘ is held (drives the
+    /// underline + pointer cursor).
+    hover_link: Option<usize>,
     /// Longest line length in bytes (recomputed on content change) — drives the element's
     /// content width so long lines scroll horizontally instead of clipping.
     max_line_len: usize,
@@ -316,6 +331,10 @@ impl CodeEditor {
             spans: Vec::new(),
             error_ranges: Vec::new(),
             errors_on: false,
+            import_links: Vec::new(),
+            links_on: false,
+            cmd_held: false,
+            hover_link: None,
             max_line_len: 0,
             line_layouts: HashMap::new(),
             display_rows: 0,
@@ -470,13 +489,16 @@ impl CodeEditor {
         if self.single_line || self.content.is_empty() {
             self.spans = Vec::new();
             self.error_ranges = Vec::new();
+            self.import_links = Vec::new();
+            self.hover_link = None;
             self.foldable = Vec::new();
             self.foldable_starts.clear();
             self.max_line_len = 0;
             return;
         }
-        // Longest line (bytes) → element content width for horizontal scroll. Cheap byte
-        // scan, only on content change (not per frame).
+        self.hover_link = None; // ranges may have shifted under the pointer
+                                // Longest line (bytes) → element content width for horizontal scroll. Cheap byte
+                                // scan, only on content change (not per frame).
         self.max_line_len = self.content.split('\n').map(str::len).max().unwrap_or(0);
         // Small files: highlight + find folds inline (correct on the very first frame, no
         // flicker). Big files: clear now so the file opens instantly as plain text, then
@@ -495,6 +517,11 @@ impl CodeEditor {
             } else {
                 Vec::new()
             };
+            self.import_links = if self.links_on {
+                highlight::import_links(&self.content, self.lang)
+            } else {
+                Vec::new()
+            };
             self.foldable = highlight::fold_regions(&self.content, self.lang);
             self.foldable_starts = self.foldable.iter().map(|r| r.0).collect();
             self.folded.retain(|l| self.foldable_starts.contains(l));
@@ -502,14 +529,16 @@ impl CodeEditor {
         }
         self.spans = Vec::new();
         self.error_ranges = Vec::new();
+        self.import_links = Vec::new();
         self.foldable = Vec::new();
         self.foldable_starts.clear();
         let gen = self.compute_gen;
         let content = self.content.clone();
         let lang = self.lang;
         let errors_on = self.errors_on;
+        let links_on = self.links_on;
         cx.spawn(async move |this, cx| {
-            let (spans, foldable, errors) = cx
+            let (spans, foldable, errors, links) = cx
                 .background_executor()
                 .spawn(async move {
                     (
@@ -517,6 +546,11 @@ impl CodeEditor {
                         highlight::fold_regions(&content, lang),
                         if errors_on {
                             highlight::error_ranges(&content, lang)
+                        } else {
+                            Vec::new()
+                        },
+                        if links_on {
+                            highlight::import_links(&content, lang)
                         } else {
                             Vec::new()
                         },
@@ -528,6 +562,7 @@ impl CodeEditor {
                     // Still the current content → apply the highlight + folds.
                     ed.spans = spans;
                     ed.error_ranges = errors;
+                    ed.import_links = links;
                     ed.foldable_starts = foldable.iter().map(|r| r.0).collect();
                     ed.foldable = foldable;
                     ed.folded.retain(|l| ed.foldable_starts.contains(l));
@@ -549,6 +584,34 @@ impl CodeEditor {
         self.errors_on = on;
         self.recompute_folds(cx);
         cx.notify();
+    }
+
+    /// Toggle ⌘-click import navigation for this editor (same push model as
+    /// [`set_error_highlight`](Self::set_error_highlight): the app derives `on`
+    /// from the pack's plugins.json toggle, on by default when installed).
+    pub fn set_link_navigation(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.links_on == on {
+            return;
+        }
+        self.links_on = on;
+        self.recompute_folds(cx);
+        cx.notify();
+    }
+
+    /// Index of the import link containing byte offset `off`, if any.
+    fn link_at(&self, off: usize) -> Option<usize> {
+        self.import_links
+            .iter()
+            .position(|l| l.range.start <= off && off < l.range.end)
+    }
+
+    /// Screenshot/debug helper: force the ⌘-hover affordance on import link `i`,
+    /// as if ⌘ were held with the pointer over it (`KYDE_SHOT=imports`). Returns
+    /// whether such a link exists (false = nothing will underline).
+    pub fn force_link_hover(&mut self, i: usize) -> bool {
+        self.cmd_held = true;
+        self.hover_link = Some(i);
+        self.import_links.len() > i
     }
 
     /// (Re)start the caret blink: show it now and bump the epoch so any prior blink loop exits,
@@ -944,6 +1007,16 @@ impl CodeEditor {
         // IME text can route here incidentally while actions (cmd-z, etc.) don't dispatch.
         self.focus_handle.focus(window);
         self.restart_blink(cx);
+        // ⌘-click on an import link opens the target file (issue #26) instead of
+        // moving the caret.
+        if ev.modifiers.platform && self.links_on {
+            let off = self.offset_for_position(ev.position);
+            if let Some(i) = self.link_at(off) {
+                cx.emit(EditorEvent::OpenImport(self.import_links[i].clone()));
+                cx.stop_propagation();
+                return;
+            }
+        }
         // A click in the fold gutter toggles the fold on that display row instead
         // of moving the caret.
         if self.gutter_w > px(0.0) {
@@ -1040,6 +1113,15 @@ impl CodeEditor {
         }
     }
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // ⌘-hover over an import link → underline + pointer cursor (the hover
+        // clears when ⌘ lifts — see the ModifiersChanged listener).
+        if self.cmd_held && self.links_on && !self.is_selecting {
+            let hit = self.link_at(self.offset_for_position(ev.position));
+            if hit != self.hover_link {
+                self.hover_link = hit;
+                cx.notify();
+            }
+        }
         // Only extend the selection for a drag this editor itself started.
         if self.is_selecting && ev.dragging() {
             // `select_to` sets `reveal_pending`, which would yank the view back to the
@@ -1482,7 +1564,12 @@ impl Render for CodeEditor {
         div()
             .key_context(ctx.as_str())
             .track_focus(&self.focus_handle)
-            .cursor(CursorStyle::IBeam)
+            // Pointer over a ⌘-hovered import link (it's clickable); I-beam otherwise.
+            .cursor(if self.cmd_held && self.hover_link.is_some() {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .when(!fill, |d| d.w_full().min_h(relative(1.0)))
             .when(fill, gpui::Styled::size_full)
             // Transparent: the editor adopts its container's background (the rounded editor
@@ -1525,6 +1612,19 @@ impl Render for CodeEditor {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            // Track ⌘ so the import-link affordance appears/disappears live.
+            .on_modifiers_changed(
+                cx.listener(|this, e: &gpui::ModifiersChangedEvent, _w, cx| {
+                    let held = e.modifiers.platform;
+                    if this.cmd_held != held {
+                        this.cmd_held = held;
+                        if !held {
+                            this.hover_link = None;
+                        }
+                        cx.notify();
+                    }
+                }),
+            )
             .child(EditorElement {
                 editor: cx.entity(),
             })
@@ -1606,12 +1706,31 @@ fn apply_error_squiggles(
     errors: &[Range<usize>],
     color: Hsla,
 ) -> Vec<TextRun> {
+    let squiggle = UnderlineStyle {
+        thickness: px(1.0),
+        color: Some(color),
+        wavy: true,
+    };
+    apply_underline_ranges(runs, line_start, line_len, errors, squiggle)
+}
+
+/// The generic run-splitter behind [`apply_error_squiggles`] (wavy, per error)
+/// and the ⌘-hover import-link underline (straight, one range): split `runs`
+/// wherever a range boundary falls in this line and set `style` on the covered
+/// pieces. `ranges` are whole-buffer byte ranges, sorted + non-overlapping.
+fn apply_underline_ranges(
+    runs: Vec<TextRun>,
+    line_start: usize,
+    line_len: usize,
+    ranges: &[Range<usize>],
+    style: UnderlineStyle,
+) -> Vec<TextRun> {
     let line_end = line_start + line_len;
-    // Binary-search the first error reaching this line (same trick as `line_runs`),
+    // Binary-search the first range reaching this line (same trick as `line_runs`),
     // then clamp the overlapping ones to line-local offsets.
-    let first = errors.partition_point(|r| r.end <= line_start);
+    let first = ranges.partition_point(|r| r.end <= line_start);
     let mut local: Vec<(usize, usize)> = Vec::new();
-    for r in &errors[first..] {
+    for r in &ranges[first..] {
         if r.start >= line_end {
             break;
         }
@@ -1623,11 +1742,6 @@ fn apply_error_squiggles(
     if local.is_empty() {
         return runs;
     }
-    let squiggle = UnderlineStyle {
-        thickness: px(1.0),
-        color: Some(color),
-        wavy: true,
-    };
     let mut out: Vec<TextRun> = Vec::with_capacity(runs.len() + local.len() * 2);
     let mut pos = 0usize; // line-local byte cursor
     let mut li = 0usize; // index into `local` (monotonic — both walks are in order)
@@ -1642,15 +1756,15 @@ fn apply_error_squiggles(
             while li < local.len() && local[li].1 <= cur {
                 li += 1;
             }
-            let (boundary, in_err) = match local.get(li) {
+            let (boundary, in_range) = match local.get(li) {
                 Some(&(es, ee)) if cur >= es => (ee.min(end), true),
                 Some(&(es, _)) => (es.min(end), false),
                 None => (end, false),
             };
             let mut piece = run.clone();
             piece.len = boundary - cur;
-            if in_err {
-                piece.underline = Some(squiggle);
+            if in_range {
+                piece.underline = Some(style);
             }
             out.push(piece);
             cur = boundary;

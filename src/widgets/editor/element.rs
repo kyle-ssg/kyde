@@ -120,6 +120,21 @@ impl Element for EditorElement {
         // rows never pay for the run splitting.
         let errors: &[std::ops::Range<usize>] = if empty { &[] } else { &editor.error_ranges };
         let error_color: Hsla = theme::get().syn_error.into();
+        // The ⌘-hovered import link (at most one) gets a straight underline in
+        // the accent color — the visible "this is clickable" affordance.
+        let link_range: Option<[std::ops::Range<usize>; 1]> = (editor.cmd_held && !empty)
+            .then(|| {
+                editor
+                    .hover_link
+                    .and_then(|i| editor.import_links.get(i))
+                    .map(|l| [l.range.clone()])
+            })
+            .flatten();
+        let link_style = UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(theme::get().primary.into()),
+            wavy: false,
+        };
 
         // Byte offset of every buffer line start — ONE pass over the content per frame.
         // (Previously the content was `split('\n')`-scanned 3-4× per frame — for a 37k-line
@@ -270,13 +285,22 @@ impl Element for EditorElement {
                         line_starts.push(start + seg);
                         visible_lines.push(b);
                         if on_screen(dr) {
-                            let s_runs = apply_error_squiggles(
+                            let mut s_runs = apply_error_squiggles(
                                 line_runs(seg_str, start + seg, spans, &font, default_color),
                                 start + seg,
                                 seg_str.len(),
                                 errors,
                                 error_color,
                             );
+                            if let Some(lr) = &link_range {
+                                s_runs = apply_underline_ranges(
+                                    s_runs,
+                                    start + seg,
+                                    seg_str.len(),
+                                    lr,
+                                    link_style,
+                                );
+                            }
                             lines.insert(
                                 dr,
                                 window.text_system().shape_line(
@@ -298,13 +322,16 @@ impl Element for EditorElement {
                     gutter.push((dr, editor.folded.contains(&b)));
                 }
                 if on_screen(dr) {
-                    let runs = apply_error_squiggles(
+                    let mut runs = apply_error_squiggles(
                         line_runs(line, start, spans, &font, default_color),
                         start,
                         line.len(),
                         errors,
                         error_color,
                     );
+                    if let Some(lr) = &link_range {
+                        runs = apply_underline_ranges(runs, start, line.len(), lr, link_style);
+                    }
                     lines.insert(
                         dr,
                         window.text_system().shape_line(

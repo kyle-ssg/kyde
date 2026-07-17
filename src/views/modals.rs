@@ -157,28 +157,48 @@ impl Kyde {
                                     .child(SharedString::from(pack_size(p.id))),
                             ),
                     )
-                    // Per-pack error-highlighting opt-in — only meaningful once the
-                    // grammar is active ("font" isn't a language, no parse to check).
+                    // Per-pack feature toggles (default on) — only meaningful once
+                    // the grammar is active ("font" isn't a language, no parse).
                     .when(installed && id != "font", |row| {
-                        let errs_on = self.plugins.errors_on(id);
-                        row.child(
+                        let check = |label: &'static str,
+                                     on: bool,
+                                     toggle: fn(&mut Self, &str, &mut Context<Self>),
+                                     cx: &mut Context<Self>| {
                             div()
                                 .flex()
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
-                                .flex_none()
                                 .cursor_pointer()
                                 .text_size(px(11.0))
                                 .text_color(t.secondary_text)
-                                .child(checkbox_box(errs_on))
-                                .child("Error highlighting")
+                                .child(checkbox_box(on))
+                                .child(label)
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _e, _w, cx| {
-                                        this.toggle_pack_errors(id, cx);
-                                    }),
-                                ),
+                                    cx.listener(move |this, _e, _w, cx| toggle(this, id, cx)),
+                                )
+                        };
+                        let errs = check(
+                            "Error highlighting",
+                            self.plugins.errors_on(id),
+                            Kyde::toggle_pack_errors,
+                            cx,
+                        );
+                        let links = check(
+                            "⌘-click imports",
+                            self.plugins.links_on(id),
+                            Kyde::toggle_pack_links,
+                            cx,
+                        );
+                        row.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .flex_none()
+                                .child(errs)
+                                .child(links),
                         )
                     })
                     .child(btn)
@@ -574,8 +594,10 @@ impl Kyde {
             // Re-highlight in place so the colors appear immediately — previously this only
             // set the lang, leaving the cached (plain) spans until the file was reopened.
             let errs = self.errors_enabled_for(lang);
+            let links = self.links_enabled_for(lang);
             self.browse.editor.update(cx, |e, cx| {
                 e.set_error_highlight(errs, cx);
+                e.set_link_navigation(links, cx);
                 e.set_lang(lang, cx);
             });
         }
@@ -628,8 +650,10 @@ impl Kyde {
         } else if let Some(rel) = self.browse.open_path.clone() {
             let eff = self.effective_lang(&rel);
             let errs = self.errors_enabled_for(eff);
+            let links = self.links_enabled_for(eff);
             self.browse.editor.update(cx, |e, cx| {
                 e.set_error_highlight(errs, cx);
+                e.set_link_navigation(links, cx);
                 e.set_lang(eff, cx);
             });
         }
@@ -651,8 +675,10 @@ impl Kyde {
             if lang.pack().map(|p| p.id) == Some(pack_id) {
                 let eff = self.effective_lang(&rel);
                 let errs = self.errors_enabled_for(eff);
+                let links = self.links_enabled_for(eff);
                 self.browse.editor.update(cx, |e, cx| {
                     e.set_error_highlight(errs, cx);
+                    e.set_link_navigation(links, cx);
                     e.set_lang(eff, cx);
                 });
             }
@@ -673,6 +699,23 @@ impl Kyde {
                 self.browse
                     .editor
                     .update(cx, |e, cx| e.set_error_highlight(on, cx));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle a pack's ⌘-click import navigation (default on, per-pack opt-out),
+    /// persist it, and apply to the open file in place.
+    pub(crate) fn toggle_pack_links(&mut self, pack_id: &str, cx: &mut Context<Self>) {
+        let on = !self.plugins.links_on(pack_id);
+        self.plugins.set_links(pack_id, on);
+        self.plugins.save();
+        if let Some(rel) = self.browse.open_path.clone() {
+            let eff = self.effective_lang(&rel);
+            if eff.pack().map(|p| p.id) == Some(pack_id) {
+                self.browse
+                    .editor
+                    .update(cx, |e, cx| e.set_link_navigation(on, cx));
             }
         }
         cx.notify();

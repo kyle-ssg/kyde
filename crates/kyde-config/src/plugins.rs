@@ -20,6 +20,10 @@ pub struct Plugins {
     /// so an empty set (and any pre-existing plugins.json) means all on.
     #[serde(default)]
     errors_disabled: BTreeSet<String>,
+    /// Pack ids with ⌘-click import navigation opted OUT — same default-on,
+    /// per-pack opt-out model as `errors_disabled`.
+    #[serde(default)]
+    links_disabled: BTreeSet<String>,
 }
 
 impl Plugins {
@@ -35,10 +39,27 @@ impl Plugins {
 
     /// Remove a pack from the installed set (its grammar is still compiled in, but the
     /// editor falls back to `PlainText` for that language until re-installed).
-    /// Also drops the pack's error-highlighting opt-out (reinstall = fresh defaults).
+    /// Also drops the pack's per-feature opt-outs (reinstall = fresh defaults).
     pub fn uninstall(&mut self, pack_id: &str) {
         self.installed.remove(pack_id);
         self.errors_disabled.remove(pack_id);
+        self.links_disabled.remove(pack_id);
+    }
+
+    /// Whether ⌘-click import navigation is on for `pack_id` — the default
+    /// unless the user opted out. Callers gate on `is_installed` first.
+    pub fn links_on(&self, pack_id: &str) -> bool {
+        !self.links_disabled.contains(pack_id)
+    }
+
+    /// Turn ⌘-click import navigation on/off for `pack_id` (default on; `false`
+    /// records a per-pack opt-out).
+    pub fn set_links(&mut self, pack_id: &str, on: bool) {
+        if on {
+            self.links_disabled.remove(pack_id);
+        } else {
+            self.links_disabled.insert(pack_id.to_string());
+        }
     }
 
     /// Whether error highlighting is on for `pack_id` — the default unless the
@@ -119,5 +140,22 @@ mod tests {
         q.uninstall("json");
         q.install("json");
         assert!(q.errors_on("json"), "reinstall must return to default-on");
+    }
+
+    #[test]
+    fn links_default_on_and_opt_out_round_trips() {
+        let mut p = Plugins::default();
+        p.install("rust");
+        assert!(p.links_on("rust"), "cmd-click imports must default ON");
+        p.set_links("rust", false);
+        assert!(!p.links_on("rust"));
+        let back: Plugins = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(!back.links_on("rust"));
+        // Old plugins.json without the field → on; uninstall drops the opt-out.
+        let old: Plugins = serde_json::from_str(r#"{"installed":["rust"]}"#).unwrap();
+        assert!(old.links_on("rust"));
+        p.uninstall("rust");
+        p.install("rust");
+        assert!(p.links_on("rust"));
     }
 }

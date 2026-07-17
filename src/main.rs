@@ -922,8 +922,8 @@ impl BrowseView {
     fn new(cx: &mut Context<Kyde>) -> Self {
         // No placeholder: an empty open file should read as empty, not show prompt text.
         let editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
-        cx.subscribe(&editor, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.browse.editor.read(cx).dirty {
+        cx.subscribe(&editor, |this, _e, ev, cx| match ev {
+            EditorEvent::Changed if this.browse.editor.read(cx).dirty => {
                 // Editing a preview (temporary) tab promotes it to a permanent tab — VS Code
                 // behaviour, so the edit survives the next single-click elsewhere.
                 if this.browse.preview_tab.is_some()
@@ -933,6 +933,10 @@ impl BrowseView {
                 }
                 this.autosave(cx);
             }
+            // ⌘-click on an import link → resolve against the project file list
+            // and open the target (issue #26).
+            EditorEvent::OpenImport(link) => this.open_import_link(link.clone(), cx),
+            EditorEvent::Changed => {}
         })
         .detach();
         Self {
@@ -2421,6 +2425,16 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
             }
         }
+        // Browse a Rust file with ⌘ "held" over an import — the link underlines
+        // (issue #26). Uses the debug hover forcer since shots can't hold keys.
+        "imports" => {
+            set_packs(view, &["rust"]);
+            view.open_file(PathBuf::from("src/main.rs"), cx);
+            view.browse.editor.update(cx, |e, cx| {
+                e.force_link_hover(0);
+                cx.notify();
+            });
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {
@@ -3038,6 +3052,40 @@ mod gpui_smoke_tests {
                     "one\nTWO\nthree\n"
                 );
                 assert!(k.compare.diff.as_ref().unwrap().hunks.is_empty());
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click import navigation (issue #26): a link resolved against the
+    /// project file list opens the target; unresolvable specifiers (packages)
+    /// are a silent no-op.
+    #[gpui::test]
+    fn cmd_click_import_opens_the_target_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::write(dir.join("lib.ts"), "export const a = 1;\n").unwrap();
+        std::fs::write(dir.join("main.ts"), "import { a } from './lib';\n").unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked(); // let the file-list snapshot land
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("main.ts"), cx);
+                // Lang set explicitly — must not depend on the machine's installed packs.
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                    e.set_content("import { a } from './lib';\n".into(), Lang::Ts, cx);
+                });
+                let links = highlight::import_links("import { a } from './lib';\n", Lang::Ts);
+                assert_eq!(links.len(), 1);
+                k.open_import_link(links[0].clone(), cx);
+                assert_eq!(
+                    k.browse.open_path,
+                    Some(PathBuf::from("lib.ts")),
+                    "relative TS import resolves + opens"
+                );
+                // A bare specifier is an npm package — no-op.
+                let npm = highlight::import_links("import r from 'react';\n", Lang::Ts);
+                k.open_import_link(npm[0].clone(), cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
             })
             .unwrap();
     }

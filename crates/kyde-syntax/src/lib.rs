@@ -823,6 +823,296 @@ pub fn sort_object_keys(
     Some((range, text))
 }
 
+// ── import links (cmd+click to open — issue #26) ───────────────────
+
+/// What kind of import an [`ImportLink`] came from — drives resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// A module specifier: a quoted path in TS/JS (`import x from "./y"`) or a
+    /// dotted module path in Python (`import a.b`, `from .rel import c`).
+    Specifier,
+    /// Rust `mod name;` (no body) — the module lives in a sibling file.
+    RustMod,
+    /// A Rust `use` path — resolved from the crate's `src/` root (best effort).
+    RustUse,
+}
+
+/// One clickable import reference in a buffer.
+#[derive(Debug, Clone)]
+pub struct ImportLink {
+    /// Byte range to underline (the specifier/path text, quotes excluded).
+    pub range: std::ops::Range<usize>,
+    /// The raw specifier text (used by [`resolve_import`]).
+    pub target: String,
+    /// Which import form produced it.
+    pub kind: ImportKind,
+}
+
+/// Extract the import references of `source` for cmd+click navigation.
+/// Supported: Rust (`mod x;` without a body, `use` paths), TypeScript/TSX/
+/// JavaScript (`import`/`export … from "x"`, `require("x")`, dynamic
+/// `import("x")`), and Python (`import a.b`, `from .rel import c`). Other
+/// languages (or a feature-trimmed build) return no links.
+///
+/// ```
+/// use kyde_syntax::{import_links, Lang};
+/// let links = import_links("import { a } from './x';\n", Lang::Ts);
+/// assert_eq!(links.len(), 1);
+/// assert_eq!(links[0].target, "./x");
+/// assert!(import_links("hello\n", Lang::PlainText).is_empty());
+/// ```
+pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
+    if !matches!(
+        lang,
+        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python
+    ) {
+        return Vec::new();
+    }
+    let Some(grammar) = lang.grammar() else {
+        return Vec::new();
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let text = |n: tree_sitter::Node| source.get(n.byte_range()).unwrap_or("").to_string();
+    let push = |out: &mut Vec<ImportLink>, n: tree_sitter::Node, kind: ImportKind, src: &str| {
+        let target = src.get(n.byte_range()).unwrap_or("").to_string();
+        if !target.is_empty() {
+            out.push(ImportLink {
+                range: n.byte_range(),
+                target,
+                kind,
+            });
+        }
+    };
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match (lang, node.kind()) {
+            // Rust: `mod name;` with no inline body → sibling file module.
+            (Lang::Rust, "mod_item") => {
+                if node.child_by_field_name("body").is_none() {
+                    if let Some(name) = node.child_by_field_name("name") {
+                        push(&mut out, name, ImportKind::RustMod, source);
+                    }
+                }
+            }
+            // Rust: the `use` path — for `use a::b::{c, d}` link the `a::b` prefix.
+            (Lang::Rust, "use_declaration") => {
+                if let Some(arg) = node.child_by_field_name("argument") {
+                    let path = match arg.kind() {
+                        "scoped_use_list" | "use_as_clause" => arg.child_by_field_name("path"),
+                        // `use path::*` — the wildcard wraps its path as the first child.
+                        "use_wildcard" => arg.named_child(0),
+                        "scoped_identifier" | "identifier" | "crate" | "super" | "self" => {
+                            Some(arg)
+                        }
+                        _ => None,
+                    };
+                    if let Some(p) = path {
+                        push(&mut out, p, ImportKind::RustUse, source);
+                    }
+                }
+            }
+            // TS/TSX/JS: `import … from "x"` / `export … from "x"`.
+            (Lang::Ts | Lang::Tsx | Lang::Js, "import_statement" | "export_statement") => {
+                if let Some(s) = node.child_by_field_name("source") {
+                    push(&mut out, string_body(s), ImportKind::Specifier, source);
+                }
+            }
+            // TS/TSX/JS: `require("x")` and dynamic `import("x")`.
+            (Lang::Ts | Lang::Tsx | Lang::Js, "call_expression") => {
+                let is_import_call = node.child_by_field_name("function").is_some_and(|f| {
+                    f.kind() == "import" || (f.kind() == "identifier" && text(f) == "require")
+                });
+                if is_import_call {
+                    if let Some(s) = node
+                        .child_by_field_name("arguments")
+                        .and_then(|a| a.named_child(0))
+                        .filter(|a| a.kind() == "string")
+                    {
+                        push(&mut out, string_body(s), ImportKind::Specifier, source);
+                    }
+                }
+            }
+            // Python: `import a.b, c` — each dotted/aliased name.
+            (Lang::Python, "import_statement") => {
+                for i in 0..node.named_child_count() {
+                    let Some(c) = node.named_child(i) else {
+                        continue;
+                    };
+                    let name = match c.kind() {
+                        "dotted_name" => Some(c),
+                        "aliased_import" => c.child_by_field_name("name"),
+                        _ => None,
+                    };
+                    if let Some(n) = name {
+                        push(&mut out, n, ImportKind::Specifier, source);
+                    }
+                }
+            }
+            // Python: `from a.b import c` / `from .rel import d`.
+            (Lang::Python, "import_from_statement") => {
+                if let Some(m) = node.child_by_field_name("module_name") {
+                    push(&mut out, m, ImportKind::Specifier, source);
+                }
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out.sort_by_key(|l| l.range.start);
+    out
+}
+
+/// The unquoted body of a TS/JS `string` node (its `string_fragment` child), so
+/// the link range excludes the quote characters. An empty string (`""`) has no
+/// fragment — the node itself comes back and produces an empty, dropped target.
+fn string_body(s: tree_sitter::Node) -> tree_sitter::Node {
+    for i in 0..s.named_child_count() {
+        if let Some(c) = s.named_child(i) {
+            if c.kind() == "string_fragment" {
+                return c;
+            }
+        }
+    }
+    s
+}
+
+/// Resolve an [`ImportLink`] to a project file, best effort. `current` is the
+/// file being edited and `files` the project's (repo-relative) file list; both
+/// use the same relative paths the Browse tree serves. Returns `None` for
+/// external modules (npm packages, crates.io deps, python stdlib) and anything
+/// that doesn't land on a listed file.
+#[must_use]
+pub fn resolve_import(
+    link: &ImportLink,
+    lang: Lang,
+    current: &Path,
+    files: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    let exists = |p: &std::path::PathBuf| files.iter().any(|f| f == p);
+    let dir = current.parent().unwrap_or_else(|| Path::new(""));
+    // Join + normalize `.`/`..` without touching the filesystem.
+    let norm = |base: &Path, rel: &str| -> std::path::PathBuf {
+        let mut out: Vec<std::ffi::OsString> = base
+            .components()
+            .map(|c| c.as_os_str().to_os_string())
+            .collect();
+        for seg in rel.split('/') {
+            match seg {
+                "" | "." => {}
+                ".." => {
+                    out.pop();
+                }
+                s => out.push(s.into()),
+            }
+        }
+        out.iter().collect()
+    };
+    let first = |cands: Vec<std::path::PathBuf>| cands.into_iter().find(exists);
+    match (lang, link.kind) {
+        // TS/JS: relative specifiers only (a bare specifier is a package).
+        (Lang::Ts | Lang::Tsx | Lang::Js, ImportKind::Specifier) => {
+            if !link.target.starts_with('.') {
+                return None;
+            }
+            let base = norm(dir, &link.target);
+            let mut cands = vec![base.clone()];
+            for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs", "d.ts"] {
+                cands.push(std::path::PathBuf::from(format!(
+                    "{}.{ext}",
+                    base.to_string_lossy()
+                )));
+            }
+            for idx in ["index.ts", "index.tsx", "index.js", "index.jsx"] {
+                cands.push(base.join(idx));
+            }
+            first(cands)
+        }
+        // Python: leading dots walk up from the current file's package.
+        (Lang::Python, ImportKind::Specifier) => {
+            let dots = link.target.chars().take_while(|&c| c == '.').count();
+            let rest = link.target[dots..].replace('.', "/");
+            let mut cands = Vec::new();
+            if dots > 0 {
+                let mut base = dir.to_path_buf();
+                for _ in 1..dots {
+                    base = base.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+                }
+                let p = if rest.is_empty() {
+                    base
+                } else {
+                    norm(&base, &rest)
+                };
+                cands.push(std::path::PathBuf::from(format!(
+                    "{}.py",
+                    p.to_string_lossy()
+                )));
+                cands.push(p.join("__init__.py"));
+            } else {
+                // Absolute module: try the project root, then the current dir.
+                for base in [Path::new(""), dir] {
+                    let p = norm(base, &rest);
+                    cands.push(std::path::PathBuf::from(format!(
+                        "{}.py",
+                        p.to_string_lossy()
+                    )));
+                    cands.push(p.join("__init__.py"));
+                }
+            }
+            first(cands)
+        }
+        // Rust `mod name;`: a sibling `name.rs` or `name/mod.rs`.
+        (Lang::Rust, ImportKind::RustMod) => first(vec![
+            dir.join(format!("{}.rs", link.target)),
+            dir.join(&link.target).join("mod.rs"),
+        ]),
+        // Rust `use` path: crate:: from src/, super:: from the parent module,
+        // self:: from here; progressively shorter suffixes since the last
+        // segments are usually items, not modules.
+        (Lang::Rust, ImportKind::RustUse) => {
+            let mut segs: Vec<&str> = link.target.split("::").collect();
+            let base = match segs.first().copied() {
+                Some("crate") => {
+                    segs.remove(0);
+                    std::path::PathBuf::from("src")
+                }
+                Some("super") => {
+                    segs.remove(0);
+                    dir.parent().unwrap_or_else(|| Path::new("")).to_path_buf()
+                }
+                Some("self") => {
+                    segs.remove(0);
+                    dir.to_path_buf()
+                }
+                // A plain first segment is almost always an external crate.
+                _ => return None,
+            };
+            let mut cands = Vec::new();
+            while !segs.is_empty() {
+                let joined: std::path::PathBuf = base.join(segs.join("/"));
+                cands.push(std::path::PathBuf::from(format!(
+                    "{}.rs",
+                    joined.to_string_lossy()
+                )));
+                cands.push(joined.join("mod.rs"));
+                segs.pop();
+            }
+            first(cands)
+        }
+        _ => None,
+    }
+}
+
 /// Iterate `(byte_start, line)` over `source`, tracking byte offsets including '\n'.
 fn lines_with_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut off = 0usize;
@@ -1179,6 +1469,150 @@ mod tests {
         let src = "const x: T = { beta: 2, alpha: 1 };";
         let (_, out) = sort_object_keys(src, Lang::Ts, 16..16).unwrap();
         assert_eq!(out, "{ alpha: 1, beta: 2 }");
+    }
+
+    fn pb(s: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(s)
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn import_links_ts_forms_and_resolution() {
+        let src = "import { a } from './x';\nexport { b } from '../y';\nconst c = require('./w');\nimport('./lazy');\nimport npm from 'react';\n";
+        let links = import_links(src, Lang::Ts);
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, ["./x", "../y", "./w", "./lazy", "react"]);
+        // Ranges exclude the quotes.
+        for l in &links {
+            assert_eq!(&src[l.range.clone()], l.target);
+        }
+        let files = [pb("app/x.ts"), pb("y/index.tsx"), pb("app/w/index.js")];
+        let cur = pb("app/main.ts");
+        assert_eq!(
+            resolve_import(&links[0], Lang::Ts, &cur, &files),
+            Some(pb("app/x.ts"))
+        );
+        assert_eq!(
+            resolve_import(&links[1], Lang::Ts, &cur, &files),
+            Some(pb("y/index.tsx")),
+            "../y → index file"
+        );
+        assert_eq!(
+            resolve_import(&links[2], Lang::Ts, &cur, &files),
+            Some(pb("app/w/index.js"))
+        );
+        assert_eq!(
+            resolve_import(&links[4], Lang::Ts, &cur, &files),
+            None,
+            "bare specifier = npm package"
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[test]
+    fn import_links_python_forms_and_resolution() {
+        let src = "import os\nimport pkg.mod\nfrom .sibling import x\nfrom ..up import y\n";
+        let links = import_links(src, Lang::Python);
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(targets, ["os", "pkg.mod", ".sibling", "..up"]);
+        let files = [
+            pb("pkg/mod.py"),
+            pb("pkg/sub/sibling.py"),
+            pb("pkg/up/__init__.py"),
+        ];
+        let cur = pb("pkg/sub/main.py");
+        assert_eq!(resolve_import(&links[0], Lang::Python, &cur, &files), None);
+        assert_eq!(
+            resolve_import(&links[1], Lang::Python, &cur, &files),
+            Some(pb("pkg/mod.py")),
+            "absolute module from the project root"
+        );
+        assert_eq!(
+            resolve_import(&links[2], Lang::Python, &cur, &files),
+            Some(pb("pkg/sub/sibling.py")),
+            ". = the current package"
+        );
+        assert_eq!(
+            resolve_import(&links[3], Lang::Python, &cur, &files),
+            Some(pb("pkg/up/__init__.py")),
+            ".. walks one package up"
+        );
+    }
+
+    #[test]
+    fn import_links_rust_forms_and_resolution() {
+        let src = "mod widgets;\nmod inline { }\nuse crate::views::browse;\nuse super::shared;\nuse std::path::Path;\nuse crate::util::{a, b};\nuse super::*;\n";
+        let links = import_links(src, Lang::Rust);
+        let targets: Vec<&str> = links.iter().map(|l| l.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                "widgets",
+                "crate::views::browse",
+                "super::shared",
+                "std::path::Path",
+                "crate::util",
+                "super"
+            ],
+            "inline mod (has a body) is not a link; use lists/wildcards link their path prefix"
+        );
+        let files = [
+            pb("src/views/widgets.rs"),
+            pb("src/views/browse.rs"),
+            pb("src/shared.rs"),
+            pb("src/util/mod.rs"),
+        ];
+        let cur = pb("src/views/mod.rs");
+        assert_eq!(
+            resolve_import(&links[0], Lang::Rust, &cur, &files),
+            Some(pb("src/views/widgets.rs")),
+            "mod → sibling file"
+        );
+        assert_eq!(
+            resolve_import(&links[1], Lang::Rust, &cur, &files),
+            Some(pb("src/views/browse.rs")),
+            "crate:: from src/"
+        );
+        assert_eq!(
+            resolve_import(&links[2], Lang::Rust, &cur, &files),
+            Some(pb("src/shared.rs")),
+            "super:: from the parent module"
+        );
+        assert_eq!(
+            resolve_import(&links[3], Lang::Rust, &cur, &files),
+            None,
+            "std/external crates never resolve"
+        );
+        assert_eq!(
+            resolve_import(&links[4], Lang::Rust, &cur, &files),
+            Some(pb("src/util/mod.rs")),
+            "use list prefix → module dir"
+        );
+    }
+
+    #[test]
+    fn import_links_only_for_supported_langs() {
+        assert!(import_links("import x\n", Lang::PlainText).is_empty());
+        assert!(import_links("@import 'x';\n", Lang::Css).is_empty());
+        assert!(import_links("source ./x.sh\n", Lang::Bash).is_empty());
+    }
+
+    /// Performance regression guard — see CLAUDE.md "Performance regression tests".
+    /// `import_links` runs on every keystroke (alongside `highlight` +
+    /// `fold_regions`) when a language's cmd-click links are on, so it must stay
+    /// parse-speed on a large, import-heavy file.
+    #[test]
+    fn perf_import_links_large_file_stays_fast() {
+        let unit = "use crate::views::browse;\nmod widgets;\nfn f(x: i32) -> i32 { x + 1 }\n";
+        let src = unit.repeat(1500); // ~4500 lines, 3000 links
+        let start = std::time::Instant::now();
+        let links = import_links(&src, Lang::Rust);
+        let elapsed = start.elapsed();
+        assert_eq!(links.len(), 3000);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "import_links on ~4500 lines took {elapsed:?} (budget 2s) — perf regression?"
+        );
     }
 
     #[test]
