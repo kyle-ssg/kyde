@@ -412,11 +412,23 @@ impl CodeEditor {
         cx.notify();
     }
 
-    /// The current selection as a byte range (collapsed = caret). Test-only read view
-    /// (the app mutates via `select_range` and never needs to read it back).
-    #[cfg(test)]
+    /// The current selection as a byte range (collapsed = caret). Read by the
+    /// sort ops (Sort Lines / Sort Keys) and tests.
     pub fn selection(&self) -> std::ops::Range<usize> {
         self.selected_range.clone()
+    }
+
+    /// Right-click caret placement: clicking OUTSIDE the current selection moves
+    /// the caret there (so "Sort Keys" acts on the object under the pointer);
+    /// clicking inside keeps the selection (so "Sort Lines" acts on it) — the
+    /// IDE convention.
+    pub fn caret_to(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        let off = self.offset_for_position(pos);
+        if off < self.selected_range.start || off > self.selected_range.end {
+            self.selected_range = off..off;
+            self.selection_reversed = false;
+            cx.notify();
+        }
     }
 
     /// Select a byte range (used by find/replace to highlight the current match).
@@ -1648,6 +1660,35 @@ fn apply_error_squiggles(
     out
 }
 
+/// Sort the lines touched by `sel` alphabetically (case-insensitive, raw text
+/// breaks ties — stable). Returns the whole-lines byte range plus its sorted
+/// replacement, or `None` when fewer than two lines are selected (nothing to
+/// sort). A selection ending exactly at a line start excludes that line (the
+/// usual "sort selected lines" convention); the trailing newline layout is
+/// untouched because the range never includes the final line's `\n`.
+pub fn sort_lines_in(content: &str, sel: Range<usize>) -> Option<(Range<usize>, String)> {
+    let len = content.len();
+    let (a, b) = (sel.start.min(len), sel.end.min(len));
+    let start = content[..a].rfind('\n').map_or(0, |i| i + 1);
+    // Selection ending at a line start: drop that line (unless collapsed).
+    let b = if b > a && content[..b].ends_with('\n') {
+        b - 1
+    } else {
+        b
+    };
+    let end = content[b..].find('\n').map_or(len, |i| b + i);
+    let mut lines: Vec<&str> = content[start..end].split('\n').collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    lines.sort_by(|x, y| {
+        x.to_lowercase()
+            .cmp(&y.to_lowercase())
+            .then_with(|| x.cmp(y))
+    });
+    Some((start..end, lines.join("\n")))
+}
+
 // ── fold mapping (pure, unit-testable — no gpui) ───────────────────
 // These operate only on the editor's data (`content` + `folded` set + `foldable`
 // regions), so the index arithmetic that drives the fold display can be tested
@@ -1990,6 +2031,36 @@ mod tests {
         );
         assert_eq!(out.iter().map(|r| r.len).sum::<usize>(), line.len());
         assert!(out.iter().all(|r| r.underline.is_some()));
+    }
+
+    #[test]
+    fn sort_lines_expands_selection_to_whole_lines() {
+        //          0123456 789012 34567890
+        let src = "import z\nimport a\nimport M\nlast";
+        // Selection from inside line 0 to inside line 2 → all three sort.
+        let (r, out) = sort_lines_in(src, 3..21).unwrap();
+        assert_eq!(r, 0..26);
+        assert_eq!(out, "import a\nimport M\nimport z");
+        // Case-insensitive: ties broken by raw text; selection spanning all
+        // three lines (0..6 ends past line 2's start, so it's included).
+        let (_, out) = sort_lines_in("b\nB\na\n", 0..6).unwrap();
+        assert_eq!(out, "a\nB\nb");
+    }
+
+    #[test]
+    fn sort_lines_needs_two_lines_and_respects_line_start_end() {
+        assert!(sort_lines_in("only one line", 0..13).is_none());
+        assert!(
+            sort_lines_in("a\nb\n", 1..1).is_none(),
+            "collapsed caret = one line"
+        );
+        // Selection ending exactly at line 1's start excludes line 1.
+        assert!(
+            sort_lines_in("b\na\n", 0..2).is_none(),
+            "only line 0 selected"
+        );
+        let (r, out) = sort_lines_in("b\na\nc", 0..4).unwrap();
+        assert_eq!((r, out.as_str()), (0..3, "a\nb"), "line 2 untouched");
     }
 
     #[test]

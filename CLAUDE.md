@@ -550,6 +550,32 @@ Launch: `kyde` shell function in `~/.zshrc` runs the newest of
 `target/{release,debug}/kyde`, args passed through (bare = Projects view).
 (`gs` is ghostscript — not aliased.)
 
+## Sort ops (issues #43/#41 — Sort Lines + Sort Object Keys)
+Right-clicking the editor pane (the `MenuTarget::EditorGit` menu) offers, above the git
+commands: **Sort Lines** when the selection spans ≥2 lines OR the caret sits in a
+JSON/JS/TS object, and **Sort Object Keys** when the caret sits in such an object.
+**Inside an object, Sort Lines DELEGATES to the key sort** (`object_sort`, issue #43's
+"within a JSON object it should just sort json") — a textual line sort there would move
+entries without their commas and break the syntax, so the textual path never runs when
+an object encloses the caret (even an already-sorted one). Availability is computed at MENU-OPEN in
+browse.rs (never in the render arm — an open menu must not re-parse per frame) and rides
+two bools on the `EditorGit` variant; the right-click first moves the caret under the
+pointer via `CodeEditor::caret_to` (kept if clicking inside the selection — IDE
+convention). Both are also configurable keymap actions (`sort_lines` ⌥⌘L / `sort_keys`
+⌥⌘S, both presets) and ⌘⇧A palette entries; handlers are gated to Browse with a file
+open. Logic is pure + unit-tested: `editor::sort_lines_in` (expand selection to whole
+lines, case-insensitive stable sort, selection ending at a line start excludes that
+line) and `kyde_syntax::sort_object_keys` (SELECTION-aware: a caret sorts the innermost
+enclosing `object`; a ranged selection is whitespace-trimmed — selecting a block WITH its
+indent targets the block, not the enclosing object — and sorts the smallest covering
+node, so a selection across sibling objects in an array sorts each of them; recursive,
+formatting-preserving — entry texts move verbatim, comma/indent separators stay in their
+slots, arrays keep element order, objects with spreads/methods/comments/errors never
+reorder). Both apply via `replace_range_text` (one undo step, no-op when
+already sorted / read-only) and re-select the sorted block. Smoke test:
+`sort_ops_rewrite_selection_and_object`. Debug shot: `KYDE_SHOT=sort-menu` +
+`KYDE_SHOT_FILE=<json>`.
+
 ## Views & right-click flow (main.rs)
 Opening a project lands in **Browse (code) view**, not git — `open_project`/`new` default
 `Mode::Browse`. Git is reached on demand:

@@ -306,6 +306,8 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_commit))
             .on_action(cx.listener(Self::act_mode_commit))
             .on_action(cx.listener(Self::act_mode_browse))
+            .on_action(cx.listener(Self::act_sort_lines))
+            .on_action(cx.listener(Self::act_sort_keys))
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::open_recent_project))
             .on_action(cx.listener(Self::act_open_project))
@@ -669,8 +671,22 @@ impl Kyde {
             .text_size(px(theme::get().ui_font_size));
 
         panel = match &menu.target {
-            MenuTarget::EditorGit(p) => {
+            MenuTarget::EditorGit(p, can_sort_lines, can_sort_keys) => {
                 let (pc, pr) = (p.clone(), p.clone());
+                // Buffer sort ops first (they act on the click point / selection),
+                // then the git commands.
+                if *can_sort_lines {
+                    panel = panel.child(item("Sort Lines").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.sort_selected_lines(cx)),
+                    ));
+                }
+                if *can_sort_keys {
+                    panel = panel.child(item("Sort Object Keys").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.sort_object_keys_at_caret(cx)),
+                    ));
+                }
                 panel = panel.child(item("Commit").on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| this.menu_commit_path(pc.clone(), cx)),
