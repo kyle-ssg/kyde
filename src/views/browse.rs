@@ -347,7 +347,8 @@ impl Kyde {
                         .into()
                 };
                 let expanded = self.browse.expanded.contains(&r.path);
-                let selected = self.browse.selected_path.as_ref() == Some(&r.path);
+                let selected = self.browse.selected_path.as_ref() == Some(&r.path)
+                    || self.browse.multi_selected.contains(&r.path);
                 let (p_act, p_ctx) = (r.path.clone(), r.path.clone());
                 let is_dir = r.is_dir;
                 // Color changed files by their git status (modified/added/…), matching the
@@ -369,9 +370,37 @@ impl Kyde {
                     None,
                     None,
                     move |this, e, window, cx| {
+                        // Cmd-click on a FILE toggles it in the multi-selection (for
+                        // "Compare Selected" — issue #42) without opening it. The
+                        // previously highlighted file seeds the set, so cmd-clicking a
+                        // second file selects the natural pair.
+                        if !is_dir && e.modifiers.platform {
+                            if let Some(i) =
+                                this.browse.multi_selected.iter().position(|p| p == &p_act)
+                            {
+                                this.browse.multi_selected.remove(i);
+                            } else {
+                                if this.browse.multi_selected.is_empty() {
+                                    if let Some(prev) =
+                                        this.browse.selected_path.clone().filter(|p| {
+                                            p != &p_act
+                                                && (this.browse.all_files.contains(p)
+                                                    || this.browse.scratches.contains(p))
+                                        })
+                                    {
+                                        this.browse.multi_selected.push(prev);
+                                    }
+                                }
+                                this.browse.multi_selected.push(p_act.clone());
+                            }
+                            this.browse.selected_path = Some(p_act.clone());
+                            cx.notify();
+                            return;
+                        }
                         // Folders toggle expansion. Files (VS Code-style): single click opens in
                         // the temporary *preview* tab (reused by the next single-click), double
                         // click opens a permanent tab.
+                        this.browse.multi_selected.clear();
                         this.browse.selected_path = Some(p_act.clone());
                         // Focus the app root so the "Kyde"-context Backspace (delete) binding
                         // is live on the selected row. (open_file/preview_file re-focus the
