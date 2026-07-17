@@ -441,6 +441,7 @@ impl Kyde {
             ModalKind::ClearData => &mut self.clear_data_win,
             ModalKind::Settings => &mut self.settings_win,
             ModalKind::Merge => &mut self.merge_win,
+            ModalKind::Compare => &mut self.compare_win,
         }
     }
 
@@ -471,9 +472,12 @@ impl Kyde {
         // The Diff + Merge modals open at the MAIN window's bounds (captured each frame in
         // `impl Render for Kyde`) so they're as big as the editor and land over it — NOT the
         // focused window's, which may be another modal (e.g. Rollback) they were launched from.
-        let main_bounds = matches!(kind, ModalKind::Diff | ModalKind::Merge)
-            .then_some(self.main_window_bounds)
-            .flatten();
+        let main_bounds = matches!(
+            kind,
+            ModalKind::Diff | ModalKind::Merge | ModalKind::Compare
+        )
+        .then_some(self.main_window_bounds)
+        .flatten();
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
                 // Center on the display the main window is on (else gpui picks the primary

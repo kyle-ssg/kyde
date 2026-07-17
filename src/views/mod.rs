@@ -4,6 +4,7 @@
 mod branch;
 mod browse;
 mod commit;
+mod compare;
 mod diff_view;
 mod file_ops;
 mod find;

@@ -744,6 +744,19 @@ impl Kyde {
                         }),
                     ));
                 }
+                // Exactly two cmd-selected files → side-by-side compare (issue #42).
+                if self.browse.multi_selected.len() == 2 {
+                    let (a, b) = (
+                        self.browse.multi_selected[0].clone(),
+                        self.browse.multi_selected[1].clone(),
+                    );
+                    panel = panel.child(item("Compare Selected").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.open_compare(a.clone(), b.clone(), cx);
+                        }),
+                    ));
+                }
                 // Commit/Rollback only make sense when there are changes under the path.
                 if self.has_changes_under(p) {
                     panel = panel
@@ -796,7 +809,7 @@ impl Kyde {
             MenuTarget::Tab(idx) => {
                 let idx = *idx;
                 let reveal = self.browse.open_tabs.get(idx).cloned();
-                panel
+                panel = panel
                     .child(item("Close").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| this.close_tab(idx, cx)),
@@ -808,15 +821,32 @@ impl Kyde {
                     .child(item("Close Tabs to the Right").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| this.close_tabs_right(idx, cx)),
-                    ))
-                    .child(item("Reveal in Finder").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            if let Some(p) = reveal.clone() {
-                                this.reveal_in_os(&p, cx);
-                            }
-                        }),
-                    ))
+                    ));
+                // Compare this tab's file against the ACTIVE tab's (issue #42) —
+                // only offered on a non-active tab, where the pair is meaningful.
+                if let (Some(tab), Some(active)) = (
+                    self.browse.open_tabs.get(idx).cloned(),
+                    self.browse.open_path.clone(),
+                ) {
+                    if tab != active {
+                        panel = panel.child(item("Compare with Current Tab").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                // Active tab on the left (the "current" baseline),
+                                // the clicked tab on the right.
+                                this.open_compare(active.clone(), tab.clone(), cx);
+                            }),
+                        ));
+                    }
+                }
+                panel.child(item("Reveal in Finder").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        if let Some(p) = reveal.clone() {
+                            this.reveal_in_os(&p, cx);
+                        }
+                    }),
+                ))
             }
             MenuTarget::CommitPath(path, _is_dir) => {
                 let path = path.clone();

@@ -274,6 +274,8 @@ impl Kyde {
             history: HistoryView::new(cx),
             merge_win: None,
             merge: MergeView::new(cx),
+            compare_win: None,
+            compare: CompareView::new(cx),
             term: TermState::new(),
         };
         me.refresh(cx);
@@ -567,7 +569,7 @@ impl Kyde {
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
     /// files) write to themselves, since `join` keeps an absolute right-hand side. Returns
     /// the error so callers can surface it (a swallowed write means silently-lost edits).
-    fn write_open_file(&self, rel: &std::path::Path, text: &str) -> anyhow::Result<()> {
+    pub(crate) fn write_open_file(&self, rel: &std::path::Path, text: &str) -> anyhow::Result<()> {
         if let Some(repo) = self.repo() {
             repo.save_file(rel, text)?;
         } else if let Some(root) = self.repo_root.as_ref() {

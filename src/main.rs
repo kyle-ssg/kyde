@@ -895,6 +895,9 @@ struct BrowseView {
     /// Highlighted row in the tree (file OR folder); drives the breadcrumb.
     /// Distinct from `open_path` so selecting a folder doesn't change the editor.
     selected_path: Option<PathBuf>,
+    /// Cmd-clicked FILE rows (ordered). Exactly two → the right-click menu
+    /// offers "Compare Selected" (issue #42). Cleared by any plain click.
+    multi_selected: Vec<PathBuf>,
     /// Scroll position of the tree, so "Select Opened File in Tree" can scroll an
     /// off-screen row into view.
     tree_scroll: ScrollHandle,
@@ -945,6 +948,7 @@ impl BrowseView {
             scratches: Vec::new(),
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
+            multi_selected: Vec::new(),
             tree_scroll: ScrollHandle::new(),
             editor,
             editor_scroll: ScrollHandle::new(),
@@ -1448,6 +1452,11 @@ struct Kyde {
     /// Merge state (in-progress banner + the 3-pane resolve window — see `MergeView`).
     merge: MergeView,
 
+    /// Compare-two-files — its own native window (`ModalKind::Compare`).
+    compare_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Compare state (paths + aligned panes — see `CompareView`).
+    compare: CompareView,
+
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
     term: TermState,
@@ -1467,6 +1476,46 @@ enum ModalKind {
     Settings,
     /// 3-pane merge-conflict resolution (yours | result | theirs).
     Merge,
+    /// Two-file side-by-side compare with an apply gutter (issue #42).
+    Compare,
+}
+
+/// Compare-two-files state (issue #42): the chosen paths, the computed diff, and
+/// two read-only aligned panes sharing one scroll — the merge Compare Contents
+/// pattern, plus a center gutter that applies hunks either direction.
+struct CompareView {
+    /// Left file (repo-relative, or absolute for scratches).
+    left_path: Option<PathBuf>,
+    /// Right file.
+    right_path: Option<PathBuf>,
+    /// The current diff (left = old, right = new). `None` until both sides load.
+    diff: Option<FileDiff>,
+    /// Left pane (read-only; applying writes files and reloads).
+    left: Entity<CodeEditor>,
+    /// Right pane.
+    right: Entity<CodeEditor>,
+    /// Shared scroll for both panes + the gutter.
+    scroll: ScrollHandle,
+}
+
+impl CompareView {
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let mk = |cx: &mut Context<Kyde>| {
+            cx.new(|cx| {
+                let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
+                e.line_numbers = true;
+                e
+            })
+        };
+        Self {
+            left_path: None,
+            right_path: None,
+            diff: None,
+            left: mk(cx),
+            right: mk(cx),
+            scroll: ScrollHandle::new(),
+        }
+    }
 }
 
 /// Which category the Settings window's sidebar has selected. Drives `render_settings_body`'s
@@ -1542,6 +1591,7 @@ impl Render for ModalWindow {
             ModalKind::ClearData => k.render_clear_data_body(kcx),
             ModalKind::Settings => k.render_settings_body(kcx),
             ModalKind::Merge => k.render_merge_body(kcx),
+            ModalKind::Compare => k.render_compare_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -2360,6 +2410,17 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 );
             }
         }
+        // The Compare window over two fixture files (KYDE_SHOT_FILE ↔ KYDE_SHOT_FILE_B):
+        // side-by-side aligned panes + the center apply gutter.
+        "compare" => {
+            set_packs(view, &["json"]);
+            if let (Ok(a), Ok(b)) = (
+                std::env::var("KYDE_SHOT_FILE"),
+                std::env::var("KYDE_SHOT_FILE_B"),
+            ) {
+                view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
+            }
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {
@@ -2941,6 +3002,42 @@ mod gpui_smoke_tests {
                     "{\n  \"a\": 2,\n  \"b\": 1\n}",
                     "no sorting outside Browse"
                 );
+            })
+            .unwrap();
+    }
+
+    /// Compare two files (issue #42): `open_compare` diffs them, the gutter's
+    /// apply copies a hunk either direction (writing the TARGET file to disk and
+    /// re-diffing in place), and the pair converges to zero differences.
+    #[gpui::test]
+    fn compare_applies_hunks_both_directions(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_compare(PathBuf::from("a.txt"), PathBuf::from("b.txt"), cx);
+                let d = k.compare.diff.as_ref().unwrap();
+                assert_eq!(d.hunks.len(), 2, "two→TWO + the trailing four");
+                // « — the LEFT file takes the right side's hunk 0 (two → TWO).
+                k.compare_apply_hunk(0, false, cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+                    "one\nTWO\nthree\n"
+                );
+                assert_eq!(
+                    k.compare.diff.as_ref().unwrap().hunks.len(),
+                    1,
+                    "re-diffed after the apply"
+                );
+                // » — the RIGHT file takes the left side for the remaining hunk
+                // (drops its extra "four" line).
+                k.compare_apply_hunk(0, true, cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("b.txt")).unwrap(),
+                    "one\nTWO\nthree\n"
+                );
+                assert!(k.compare.diff.as_ref().unwrap().hunks.is_empty());
             })
             .unwrap();
     }

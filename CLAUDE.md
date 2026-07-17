@@ -351,6 +351,25 @@ a TWO-STAGE dialog:
   / `merge-compare` (manual) + `KYDE_SHOT_REPO=<clone with an in-progress conflicted merge>`
   (fixture built by scripts/screenshots.sh; region capture, 2 windows like rollback).
 
+## Compare view (src/views/compare.rs — issue #42)
+Compare any two files side-by-side in a native window (`ModalKind::Compare`, opens at the
+main window's bounds like Diff/Merge). Entry points: **cmd-click two files** in the Browse
+tree (multi-select, `BrowseView.multi_selected` — ordered, cleared by any plain click or
+project switch; rows render selected) → right-click → **Compare Selected**; or right-click
+a non-active **tab** → **Compare with Current Tab** (active tab = left). `CompareView`
+(`compare` on `Kyde`): two read-only `CodeEditor` panes row-aligned via the diff_view
+helpers (`diff_line_bgs`/`diff_word_bgs`/`diff_fillers`) + one shared `ScrollHandle` (the
+merge Compare Contents pattern); per-side `effective_lang` syntax. The center gutter puts
+**« »** on every hunk's first aligned row (from `aligned_rows`): `»` copies the LEFT
+side's lines into the right FILE, `«` the reverse — both directions come from
+`FileDiff::partial_new_content` (right←left = all hunks except i; left←right = only i —
+outside hunks the sides are identical). The header offers whole-file `«`/`»` (make one
+side match the other) + a difference count. Applying WRITES the target file
+(`write_open_file` — repo/root/absolute-scratch all work), reloads a clean open Browse
+buffer showing it, re-diffs in place, and refreshes git status. Smoke test:
+`compare_applies_hunks_both_directions`. Debug shot: `KYDE_SHOT=compare` +
+`KYDE_SHOT_FILE`/`KYDE_SHOT_FILE_B`.
+
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {
 appears_transparent: true, traffic_light_position: point(16,16) }`) so our `frame_bg` chrome
