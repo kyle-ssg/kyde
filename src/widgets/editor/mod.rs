@@ -251,6 +251,9 @@ pub struct CodeEditor {
     /// Current pointer position during a drag-select, so the auto-scroll loop can keep
     /// extending the selection while the pointer is held past an edge (no mouse-move events).
     drag_pos: Option<Point<Pixels>>,
+    /// Last pointer position over the editor (any state) — pressing ⌘ while the
+    /// mouse is stationary still lights up the import link under it.
+    last_mouse: Option<Point<Pixels>>,
     /// True while the drag auto-scroll loop is running, so we never spawn a second one.
     autoscroll_active: bool,
     /// Held vertical-nav key as `(direction, extend-selection)` — `Some` while ↑/↓ (or
@@ -349,6 +352,7 @@ impl CodeEditor {
             reveal_pending: false,
             viewport: None,
             drag_pos: None,
+            last_mouse: None,
             autoscroll_active: false,
             nav: None,
             nav_active: false,
@@ -600,9 +604,29 @@ impl CodeEditor {
 
     /// Index of the import link containing byte offset `off`, if any.
     fn link_at(&self, off: usize) -> Option<usize> {
-        self.import_links
-            .iter()
-            .position(|l| l.range.start <= off && off < l.range.end)
+        // `import_links` is sorted by range start — binary-search the candidate.
+        let i = self
+            .import_links
+            .partition_point(|l| l.range.start <= off)
+            .checked_sub(1)?;
+        (off < self.import_links[i].range.end).then_some(i)
+    }
+
+    /// Recompute which import link the pointer sits on (from `last_mouse`),
+    /// honoring the ⌘ + toggle gates; notifies only on change. Called from
+    /// mouse-move AND `ModifiersChanged`, so pressing ⌘ over a link lights it up
+    /// without needing the mouse to move first.
+    fn refresh_link_hover(&mut self, cx: &mut Context<Self>) {
+        let hit = match self.last_mouse {
+            Some(pos) if self.cmd_held && self.links_on && !self.is_selecting => {
+                self.link_at(self.offset_for_position(pos))
+            }
+            _ => None,
+        };
+        if hit != self.hover_link {
+            self.hover_link = hit;
+            cx.notify();
+        }
     }
 
     /// Screenshot/debug helper: force the ⌘-hover affordance on import link `i`,
@@ -1113,15 +1137,16 @@ impl CodeEditor {
         }
     }
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // ⌘-hover over an import link → underline + pointer cursor (the hover
-        // clears when ⌘ lifts — see the ModifiersChanged listener).
-        if self.cmd_held && self.links_on && !self.is_selecting {
-            let hit = self.link_at(self.offset_for_position(ev.position));
-            if hit != self.hover_link {
-                self.hover_link = hit;
-                cx.notify();
-            }
+        // ⌘-hover over an import link → underline + pointer cursor. The ⌘ state
+        // rides the move event itself (`ev.modifiers`) — a ModifiersChanged
+        // event only reaches us via the focus path, which is unreliable when the
+        // pointer roams unfocused panes; the move event always knows.
+        self.last_mouse = Some(ev.position);
+        if self.cmd_held != ev.modifiers.platform {
+            self.cmd_held = ev.modifiers.platform;
+            cx.notify();
         }
+        self.refresh_link_hover(cx);
         // Only extend the selection for a drag this editor itself started.
         if self.is_selecting && ev.dragging() {
             // `select_to` sets `reveal_pending`, which would yank the view back to the
@@ -1618,9 +1643,9 @@ impl Render for CodeEditor {
                     let held = e.modifiers.platform;
                     if this.cmd_held != held {
                         this.cmd_held = held;
-                        if !held {
-                            this.hover_link = None;
-                        }
+                        // Pressing ⌘ over a link (pointer stationary) lights it
+                        // up immediately; releasing clears it.
+                        this.refresh_link_hover(cx);
                         cx.notify();
                     }
                 }),
