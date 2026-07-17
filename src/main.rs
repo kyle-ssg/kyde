@@ -440,6 +440,11 @@ enum MenuTarget {
     /// A commit row in the History list (by index into `history_commits`) — its menu offers
     /// the same compare modes as the header dropdown.
     HistoryCompare(usize),
+    /// A file row in the History changed-files tree (by index into `history.files`) — same
+    /// compare modes, applied with that file kept selected.
+    HistoryFile(usize),
+    /// A branch leaf in the branch popup — offers Checkout + Merge into current.
+    Branch(String),
 }
 
 struct ContextMenu {
@@ -635,6 +640,12 @@ struct BranchPopup {
     /// Expanded nodes in the branch tree (section keys like "sec:recent" and folder
     /// keys like "sec:local/feat").
     expanded: std::collections::HashSet<String>,
+    /// Per-branch `(ahead, behind)` vs the current HEAD — the popup's count badges.
+    /// Gathered in the background ON POPUP OPEN (one `rev-list` per branch), never on
+    /// the render path (same pattern as the worktree popup's changed-file counts).
+    counts: std::collections::HashMap<String, (usize, usize)>,
+    /// Guards `counts` against a superseded gather (bumped per popup open).
+    counts_gen: u64,
 }
 
 impl BranchPopup {
@@ -654,6 +665,8 @@ impl BranchPopup {
             popup_open: false,
             query,
             expanded: std::collections::HashSet::new(),
+            counts: std::collections::HashMap::new(),
+            counts_gen: 0,
         }
     }
 }
@@ -1082,6 +1095,138 @@ impl DiffPanes {
     }
 }
 
+/// Which pair of merge sides the resolve window is comparing. `MergeView3` = the default
+/// 3-pane merge; the rest are `IntelliJ`'s "Compare Contents" 2-pane modes (Left = yours,
+/// Middle = the live result, Right = theirs, Base = the common ancestor).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MergeCompare {
+    /// The 3-pane merge view (yours | result | theirs).
+    MergeView3,
+    LeftMiddle,
+    RightMiddle,
+    LeftRight,
+    BaseLeft,
+    BaseMiddle,
+    BaseRight,
+}
+
+impl MergeCompare {
+    /// Dropdown order + labels (the 3-pane view first, then the 2-pane pairs).
+    pub(crate) const ALL: &'static [(MergeCompare, &'static str)] = &[
+        (MergeCompare::MergeView3, "Merge (3-pane)"),
+        (MergeCompare::LeftMiddle, "Left and Middle"),
+        (MergeCompare::RightMiddle, "Right and Middle"),
+        (MergeCompare::LeftRight, "Left and Right"),
+        (MergeCompare::BaseLeft, "Base and Left"),
+        (MergeCompare::BaseMiddle, "Base and Middle"),
+        (MergeCompare::BaseRight, "Base and Right"),
+    ];
+}
+
+/// Merge-conflict resolution state: the in-progress banner, the conflicts-list stage
+/// (files + what each side did), and the 3-pane resolve stage (ours | result | theirs,
+/// each its own read-only `CodeEditor` sharing one scroll).
+struct MergeView {
+    /// `MERGE_HEAD`'s friendly name from the last [`app::RepoSnapshot`] — `Some` = a merge
+    /// is in progress (ours or an external `git merge`/`pull`), drives the banner.
+    in_progress: Option<String>,
+    /// Branch named when the merge was initiated from the branch popup — the label used
+    /// before the next snapshot lands (and the friendlier of the two).
+    source: Option<String>,
+    /// Conflicted files of the in-progress merge + what each side did (the list columns).
+    files: Vec<git::ConflictEntry>,
+    /// Files already resolved + staged from the window this session.
+    resolved: std::collections::HashSet<PathBuf>,
+    /// Selected row of the conflicts LIST stage (drives Accept Yours/Theirs/Merge…).
+    list_sel: Option<usize>,
+    /// Index into `files` of the file open in the RESOLVE stage (`None` = list stage).
+    selected: Option<usize>,
+    /// The 3-way model for the selected file.
+    model: Option<kyde_diff::merge::Merge3>,
+    /// Per-chunk resolution state, indexed by chunk (every non-stable chunk consults it —
+    /// clean chunks start pending; the "apply non-conflicting" toolbar bulk-applies them).
+    res: Vec<kyde_diff::merge::Resolution>,
+    /// Each chunk's line range in the CURRENT result text (recomputed with `res` — see
+    /// `reload_merge_result`), so the render pass never rebuilds the result.
+    res_ranges: Vec<std::ops::Range<usize>>,
+    /// Cached index stages of the selected file (1/2/3) — feeds the model, the whole-file
+    /// accepts, and the Compare Contents pairs without re-shelling git.
+    base_text: String,
+    /// See `base_text` (stage 2 — ours).
+    ours_text: String,
+    /// See `base_text` (stage 3 — theirs).
+    theirs_text: String,
+    /// How lines are compared (exact / trim / ignore-all-whitespace).
+    ws: kyde_diff::merge::WhitespaceMode,
+    /// Whether the whitespace dropdown is expanded.
+    ws_open: bool,
+    /// Which contents the resolve stage is showing (3-pane merge or a 2-pane pair).
+    compare: MergeCompare,
+    /// Whether the Compare Contents dropdown is expanded.
+    compare_open: bool,
+    /// Left pane: the current branch's version ("yours").
+    ours: Entity<CodeEditor>,
+    /// Center pane: the live merge result (rebuilt as conflicts are resolved).
+    result: Entity<CodeEditor>,
+    /// Right pane: the incoming branch's version ("theirs").
+    theirs: Entity<CodeEditor>,
+    /// The two panes of a Compare Contents pair (kept separate from the merge panes so
+    /// switching back to the 3-pane view never reloads/clobbers them).
+    cmp_l: Entity<CodeEditor>,
+    /// See `cmp_l`.
+    cmp_r: Entity<CodeEditor>,
+    /// Shared 2D scroll for the three merge panes (keeps the aligned rows in sync).
+    scroll: ScrollHandle,
+    /// Shared scroll for the two compare panes.
+    cmp_scroll: ScrollHandle,
+    /// A merge / abort / commit git op in flight (disables the window's buttons).
+    busy: bool,
+    /// Transient success note ("Merged X into Y", "Already up to date") — a neutral
+    /// banner (the op-error banner is for failures), dismissed by its × button.
+    note: Option<String>,
+}
+
+impl MergeView {
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let mk = |cx: &mut Context<Kyde>| {
+            cx.new(|cx| {
+                let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
+                e.line_numbers = true;
+                e
+            })
+        };
+        Self {
+            in_progress: None,
+            source: None,
+            files: Vec::new(),
+            resolved: std::collections::HashSet::new(),
+            list_sel: None,
+            selected: None,
+            model: None,
+            res: Vec::new(),
+            res_ranges: Vec::new(),
+            base_text: String::new(),
+            ours_text: String::new(),
+            theirs_text: String::new(),
+            // Default to ignoring whitespace: formatting-only divergence shouldn't read
+            // as a conflict (switchable per-file from the toolbar dropdown).
+            ws: kyde_diff::merge::WhitespaceMode::IgnoreAll,
+            ws_open: false,
+            compare: MergeCompare::MergeView3,
+            compare_open: false,
+            ours: mk(cx),
+            result: mk(cx),
+            theirs: mk(cx),
+            cmp_l: mk(cx),
+            cmp_r: mk(cx),
+            scroll: ScrollHandle::new(),
+            cmp_scroll: ScrollHandle::new(),
+            busy: false,
+            note: None,
+        }
+    }
+}
+
 /// Remote-sync state (push/pull/fetch vs `origin`), grouped out of the `Kyde` god-struct:
 /// the ahead/behind counts, the in-flight operation flags, and what a push would send.
 /// Named `SyncState` (not `Sync`) so it doesn't shadow the `std::marker::Sync` trait.
@@ -1287,6 +1432,11 @@ struct Kyde {
     // History (git log) view — all its state grouped into one sub-struct (see `HistoryView`).
     history: HistoryView,
 
+    /// Merge-conflict resolution — its own native window (`ModalKind::Merge`).
+    merge_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Merge state (in-progress banner + the 3-pane resolve window — see `MergeView`).
+    merge: MergeView,
+
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
     term: TermState,
@@ -1304,6 +1454,8 @@ enum ModalKind {
     Fonts,
     ClearData,
     Settings,
+    /// 3-pane merge-conflict resolution (yours | result | theirs).
+    Merge,
 }
 
 /// Which category the Settings window's sidebar has selected. Drives `render_settings_body`'s
@@ -1378,6 +1530,7 @@ impl Render for ModalWindow {
             ModalKind::Fonts => k.render_fonts_body(kcx),
             ModalKind::ClearData => k.render_clear_data_body(kcx),
             ModalKind::Settings => k.render_settings_body(kcx),
+            ModalKind::Merge => k.render_merge_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -2188,6 +2341,60 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             }
             view.focus_active_terminal(window, cx);
             cx.notify();
+        }
+        // The merge-conflict window. KYDE_SHOT_REPO is a clone with an in-progress
+        // conflicted merge (started by screenshots.sh). `merge-conflicts` shows the
+        // conflicts-list stage; `merge` drills into the first file's 3-pane resolve
+        // view with the non-conflicting changes applied (the toolbar's "All");
+        // `merge-compare` (manual, debugging) shows the Left-and-Right compare pair.
+        "merge" | "merge-conflicts" | "merge-compare" => {
+            set_packs(view, &["rust"]);
+            if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                view.open_project(PathBuf::from(repo), cx);
+            }
+            // The async refresh snapshot hasn't landed yet — seed the branch labels the
+            // window's title/headers need (the same data the snapshot would deliver).
+            if let Some(r) = view.repo() {
+                view.current_branch = r.current_branch();
+                view.merge.source = r.merging();
+            }
+            view.open_merge_window(cx);
+            if name != "merge-conflicts" {
+                view.select_merge_file(0, cx);
+                view.merge_apply_clean(true, true, cx);
+            }
+            if name == "merge-compare" {
+                // KYDE_SHOT_COMPARE picks the pair (debugging): left-middle /
+                // right-middle (interactive) or the default read-only left-right.
+                let mode = match std::env::var("KYDE_SHOT_COMPARE").as_deref() {
+                    Ok("left-middle") => MergeCompare::LeftMiddle,
+                    Ok("right-middle") => MergeCompare::RightMiddle,
+                    _ => MergeCompare::LeftRight,
+                };
+                view.merge_set_compare(mode, cx);
+                // For the default pair, leave the dropdown open too — this shot doubles
+                // as the check that the deferred select panel paints ABOVE the panes.
+                view.merge.compare_open = mode == MergeCompare::LeftRight;
+            }
+        }
+        // Branch popup with a row's actions menu open (manual debug shot for the
+        // click-a-branch → Checkout/Merge menu flow).
+        "branch-menu" => {
+            // Seed the current branch (the async refresh snapshot hasn't landed yet), so
+            // the picked row — and the menu's "into X" label — match a real click.
+            if let Some(r) = view.repo() {
+                view.current_branch = r.current_branch();
+            }
+            view.toggle_branch_popup(window, cx);
+            let target = view
+                .branch
+                .list
+                .iter()
+                .find(|b| view.current_branch.as_deref() != Some(b.as_str()))
+                .cloned();
+            if let Some(b) = target {
+                view.open_menu(gpui::point(px(860.0), px(420.0)), MenuTarget::Branch(b), cx);
+            }
         }
         // Projects landing welcome hero (the animated 3D KYDE logo + shimmer) — used by the
         // README welcome GIF. Force no project open so `render` takes the landing path; the

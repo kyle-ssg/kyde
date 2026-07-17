@@ -381,11 +381,21 @@ impl Render for Kyde {
             .when(self.update_available.is_some(), |d| {
                 d.child(self.render_update_banner(ui, cx))
             })
+            // Merge-in-progress banner — TOP of the window, big and conflict-tinted, so
+            // the way back into the conflicts window is always one click away (covers
+            // merges started outside kyde too, e.g. a conflicted pull in a terminal).
+            .when(self.merge.in_progress.is_some(), |d| {
+                d.child(self.render_merge_banner(ui, cx))
+            })
             .child(main_row);
         let mut root = root
             // Git-op error + crash banners at the bottom (just above the status bar).
             .when(self.op_error.is_some(), |d| {
                 d.child(self.render_op_error_banner(ui, cx))
+            })
+            // Merge success note ("Merged X into Y") — neutral, ×-dismissed.
+            .when(self.merge.note.is_some(), |d| {
+                d.child(self.render_merge_note(ui, cx))
             })
             .when(self.pending_crash.is_some(), |d| {
                 d.child(self.render_crash_banner(ui, cx))
@@ -879,6 +889,61 @@ impl Kyde {
                 }
                 panel
             }
+            // A branch row in the branch popup: merge it into the current branch, or
+            // check it out (same as a left-click).
+            MenuTarget::Branch(name) => {
+                let cur = self.current_branch.clone().unwrap_or_else(|| "HEAD".into());
+                let (nm_merge, nm_co) = (name.clone(), name.clone());
+                // Checked out in another worktree → Checkout jumps there (say so);
+                // hidden entirely inside a linked worktree with no jump target (the
+                // worktree is pinned to its branch — merge is still allowed).
+                let elsewhere = self
+                    .other_worktree_for_branch(name)
+                    .and_then(|w| w.path.file_name())
+                    .map(|s| s.to_string_lossy().into_owned());
+                let can_checkout = elsewhere.is_some() || !self.in_linked_worktree();
+                if can_checkout {
+                    let label = match elsewhere {
+                        Some(wt) => format!("Checkout  (jumps to “{wt}”)"),
+                        None => "Checkout".to_string(),
+                    };
+                    panel = panel.child(item_owned(SharedString::from(label)).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| {
+                            this.context_menu = None;
+                            this.checkout_branch(nm_co.clone(), window, cx);
+                        }),
+                    ));
+                }
+                panel.child(
+                    item_owned(SharedString::from(format!("Merge “{name}” into “{cur}”")))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.menu_merge_branch(nm_merge.clone(), cx);
+                            }),
+                        ),
+                )
+            }
+            // Same compare options again, from a file row — the file stays selected after.
+            MenuTarget::HistoryFile(idx) => {
+                let idx = *idx;
+                let cur = self.history.compare;
+                for mode in CompareMode::ALL {
+                    let label = if mode == cur {
+                        SharedString::from(format!("✓ {}", mode.label()))
+                    } else {
+                        SharedString::from(mode.label())
+                    };
+                    panel = panel.child(item_owned(label).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.history_compare_file(idx, mode, cx);
+                        }),
+                    ));
+                }
+                panel
+            }
         };
 
         // Backdrop: any click (incl. right elsewhere) dismisses the menu. `occlude()` makes it
@@ -901,15 +966,17 @@ impl Kyde {
             // `anchored` positions the panel at the cursor but flips/snaps it back inside the
             // window when it would overflow an edge (so a menu near the bottom/right opens
             // upward/leftward instead of being clipped). `deferred` paints it above the rest.
-            .child(
-                gpui::deferred(
-                    gpui::anchored()
-                        .position(menu.at)
-                        .snap_to_window_with_margin(px(8.0))
-                        .child(panel),
-                )
-                .with_priority(1),
-            )
+            .child({
+                // Branch actions fly out LEFT of the branch popup: `at` is the popup's
+                // left edge, so anchor the menu's top-RIGHT corner there (every other
+                // menu hangs from its top-left at the cursor).
+                let mut anchored = gpui::anchored().position(menu.at);
+                if matches!(menu.target, MenuTarget::Branch(_)) {
+                    anchored = anchored.anchor(gpui::Corner::TopRight);
+                }
+                gpui::deferred(anchored.snap_to_window_with_margin(px(8.0)).child(panel))
+                    .with_priority(1)
+            })
             .into_any_element()
     }
 }

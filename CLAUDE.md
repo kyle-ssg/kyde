@@ -277,7 +277,12 @@ Clicking → `toggle_branch_popup`: loads `branch_list` via `Repo::branches`
 `render_branch_popup` (anchored bottom-right, transparent backdrop closes it) shows: search
 box, **+ New Branch** (`create_branch` = `git checkout -b`, name from the query), **Recent**
 (top 5 by recency, current excluded), **All Branches** (alphabetical, current marked `✓`).
-Clicking a branch → `checkout_branch` (`git checkout`) then `refresh`.
+Clicking (or right-clicking) a branch row opens the branch ACTIONS menu at the cursor
+(`MenuTarget::Branch`, WebStorm-style — no instant checkout): **Checkout** (`checkout_branch`
+→ `git checkout` + `refresh`; worktree-aware — jumps when checked out elsewhere, hidden in a
+pinned linked worktree) and **Merge “X” into “Y”** (`menu_merge_branch` — see Merge view).
+Rows carry `↑a ↓b` ahead/behind badges vs current (background gather on open). Debug shot:
+`KYDE_SHOT=branch-menu`.
 
 ## Worktree switcher (src/views/worktree.rs + kyde-git `Repo::worktrees`)
 A `layers.svg` chip next to the branch chip (hidden when the repo has no linked worktrees —
@@ -297,6 +302,54 @@ worktree is pinned to its branch); jump rows, the current branch, and + New Bran
 (`checkout -b` doesn't touch files) stay active. The chip carries a worktree-count badge +
 "Worktrees" tooltip. New icons go in the `Assets` `include_bytes!` match in main.rs — an
 unregistered path renders as NOTHING, silently (layers.svg was caught in QA).
+
+## Merge view (src/views/merge.rs + kyde-git merge ops + kyde-diff::merge)
+Branch-to-branch merge with IntelliJ-style conflict resolution. **Branch popup**: leaf rows
+carry `↑a ↓b` ahead/behind badges vs the current branch (`Repo::branch_ahead_behind`, one
+`rev-list --left-right --count` per branch, gathered in background ON POPUP OPEN — the
+worktree-counts pattern); right-click a row → `MenuTarget::Branch` menu with **Merge “X” into
+“Y”** / Checkout. `menu_merge_branch` runs `Repo::merge_branch` (`git merge --no-edit`) off
+the UI thread → `MergeOutcome::{UpToDate, Merged, Conflicts}`. Clean/up-to-date → a neutral
+✓ note banner (`merge.note`, ×-dismissed). Conflicts → the merge stays IN PROGRESS and the
+**resolve window** opens (`ModalKind::Merge`, a native window at the main window's bounds),
+a TWO-STAGE dialog:
+- **Stage 1 — conflicts list** (`render_conflicts_list`, always shown first): "Merging branch
+  X into branch Y" over a table of conflicted files — badge + name + dir, and **Yours/Theirs
+  columns** (Modified/Added/Deleted per side, from `Repo::conflict_entries` = one
+  `git ls-files -u -z`, classified by which index stages exist). Row selection +
+  **Accept Yours / Accept Theirs** (whole-file resolve: stage-2/3 content, or delete when
+  that side deleted — `git checkout --ours/--theirs` semantics) and **Merge…** (or
+  double-click) → stage 2. Resolved rows show ✓ and go inert.
+- **Stage 2 — 3-pane resolve** (`render_merge_resolve`): toolbar = ↑/↓ chunk nav
+  (`merge_nav_chunk`, far left), ‹ Back, **Compare Contents** dropdown (`MergeCompare` via
+  `ui::select` — hand-rolled panels got clipped by later-painted pane siblings): the 3-pane
+  view; **Left/Right and Middle** = INTERACTIVE 2-pane subsets of the live merge panes
+  (same editors + apply gutter — the middle IS the editable result); Base pairs + Left and
+  Right = read-only comparisons in separate `cmp_l`/`cmp_r` editors (`compare_pair` returns
+  `Some` only for these). Then **Apply non-conflicting changes: » Left · »« All · « Right**
+  (`merge_apply_clean`), and a
+  **whitespace mode** dropdown (`WhitespaceMode::{Exact,Trim,IgnoreAll}`, UI default
+  `IgnoreAll` — comparison normalizes, display never changes; switching re-chunks the
+  file). Three read-only
+  `CodeEditor` panes — **Yours | Result | Theirs** — row-aligned via per-chunk fillers and
+  one shared `ScrollHandle`; two 56px gutters put `»`/`«` (apply) + `×` (ignore) on EVERY
+  changed chunk's first row (✓/− = undo). Model = `kyde_diff::merge::Merge3` (diff3-style:
+  `side_hunks` base→ours + base→theirs aligned over base; touching regions merge → conflict,
+  like git). NOTHING auto-applies: every non-stable chunk has a `Resolution { ours, theirs:
+  Pending|Applied|Ignored }` (`Same` chunks ride the ours side); the center pane rebuilds
+  from `result_lines` on every change; pending conflicts keep base, tinted
+  `theme.diff_conflict_bg` (a palette key, in the CVD variants too; ignored chunks go
+  `diff_deleted_bg` grey). Footer: **Abort Merge**, Accept Yours/Theirs, **Apply** (gated on
+  ALL chunks decided; save merged text + `git add`, back to the list) — the list offers
+  **Commit Merge** (`git commit --no-edit` → git's `MERGE_MSG`) once every file is resolved.
+- **Banner** (`render_merge_banner`, bottom stack): shown whenever the refresh snapshot sees
+  MERGE_HEAD (`Repo::merging()` → friendly branch name), so a conflicted merge/pull started
+  OUTSIDE kyde is also offered Resolve/Commit/Abort. Conflicted count comes live from
+  `git status` (`FileStatus::Conflict`). State lives in `MergeView` (`merge` on `Kyde`);
+  stage contents come from `Repo::conflict_stage` (`git show :1/2/3:path`).
+- Screenshots: `KYDE_SHOT=merge-conflicts` (list) / `merge` (3-pane, non-conflicting applied)
+  / `merge-compare` (manual) + `KYDE_SHOT_REPO=<clone with an in-progress conflicted merge>`
+  (fixture built by scripts/screenshots.sh; region capture, 2 windows like rollback).
 
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {

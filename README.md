@@ -95,7 +95,8 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 * **Stage / revert** per hunk from the center gutter, or whole files; commit via the message box.
 * **Rollback** in a native window — checkbox tree, optional deletion of added files, right-click for diff.
 * **Push** when ahead of upstream (status-bar button + context menu).
-* **Branch switcher** — searchable tree, `/` as folders, Recent / Local roots.
+* **Branch switcher** — searchable tree, `/` as folders, Recent / Local roots, ahead/behind counts per branch.
+* **Merge** — right-click a branch to merge it into the current one. Conflicts open a native two-stage resolver: a conflicts list (what each side did, Accept Yours / Accept Theirs / Merge…), then a 3-pane merge view — yours | result | theirs — with per-change apply/ignore gutters, "apply non-conflicting changes", Compare Contents pairs, and whitespace-ignoring diffs.
 * **History** — commit log for any branch, with the selected commit's changed files and a read-only diff that compares vs the parent, latest, or your local working tree.
 * **File management** from the tree — New File, Rename, Delete (with confirm).
 
@@ -105,6 +106,14 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 
 <p align="center">
   <img src="assets/screenshots/history.png" alt="History view — commit log on the left, the selected commit's changed files, and a read-only side-by-side diff comparable against the parent, latest, or local working tree" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/merge-conflicts.png" alt="Merge conflicts list — every conflicted file with what each side did (modified / deleted), and Accept Yours / Accept Theirs / Merge… per file" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/merge.png" alt="3-pane merge view — yours, result, and theirs aligned side by side; red unresolved conflicts with apply/ignore gutter controls, applied changes in blue, plus apply-non-conflicting, Compare Contents, and whitespace options in the toolbar" width="900">
 </p>
 
 ### Search & navigation

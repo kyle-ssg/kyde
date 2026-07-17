@@ -113,6 +113,54 @@ all | git-diff | light)
     ;;
 esac
 
+# merge fixture: another clone of this repo, with an IN-PROGRESS conflicted merge — a feature
+# branch and the mainline both edit the same region of crates/kyde-ui/src/color.rs, then
+# `git merge` runs and stops on the conflict. apply_shot opens the clone and pops the merge
+# window over it (KYDE_SHOT_REPO): `merge-conflicts` = the conflicts list, `merge` = 3-pane.
+case "${1:-all}" in
+all | merge | merge-conflicts)
+    echo "==> generating merge fixture (clone with a conflicted merge in progress)"
+    MERGE_REPO="$FIX/kyde-merge"
+    rm -rf "$MERGE_REPO"
+    mkdir -p "$FIX"
+    git clone --quiet --no-hardlinks "$ROOT" "$MERGE_REPO"
+    git -C "$MERGE_REPO" config user.email "shot@example.com"
+    git -C "$MERGE_REPO" config user.name "Kyde Screenshots"
+    git -C "$MERGE_REPO" config commit.gpgsign false
+    MCOLOR="$MERGE_REPO/crates/kyde-ui/src/color.rs"
+    MAIN_BRANCH="$(git -C "$MERGE_REPO" symbolic-ref --short HEAD)"
+
+    MTAB="$MERGE_REPO/crates/kyde-ui/src/tab.rs"
+    MSTATS="$MERGE_REPO/crates/kyde-ui/src/stats.rs"
+
+    # Feature branch: eased lerp (same recipe as the git-diff showcase edit) + a clean
+    # EOF addition (exercises "apply non-conflicting"), a tab.rs edit (2nd conflict),
+    # and stats.rs DELETED (a modified/deleted row in the conflicts list).
+    git -C "$MERGE_REPO" checkout -qb feature/eased-lerp
+    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$MCOLOR"
+    perl -0pi -e 's/(\n    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    let t = t * t * (3.0 - 2.0 * t); \/\/ smoothstep so the shimmer eases\n/' "$MCOLOR"
+    printf '\n/// Convenience: the mid-point blend of two colours.\n#[must_use]\npub fn mid_rgb(a: u32, b: u32) -> gpui::Rgba {\n    lerp_rgb(a, b, 0.5)\n}\n' >> "$MCOLOR"
+    sed -i '' '1s;^;// Segmented tab strip (feature: hover polish pass).\n;' "$MTAB"
+    git -C "$MERGE_REPO" rm -q crates/kyde-ui/src/stats.rs
+    git -C "$MERGE_REPO" commit -qam "feat: ease lerp with smoothstep; drop line-stats helper"
+
+    # Mainline: different edits to the SAME regions → guaranteed conflicts, plus an
+    # edit to the file the feature branch deleted (modify/delete).
+    git -C "$MERGE_REPO" checkout -q "$MAIN_BRANCH"
+    perl -0pi -e 's/Linearly interpolate/Linearly interpolate (inputs clamped)/' "$MCOLOR"
+    perl -0pi -e 's/(\n    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    debug_assert!(t.is_finite());\n/' "$MCOLOR"
+    sed -i '' '1s;^;// Segmented tab strip (main: keyboard-focus ring).\n;' "$MTAB"
+    sed -i '' '1s;^;// Line stats: keep the compact form.\n;' "$MSTATS"
+    git -C "$MERGE_REPO" commit -qam "docs: note clamping; assert finite t; stats note"
+
+    # Start the merge — it must stop on the conflict and stay in progress.
+    if git -C "$MERGE_REPO" merge --no-edit feature/eased-lerp >/dev/null 2>&1; then
+        echo "    !! merge fixture did not conflict (anchors moved?) — fix screenshots.sh" >&2
+        exit 1
+    fi
+    ;;
+esac
+
 # shoot <shot-name> <output-file> <capture-mode> [extra env KEY=VAL ...]
 #   capture-mode: window  → screencapture -l<frontmost window>   (full-bleed window)
 #                 region  → screencapture -R<main-window bounds + margin>  (window over desktop)
@@ -124,9 +172,9 @@ shoot() {
     env XDG_CONFIG_HOME="$CFG" KYDE_SHOT="$name" "$@" "$BIN" "$ROOT" >/dev/null 2>&1 &
     local pid=$!
 
-    # rollback / plugins-window open a second (modal) window; everything else has just one.
+    # rollback / plugins-window / merge open a second (modal) window; the rest have one.
     local need=1
-    case "$name" in rollback|plugins-window) need=2 ;; esac
+    case "$name" in rollback|plugins-window|merge|merge-conflicts) need=2 ;; esac
 
     local tries=0 count=0
     while [ $tries -lt 80 ]; do
@@ -231,7 +279,7 @@ shoot_welcome_gif() {
 # (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
 #   ./scripts/screenshots.sh welcome-gif
-declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history merge-conflicts merge terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -262,6 +310,8 @@ run_one() {
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
         rollback)         shoot_until rollback         rollback.png         region ;;
         history)          shoot_until history          history.png          window ;;
+        merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
+        merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         welcome-gif)      shoot_welcome_gif ;;

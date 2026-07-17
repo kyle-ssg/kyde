@@ -356,6 +356,7 @@ impl Kyde {
                 let expanded = self.history.files_expanded.contains(&r.path);
                 let is_dir = r.is_dir;
                 let p_act = r.path.clone();
+                let p_ctx = r.path.clone();
                 ui::tree::item(
                     cx,
                     self.dragging(Divider::Tree),
@@ -381,7 +382,15 @@ impl Kyde {
                         }
                     },
                     |_this, _cx| {},
-                    |_this, _pos, _cx| {},
+                    // Right-click a file → the same compare options as the header dropdown.
+                    move |this, pos, cx| {
+                        if is_dir {
+                            return;
+                        }
+                        if let Some(i) = this.history.files.iter().position(|f| f.path == p_ctx) {
+                            this.open_menu(pos, MenuTarget::HistoryFile(i), cx);
+                        }
+                    },
                 )
             })
             .collect();
@@ -807,6 +816,25 @@ impl Kyde {
         self.context_menu = None;
         self.history.selected = Some(idx);
         self.set_history_compare(mode, cx);
+    }
+
+    /// Right-click a changed file → pick a compare mode: apply the mode, then re-select that
+    /// file under it (the recompute reorders — or drops — files, e.g. one that matches the
+    /// working tree under "Compare with Local"; dropped → the default first file stays).
+    pub(crate) fn history_compare_file(
+        &mut self,
+        idx: usize,
+        mode: CompareMode,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        let path = self.history.files.get(idx).map(|f| f.path.clone());
+        self.set_history_compare(mode, cx);
+        if let Some(i) = path.and_then(|p| self.history.files.iter().position(|f| f.path == p)) {
+            if self.history.file_selected != Some(i) {
+                self.select_history_file(i, cx);
+            }
+        }
     }
 
     /// Change the compare mode (vs parent / latest / local) → refresh files + diff.

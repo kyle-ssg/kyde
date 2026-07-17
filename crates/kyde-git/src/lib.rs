@@ -119,6 +119,53 @@ pub struct Worktree {
     pub is_main: bool,
 }
 
+/// Outcome of [`Repo::merge_branch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Nothing to merge — the current branch already contains the other branch.
+    UpToDate,
+    /// Merged cleanly (fast-forward or an automatic merge commit).
+    Merged,
+    /// The merge stopped on conflicts; it is left in progress (`MERGE_HEAD` set) and
+    /// these files need manual resolution.
+    Conflicts(Vec<PathBuf>),
+}
+
+/// What happened to one SIDE of a conflicted file (relative to the merge base), derived
+/// from which index stages exist — drives the Yours/Theirs columns of the conflicts list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictSide {
+    /// The side changed the file's content.
+    Modified,
+    /// The side added the file (no common base — both-added conflict).
+    Added,
+    /// The side deleted the file.
+    Deleted,
+}
+
+impl ConflictSide {
+    /// Column label for the conflicts list.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            ConflictSide::Modified => "Modified",
+            ConflictSide::Added => "Added",
+            ConflictSide::Deleted => "Deleted",
+        }
+    }
+}
+
+/// One conflicted file with what each side did to it (see [`Repo::conflict_entries`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictEntry {
+    /// Repo-relative path.
+    pub path: PathBuf,
+    /// What OUR side (the current branch) did.
+    pub ours: ConflictSide,
+    /// What THEIR side (the branch being merged in) did.
+    pub theirs: ConflictSide,
+}
+
 /// A git repository rooted at a working-tree top level. All operations shell out to `git`.
 pub struct Repo {
     root: PathBuf,
@@ -695,6 +742,150 @@ impl Repo {
         git(&self.root, args).map(|_| ())
     }
 
+    /// Merge `branch` into the current branch (`git merge --no-edit`). On conflicts the
+    /// merge is deliberately left IN PROGRESS (`MERGE_HEAD` set, conflict markers staged)
+    /// so the caller can drive interactive resolution — abort via [`Self::merge_abort`],
+    /// conclude via [`Self::commit_merge`]. A failure that did NOT start a merge (dirty
+    /// tree in the way, unrelated histories, bad rev) surfaces as the git error.
+    pub fn merge_branch(&self, branch: &str) -> Result<MergeOutcome> {
+        let branch = valid_ref(branch)?;
+        match git(&self.root, &["merge", "--no-edit", branch]) {
+            Ok(out) => {
+                if out.contains("Already up to date") {
+                    Ok(MergeOutcome::UpToDate)
+                } else {
+                    Ok(MergeOutcome::Merged)
+                }
+            }
+            // Only a merge that actually started (MERGE_HEAD exists) is a conflict
+            // outcome; any other failure never touched the tree — pass it through.
+            Err(e) => match self.merging() {
+                Some(_) => Ok(MergeOutcome::Conflicts(self.conflicted_files())),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Abort an in-progress merge, restoring the pre-merge working tree.
+    pub fn merge_abort(&self) -> Result<()> {
+        git(&self.root, &["merge", "--abort"]).map(|_| ())
+    }
+
+    /// When a merge is in progress, the friendliest name for what's being merged in:
+    /// a local branch pointing at `MERGE_HEAD`, else its short hash. `None` = no merge
+    /// in progress. (Goes through `git rev-parse`, so it's linked-worktree-safe —
+    /// never reads `.git/MERGE_HEAD` directly.)
+    pub fn merging(&self) -> Option<String> {
+        let head = git(
+            &self.root,
+            &["rev-parse", "--quiet", "--verify", "--short", "MERGE_HEAD"],
+        )
+        .ok()?;
+        let short = head.trim().to_string();
+        if short.is_empty() {
+            return None;
+        }
+        let name = git(
+            &self.root,
+            &[
+                "branch",
+                "--points-at",
+                "MERGE_HEAD",
+                "--format=%(refname:short)",
+            ],
+        )
+        .ok()
+        .and_then(|out| out.lines().next().map(str::to_string))
+        .filter(|s| !s.is_empty());
+        Some(name.unwrap_or(short))
+    }
+
+    /// Files currently in the unmerged (conflicted) state. Empty when none / on error.
+    pub fn conflicted_files(&self) -> Vec<PathBuf> {
+        git(
+            &self.root,
+            &["diff", "--name-only", "--diff-filter=U", "-z"],
+        )
+        .map(|raw| {
+            raw.split('\0')
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Conflicted files with what EACH side did (the conflicts-list columns), derived from
+    /// which index stages exist per path (`git ls-files -u -z`: records of
+    /// `mode SP oid SP stage TAB path`): all three stages → modified/modified; a missing
+    /// stage 2/3 → that side deleted; a missing stage 1 (no common base) → both added.
+    pub fn conflict_entries(&self) -> Vec<ConflictEntry> {
+        let Ok(raw) = git(&self.root, &["ls-files", "-u", "-z"]) else {
+            return Vec::new();
+        };
+        // Path → bitmask of the stages present (bits 1/2/3).
+        let mut stages: Vec<(PathBuf, u8)> = Vec::new();
+        for rec in raw.split('\0').filter(|s| !s.is_empty()) {
+            let Some((meta, path)) = rec.split_once('\t') else {
+                continue;
+            };
+            let Some(stage) = meta.split(' ').nth(2).and_then(|s| s.parse::<u8>().ok()) else {
+                continue;
+            };
+            let path = PathBuf::from(path);
+            match stages.iter_mut().find(|(p, _)| *p == path) {
+                Some((_, mask)) => *mask |= 1 << stage,
+                None => stages.push((path, 1 << stage)),
+            }
+        }
+        stages.sort_by(|a, b| a.0.cmp(&b.0));
+        stages
+            .into_iter()
+            .map(|(path, mask)| {
+                let (has_base, has_ours, has_theirs) =
+                    (mask & 0b0010 != 0, mask & 0b0100 != 0, mask & 0b1000 != 0);
+                let side = |present| match (has_base, present) {
+                    (_, false) => ConflictSide::Deleted,
+                    (false, true) => ConflictSide::Added,
+                    (true, true) => ConflictSide::Modified,
+                };
+                ConflictEntry {
+                    path,
+                    ours: side(has_ours),
+                    theirs: side(has_theirs),
+                }
+            })
+            .collect()
+    }
+
+    /// One side of a conflicted file from the index: stage 1 = common base, 2 = ours,
+    /// 3 = theirs (`git show :N:path`). A missing stage (added on both sides → no base;
+    /// deleted on one side) collapses to empty, like a missing file elsewhere.
+    pub fn conflict_stage(&self, rel: &Path, stage: u8) -> String {
+        let spec = format!(":{}:{}", stage, rel.to_string_lossy());
+        git(&self.root, &["show", &spec]).unwrap_or_default()
+    }
+
+    /// Conclude a conflicted merge once every file is resolved + staged: commits with
+    /// the message git prepared in `MERGE_MSG` (`git commit --no-edit`).
+    pub fn commit_merge(&self) -> Result<()> {
+        git(&self.root, &["commit", "--no-edit"]).map(|_| ())
+    }
+
+    /// `(ahead, behind)` of `branch` relative to the current HEAD: commits only on
+    /// `branch` (what a merge would bring in) / commits only on HEAD. One
+    /// `rev-list --left-right --count` — cheap enough to run per branch when the
+    /// switcher opens. `None` on a bad rev or unborn HEAD.
+    pub fn branch_ahead_behind(&self, branch: &str) -> Option<(usize, usize)> {
+        let branch = valid_ref(branch).ok()?;
+        let range = format!("HEAD...{branch}");
+        let out = git(&self.root, &["rev-list", "--left-right", "--count", &range]).ok()?;
+        let mut it = out.split_whitespace();
+        let behind: usize = it.next()?.parse().ok()?; // left = only on HEAD
+        let ahead: usize = it.next()?.parse().ok()?; // right = only on `branch`
+        Some((ahead, behind))
+    }
+
     /// Write new content to a working-tree file (used by the editor on save).
     pub fn save_file(&self, rel: &Path, content: &str) -> Result<()> {
         let full = self.root.join(rel);
@@ -1165,6 +1356,162 @@ mod tests {
                 .unwrap(),
             ""
         );
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// The whole merge lifecycle against a real repo: up-to-date, clean merge, conflicted
+    /// merge (stages readable, abort restores, re-merge + resolve + `commit_merge`
+    /// concludes), plus `branch_ahead_behind` counts.
+    #[test]
+    fn merge_branch_covers_clean_conflict_abort_and_commit() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-merge-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        fs::write(work.join("other.txt"), "x\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+        let repo = Repo::discover(&work).unwrap();
+
+        // A branch that only touches other.txt merges cleanly.
+        g(&work, &["checkout", "-b", "clean"]);
+        fs::write(work.join("other.txt"), "x\ny\n").unwrap();
+        g(&work, &["commit", "-am", "clean change"]);
+        g(&work, &["checkout", "main"]);
+        assert_eq!(
+            repo.branch_ahead_behind("clean"),
+            Some((1, 0)),
+            "clean is 1 ahead of main, 0 behind"
+        );
+        assert_eq!(repo.merge_branch("clean").unwrap(), MergeOutcome::Merged);
+        assert_eq!(
+            repo.merge_branch("clean").unwrap(),
+            MergeOutcome::UpToDate,
+            "second merge of the same branch has nothing to do"
+        );
+
+        // Conflicting edits to the same line on both branches.
+        g(&work, &["checkout", "-b", "feature"]);
+        fs::write(work.join("f.txt"), "one\nFEATURE\nthree\n").unwrap();
+        g(&work, &["commit", "-am", "feature change"]);
+        g(&work, &["checkout", "main"]);
+        fs::write(work.join("f.txt"), "one\nMAIN\nthree\n").unwrap();
+        g(&work, &["commit", "-am", "main change"]);
+
+        let out = repo.merge_branch("feature").unwrap();
+        assert_eq!(
+            out,
+            MergeOutcome::Conflicts(vec![PathBuf::from("f.txt")]),
+            "same-line edits must conflict"
+        );
+        assert_eq!(repo.merging().as_deref(), Some("feature"));
+        assert_eq!(
+            repo.conflict_stage(Path::new("f.txt"), 1),
+            "one\ntwo\nthree\n"
+        );
+        assert_eq!(
+            repo.conflict_stage(Path::new("f.txt"), 2),
+            "one\nMAIN\nthree\n"
+        );
+        assert_eq!(
+            repo.conflict_stage(Path::new("f.txt"), 3),
+            "one\nFEATURE\nthree\n"
+        );
+
+        // Abort restores the pre-merge state.
+        repo.merge_abort().unwrap();
+        assert_eq!(repo.merging(), None);
+        assert_eq!(
+            fs::read_to_string(work.join("f.txt")).unwrap(),
+            "one\nMAIN\nthree\n"
+        );
+
+        // Merge again, resolve by staging merged content, conclude with commit_merge.
+        assert!(matches!(
+            repo.merge_branch("feature").unwrap(),
+            MergeOutcome::Conflicts(_)
+        ));
+        repo.save_file(Path::new("f.txt"), "one\nMERGED\nthree\n")
+            .unwrap();
+        repo.stage(Path::new("f.txt")).unwrap();
+        repo.commit_merge().unwrap();
+        assert_eq!(repo.merging(), None);
+        assert_eq!(g(&work, &["show", "HEAD:f.txt"]), "one\nMERGED\nthree\n");
+        assert!(
+            g(&work, &["log", "--merges", "--oneline"]).lines().count() >= 1,
+            "a merge commit was created"
+        );
+
+        // A bogus branch is an error, not a conflict outcome.
+        assert!(repo.merge_branch("no-such-branch").is_err());
+        assert_eq!(repo.merging(), None, "failed merge must not leave state");
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// `conflict_entries` must classify what each side did from the index stages:
+    /// modify/modify, modify/delete, and add/add (no common base).
+    #[test]
+    fn conflict_entries_classify_each_side() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-centries-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("f.txt"), "one\ntwo\n").unwrap();
+        fs::write(work.join("gone.txt"), "a\nb\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+
+        // feature: edit f, DELETE gone, ADD new.
+        g(&work, &["checkout", "-qb", "feature"]);
+        fs::write(work.join("f.txt"), "one\nFEATURE\n").unwrap();
+        g(&work, &["rm", "-q", "gone.txt"]);
+        fs::write(work.join("new.txt"), "from feature\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "feature"]);
+
+        // main: edit f differently, edit gone, add new with different content.
+        g(&work, &["checkout", "-q", "main"]);
+        fs::write(work.join("f.txt"), "one\nMAIN\n").unwrap();
+        fs::write(work.join("gone.txt"), "a\nEDITED\n").unwrap();
+        fs::write(work.join("new.txt"), "from main\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "main"]);
+
+        let repo = Repo::discover(&work).unwrap();
+        assert!(matches!(
+            repo.merge_branch("feature").unwrap(),
+            MergeOutcome::Conflicts(_)
+        ));
+        let entries = repo.conflict_entries();
+        let by = |name: &str| {
+            entries
+                .iter()
+                .find(|e| e.path == Path::new(name))
+                .unwrap_or_else(|| panic!("{name} missing from {entries:?}"))
+        };
+        assert_eq!(by("f.txt").ours, ConflictSide::Modified);
+        assert_eq!(by("f.txt").theirs, ConflictSide::Modified);
+        assert_eq!(by("gone.txt").ours, ConflictSide::Modified);
+        assert_eq!(by("gone.txt").theirs, ConflictSide::Deleted);
+        assert_eq!(by("new.txt").ours, ConflictSide::Added);
+        assert_eq!(by("new.txt").theirs, ConflictSide::Added);
 
         let _ = fs::remove_dir_all(&work);
     }

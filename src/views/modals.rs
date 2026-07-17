@@ -416,6 +416,7 @@ impl Kyde {
             ModalKind::Fonts => &mut self.fonts_win,
             ModalKind::ClearData => &mut self.clear_data_win,
             ModalKind::Settings => &mut self.settings_win,
+            ModalKind::Merge => &mut self.merge_win,
         }
     }
 
@@ -443,10 +444,10 @@ impl Kyde {
             *self.modal_slot(kind) = None; // stale (user closed it) → fall through and reopen
         }
         let kyde = cx.entity();
-        // The Diff modal opens at the MAIN window's bounds (captured each frame in
-        // `impl Render for Kyde`) so it's as big as the editor and lands over it — NOT the
-        // focused window's, which may be another modal (e.g. Rollback) it was launched from.
-        let main_bounds = (kind == ModalKind::Diff)
+        // The Diff + Merge modals open at the MAIN window's bounds (captured each frame in
+        // `impl Render for Kyde`) so they're as big as the editor and land over it — NOT the
+        // focused window's, which may be another modal (e.g. Rollback) they were launched from.
+        let main_bounds = matches!(kind, ModalKind::Diff | ModalKind::Merge)
             .then_some(self.main_window_bounds)
             .flatten();
         cx.spawn(async move |this, cx| {
