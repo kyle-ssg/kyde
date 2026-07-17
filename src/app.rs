@@ -103,6 +103,9 @@ struct RepoSnapshot {
     push_files: Vec<ChangedFile>,
     /// Scratch files under the project root.
     scratches: Vec<PathBuf>,
+    /// What's being merged in when a merge is in progress (`MERGE_HEAD`'s friendly name)
+    /// — drives the resolve-conflicts banner. `None` = no merge in progress.
+    merging: Option<String>,
     /// Whether `root` is inside a git working tree (drives which fields are meaningful).
     is_git: bool,
 }
@@ -127,6 +130,7 @@ impl RepoSnapshot {
                 push_base: String::new(),
                 push_files: Vec::new(),
                 scratches,
+                merging: None,
                 is_git: false,
             };
         };
@@ -148,6 +152,7 @@ impl RepoSnapshot {
             push_base: repo.push_base(),
             push_files: repo.push_files(),
             scratches,
+            merging: repo.merging(),
             is_git: true,
         }
     }
@@ -267,6 +272,8 @@ impl Kyde {
             update_available: None,
             updating: false,
             history: HistoryView::new(cx),
+            merge_win: None,
+            merge: MergeView::new(cx),
             term: TermState::new(),
         };
         me.refresh(cx);
@@ -349,6 +356,14 @@ impl Kyde {
         self.browse.tree = tree::Tree::build(&self.browse.all_files);
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;
+        // Merge-in-progress state (drives the banner). Covers merges we started AND ones
+        // started outside (a conflicted `git pull`/`merge` in a terminal); cleared when
+        // the merge concludes/aborts anywhere. Our initiated `source` label wins while
+        // both are known (it's the exact branch name the user clicked).
+        self.merge.in_progress = snap.merging;
+        if self.merge.in_progress.is_none() {
+            self.merge.source = None;
+        }
         self.sync.ahead = snap.ahead;
         self.sync.behind = snap.behind;
         self.browse.scratches = snap.scratches;

@@ -110,6 +110,9 @@ pub struct Theme {
     /// Modified-line background in the diff.
     #[serde(with = "hex")]
     pub diff_modified_bg: Rgba,
+    /// Unresolved-conflict background in the 3-pane merge view.
+    #[serde(with = "hex")]
+    pub diff_conflict_bg: Rgba,
     /// Background of the center-gutter separator column.
     #[serde(with = "hex")]
     pub diff_separator_bg: Rgba,
@@ -174,6 +177,7 @@ struct Cvd {
     ins_bg: u32,
     del_bg: u32,
     mod_bg: u32,
+    conflict_bg: u32,
     word_bg: u32,
     keyword: u32,
     string: u32,
@@ -191,6 +195,8 @@ const CVD_DARK_RG: Cvd = Cvd {
     ins_bg: 0x16344E,
     del_bg: 0x33363B,
     mod_bg: 0x4A3A14,
+    // Same amber family as `modified` (only two poles survive) — split by lightness.
+    conflict_bg: 0x63470F,
     word_bg: 0x1F4E78,
     keyword: 0xE8B33A,
     string: 0x2E9AB8,
@@ -206,6 +212,7 @@ const CVD_LIGHT_RG: Cvd = Cvd {
     ins_bg: 0xC6DCFA,
     del_bg: 0xDFDFE1,
     mod_bg: 0xF6EAC0,
+    conflict_bg: 0xEDD79B, // deeper amber than mod_bg (lightness split)
     word_bg: 0xAECBF2,
     keyword: 0x9A6800,
     string: 0x0E6FA0,
@@ -222,6 +229,7 @@ const CVD_DARK_TR: Cvd = Cvd {
     ins_bg: 0x1C3A1C,
     del_bg: 0x33363B,
     mod_bg: 0x4A2230,
+    conflict_bg: 0x611A1A, // stronger red than mod_bg (lightness split)
     word_bg: 0x5A2A38,
     keyword: 0xFF8FB5,
     string: 0x5CB85C,
@@ -237,6 +245,7 @@ const CVD_LIGHT_TR: Cvd = Cvd {
     ins_bg: 0xD2EDD2,
     del_bg: 0xDFDFE1,
     mod_bg: 0xF7DCE6,
+    conflict_bg: 0xF2C4C4, // stronger red than mod_bg (lightness split)
     word_bg: 0xF0C0D0,
     keyword: 0xC03060,
     string: 0x1E8A1E,
@@ -256,6 +265,7 @@ fn apply_cvd(base: Theme, a: Cvd) -> Theme {
         diff_inserted_bg: c(a.ins_bg),
         diff_deleted_bg: c(a.del_bg),
         diff_modified_bg: c(a.mod_bg),
+        diff_conflict_bg: c(a.conflict_bg),
         diff_word_old_bg: c(a.word_bg),
         diff_word_new_bg: c(a.word_bg),
         syn_keyword: c(a.keyword),
@@ -305,6 +315,9 @@ impl Default for Theme {
             diff_inserted_bg: c(0x294436),
             diff_deleted_bg: c(0x484A4A),
             diff_modified_bg: c(0x385570),
+            // Muted red tuned to the same weight as the green/blue hunk tints, so an
+            // unresolved merge conflict reads as "needs attention" without shouting.
+            diff_conflict_bg: c(0x4D2F2E),
             diff_separator_bg: c(0x2B2D30),
             // A deeper blue than the modified-line tint (#385570) so the exact changed
             // words read as emphasis — same on both sides.
@@ -370,6 +383,7 @@ impl Theme {
             diff_inserted_bg: c(0xE3F6E9),
             diff_deleted_bg: c(0xECECEE),
             diff_modified_bg: c(0xE1ECFC),
+            diff_conflict_bg: c(0xFBE4E4), // faint red tint (mirrors the green/blue tints)
             diff_separator_bg: c(0xF0F0F2),
             // Word-level emphasis — same both sides, a stronger blue (mirrors the dark theme).
             diff_word_old_bg: c(0xADCFF7),

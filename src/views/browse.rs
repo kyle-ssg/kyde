@@ -273,6 +273,10 @@ impl Kyde {
                 .child(self.render_tab_bar(ui, fs, cx));
             // Install banner only applies to text/code files, not image previews.
             if image.is_none() {
+                // Unresolved-conflict banner first — resolving beats installing a grammar.
+                if let Some(p) = self.open_file_conflict() {
+                    r = r.child(self.render_conflict_file_banner(p, ui, fs, cx));
+                }
                 if let Some(pack) = self.pending_pack() {
                     r = r.child(self.render_install_banner(pack, ui, fs, cx));
                 }

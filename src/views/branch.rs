@@ -3,6 +3,12 @@
 
 use crate::*;
 
+/// Branch popup geometry (shared with the actions-menu flyout, which anchors its right
+/// edge to the popup's LEFT edge).
+const POPUP_W: f32 = 340.0;
+/// Popup inset from the window's right edge.
+const POPUP_RIGHT: f32 = 8.0;
+
 impl Kyde {
     /// Bottom status bar — currently just the branch switcher, anchored bottom-right.
     pub(crate) fn render_status_bar(
@@ -371,9 +377,9 @@ impl Kyde {
 
         let panel = div()
             .absolute()
-            .right(px(8.0))
+            .right(px(POPUP_RIGHT))
             .bottom(px(28.0))
-            .w(px(340.0))
+            .w(px(POPUP_W))
             .max_h(px(460.0))
             .flex()
             .flex_col()
@@ -409,10 +415,9 @@ impl Kyde {
     fn branch_tree(&self, rows: Vec<BranchRow>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let t = theme::get();
         let current = self.current_branch.clone();
-        // In a linked worktree, plain checkouts are disabled (the worktree is pinned to
-        // its branch — that's the point of worktrees); rows that jump to another worktree
-        // and the current branch stay active.
-        let pinned = self.in_linked_worktree();
+        // Clicking a row opens the branch ACTIONS menu (Checkout / Merge…); the menu
+        // itself hides Checkout inside a pinned (linked) worktree — see the
+        // `MenuTarget::Branch` arm in `render_context_menu`.
         rows.into_iter()
             .map(|r| {
                 let indent = px(8.0 + r.depth as f32 * 14.0);
@@ -468,9 +473,26 @@ impl Kyde {
                             .and_then(|w| w.path.file_name())
                             .map(|s| s.to_string_lossy().into_owned());
                         let nm = full.clone();
-                        // Disabled = a plain checkout in a pinned (linked) worktree; jump
-                        // rows (`elsewhere`) and the current branch stay interactive.
-                        let disabled = pinned && elsewhere.is_none() && !is_current;
+                        let nm_menu = full.clone();
+                        // `↑a ↓b` vs the current branch (gathered on popup open); the
+                        // current branch and all-zero rows show nothing.
+                        let counts = (!is_current)
+                            .then(|| self.branch.counts.get(&full).copied())
+                            .flatten()
+                            .filter(|&(a, b)| a > 0 || b > 0)
+                            .map(|(a, b)| {
+                                let mut s = String::new();
+                                if a > 0 {
+                                    s.push_str(&format!("↑{a}"));
+                                }
+                                if b > 0 {
+                                    if !s.is_empty() {
+                                        s.push(' ');
+                                    }
+                                    s.push_str(&format!("↓{b}"));
+                                }
+                                s
+                            });
                         div()
                             .flex()
                             .flex_row()
@@ -480,10 +502,10 @@ impl Kyde {
                             .pl(indent)
                             .pr_2()
                             .rounded_md()
-                            .when(!disabled, |d| {
+                            .when(!is_current, |d| {
                                 d.cursor_pointer().hover(|s| s.bg(t.selected_bg))
                             })
-                            .text_color(if disabled { t.line_number } else { t.text })
+                            .text_color(t.text)
                             .child(div().flex_none().text_color(t.line_number).child("⎇"))
                             .child(
                                 div()
@@ -492,6 +514,30 @@ impl Kyde {
                                     .truncate()
                                     .child(SharedString::from(r.label)),
                             )
+                            .when_some(counts, |d, s| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(t.line_number)
+                                        .child(SharedString::from(s)),
+                                )
+                            })
+                            // Right-click = the same actions menu as a left-click (below).
+                            .when(!is_current, |d| {
+                                d.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(
+                                        move |this, e: &gpui::MouseDownEvent, window, cx| {
+                                            this.open_branch_menu(
+                                                nm_menu.clone(),
+                                                e.position.y,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
+                                )
+                            })
                             .when_some(elsewhere, |d, wt| {
                                 d.child(
                                     div()
@@ -513,12 +559,26 @@ impl Kyde {
                             .when(is_current, |d| {
                                 d.child(div().flex_none().text_color(t.line_number).child("✓"))
                             })
-                            .when(!disabled, |d| {
+                            // Submenu affordance: every actionable row carries a chevron.
+                            .when(!is_current, |d| {
+                                d.child(div().flex_none().text_color(t.line_number).child("›"))
+                            })
+                            // Left-click opens the branch ACTIONS menu (Checkout / Merge…)
+                            // flying out LEFT of the popup — WebStorm-style, instead of
+                            // an instant checkout nobody can discover alternatives to.
+                            .when(!is_current, |d| {
                                 d.on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, _e, window, cx| {
-                                        this.checkout_branch(nm.clone(), window, cx);
-                                    }),
+                                    cx.listener(
+                                        move |this, e: &gpui::MouseDownEvent, window, cx| {
+                                            this.open_branch_menu(
+                                                nm.clone(),
+                                                e.position.y,
+                                                window,
+                                                cx,
+                                            );
+                                        },
+                                    ),
                                 )
                             })
                             .into_any_element()
@@ -526,6 +586,24 @@ impl Kyde {
                 }
             })
             .collect()
+    }
+
+    /// Open a branch row's actions menu as a FLYOUT on the popup's left edge (at the
+    /// row's height). The menu anchors its top-RIGHT corner here — see the
+    /// `MenuTarget::Branch` handling in `render_context_menu`.
+    fn open_branch_menu(
+        &mut self,
+        name: String,
+        row_y: gpui::Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let popup_left = f32::from(window.viewport_size().width) - POPUP_RIGHT - POPUP_W;
+        self.open_menu(
+            gpui::point(px(popup_left), row_y),
+            MenuTarget::Branch(name),
+            cx,
+        );
     }
 
     // ── branch switcher ───────────────────────────────────────────
@@ -556,6 +634,44 @@ impl Kyde {
             self.branch.query.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
+            // Ahead/behind badges: one `rev-list --count` per branch, gathered in the
+            // background ON OPEN only (worktree-popup pattern — never on the render path).
+            self.branch.counts.clear();
+            self.branch.counts_gen = self.branch.counts_gen.wrapping_add(1);
+            let generation = self.branch.counts_gen;
+            if let Some(root) = self.repo_root.clone() {
+                let current = self.current_branch.clone();
+                let names: Vec<String> = self
+                    .branch
+                    .list
+                    .iter()
+                    .filter(|b| current.as_deref() != Some(b.as_str()))
+                    .cloned()
+                    .collect();
+                cx.spawn(async move |this, cx| {
+                    let counts = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let Ok(repo) = Repo::discover(&root) else {
+                                return Vec::new();
+                            };
+                            names
+                                .into_iter()
+                                .filter_map(|b| repo.branch_ahead_behind(&b).map(|c| (b, c)))
+                                .collect::<Vec<_>>()
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        // Only the newest open's gather wins.
+                        if this.branch.counts_gen == generation {
+                            this.branch.counts.extend(counts);
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
             // Recent expanded by default; Local collapsed.
             self.branch.expanded.insert("sec:recent".into());
             self.branch.popup_open = true;

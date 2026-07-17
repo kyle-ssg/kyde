@@ -9,6 +9,7 @@ mod file_ops;
 mod find;
 mod finder;
 mod history;
+mod merge;
 mod modals;
 mod notifications;
 mod onboarding;

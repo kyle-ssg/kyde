@@ -9,6 +9,8 @@
 use similar::{ChangeTag, TextDiff};
 use std::ops::Range;
 
+pub mod merge;
+
 /// What kind of change a [`Hunk`] represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HunkKind {
@@ -56,6 +58,16 @@ impl FileDiff {
     /// assert_eq!(d.hunks.len(), 1); // only the middle line changed
     /// ```
     pub fn compute(before: &str, after: &str) -> Self {
+        Self::compute_with(before, after, merge::WhitespaceMode::Exact)
+    }
+
+    /// [`Self::compute`] with a whitespace mode: under [`merge::WhitespaceMode::Trim`] /
+    /// [`merge::WhitespaceMode::IgnoreAll`] lines are COMPARED normalized (whitespace-only
+    /// changes produce no hunk) while the stored `old`/`new` lines stay the original text.
+    /// The inline word-level pass only runs under `Exact` — normalized token indices
+    /// wouldn't map back onto the displayed text.
+    #[must_use]
+    pub fn compute_with(before: &str, after: &str, ws: merge::WhitespaceMode) -> Self {
         // Split on '\n' (NOT `.lines()`) so line indices match exactly how the editor
         // renders them — a trailing newline becomes a final empty line on both sides, so
         // identical text never shows a phantom diff and alignment stays in sync.
@@ -70,8 +82,25 @@ impl FileDiff {
             .map(std::string::ToString::to_string)
             .collect();
 
-        // Diff over those exact line vectors (consistent with `old`/`new` indices).
-        let diff = TextDiff::from_slices(&old_refs, &new_refs);
+        // Diff over those exact line vectors (consistent with `old`/`new` indices) — or,
+        // under a non-exact whitespace mode, over per-line comparison keys (1:1 with the
+        // original lines, so all ranges still index the display text).
+        let exact = ws == merge::WhitespaceMode::Exact;
+        let (old_keys, new_keys): (Vec<String>, Vec<String>) = if exact {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                old.iter().map(|l| ws.key(l)).collect(),
+                new.iter().map(|l| ws.key(l)).collect(),
+            )
+        };
+        let old_key_refs: Vec<&str> = old_keys.iter().map(String::as_str).collect();
+        let new_key_refs: Vec<&str> = new_keys.iter().map(String::as_str).collect();
+        let diff = if exact {
+            TextDiff::from_slices(&old_refs, &new_refs)
+        } else {
+            TextDiff::from_slices(&old_key_refs, &new_key_refs)
+        };
         let mut hunks = Vec::new();
 
         // Group contiguous non-equal ops (similar gives us grouped ops with context=0).
@@ -127,7 +156,8 @@ impl FileDiff {
                 new_lo..new_lo
             };
 
-            let (ow, nw) = if kind == HunkKind::Modified
+            let (ow, nw) = if exact
+                && kind == HunkKind::Modified
                 && !word_diff_too_large(&old[old_range.clone()], &new[new_range.clone()])
             {
                 word_ranges(
