@@ -898,6 +898,12 @@ struct BrowseView {
     /// Cmd-clicked FILE rows (ordered). Exactly two → the right-click menu
     /// offers "Compare Selected" (issue #42). Cleared by any plain click.
     multi_selected: Vec<PathBuf>,
+    /// Import targets the external-defs index was last computed for — the
+    /// cheap change gate (recompute only when the buffer's import set changes).
+    ext_defs_targets: Vec<String>,
+    /// Generation counter for the external-defs background job (stale results
+    /// from a superseded compute are dropped).
+    ext_defs_gen: u64,
     /// Scroll position of the tree, so "Select Opened File in Tree" can scroll an
     /// off-screen row into view.
     tree_scroll: ScrollHandle,
@@ -922,8 +928,8 @@ impl BrowseView {
     fn new(cx: &mut Context<Kyde>) -> Self {
         // No placeholder: an empty open file should read as empty, not show prompt text.
         let editor = cx.new(|cx| CodeEditor::new(cx, String::new(), Lang::PlainText, ""));
-        cx.subscribe(&editor, |this, _e, ev, cx| {
-            if matches!(ev, EditorEvent::Changed) && this.browse.editor.read(cx).dirty {
+        cx.subscribe(&editor, |this, _e, ev, cx| match ev {
+            EditorEvent::Changed if this.browse.editor.read(cx).dirty => {
                 // Editing a preview (temporary) tab promotes it to a permanent tab — VS Code
                 // behaviour, so the edit survives the next single-click elsewhere.
                 if this.browse.preview_tab.is_some()
@@ -932,7 +938,24 @@ impl BrowseView {
                     this.browse.preview_tab = None;
                 }
                 this.autosave(cx);
+                // Import lines changed → re-index the imported files' definitions
+                // (cheap target-set comparison; the compute itself is background).
+                this.refresh_external_defs(cx);
             }
+            // ⌘-click on an import link → resolve against the project file list
+            // and open the target (issue #26).
+            EditorEvent::OpenImport(link) => this.open_import_link(link.clone(), cx),
+            // ⌘-click on a USE of an imported symbol → open its file and land
+            // on the definition.
+            EditorEvent::OpenSymbol { link, name } => {
+                this.open_import_symbol(link.clone(), name.clone(), cx);
+            }
+            // ⌘-click on a pre-resolved external definition (imported-files
+            // index) → open the file at the definition.
+            EditorEvent::OpenDefinition { path, range } => {
+                this.open_definition_at(path.clone(), range.clone(), cx);
+            }
+            EditorEvent::Changed => {}
         })
         .detach();
         Self {
@@ -949,6 +972,8 @@ impl BrowseView {
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
             multi_selected: Vec::new(),
+            ext_defs_targets: Vec::new(),
+            ext_defs_gen: 0,
             tree_scroll: ScrollHandle::new(),
             editor,
             editor_scroll: ScrollHandle::new(),
@@ -2421,6 +2446,16 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
             }
         }
+        // Browse a Rust file with ⌘ "held" over an import — the link underlines
+        // (issue #26). Uses the debug hover forcer since shots can't hold keys.
+        "imports" => {
+            set_packs(view, &["rust"]);
+            view.open_file(PathBuf::from("src/main.rs"), cx);
+            view.browse.editor.update(cx, |e, cx| {
+                e.force_link_hover(0);
+                cx.notify();
+            });
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {
@@ -3038,6 +3073,119 @@ mod gpui_smoke_tests {
                     "one\nTWO\nthree\n"
                 );
                 assert!(k.compare.diff.as_ref().unwrap().hunks.is_empty());
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click import navigation (issue #26): a link resolved against the
+    /// project file list opens the target; unresolvable specifiers (packages)
+    /// are a silent no-op.
+    #[gpui::test]
+    fn cmd_click_import_opens_the_target_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::write(dir.join("lib.ts"), "export const a = 1;\n").unwrap();
+        std::fs::write(dir.join("main.ts"), "import { a } from './lib';\n").unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked(); // let the file-list snapshot land
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("main.ts"), cx);
+                // Lang set explicitly — must not depend on the machine's installed packs.
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                    e.set_content("import { a } from './lib';\n".into(), Lang::Ts, cx);
+                });
+                let links = highlight::import_links("import { a } from './lib';\n", Lang::Ts);
+                assert_eq!(links.len(), 1);
+                k.open_import_link(links[0].clone(), cx);
+                assert_eq!(
+                    k.browse.open_path,
+                    Some(PathBuf::from("lib.ts")),
+                    "relative TS import resolves + opens"
+                );
+                // A bare specifier is an npm package — no-op.
+                let npm = highlight::import_links("import r from 'react';\n", Lang::Ts);
+                k.open_import_link(npm[0].clone(), cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click on a USE of an imported symbol jumps THROUGH the import: opens
+    /// the target file and lands the selection on the definition. The pack for
+    /// the target must be installed (effective lang drives the definition scan).
+    #[gpui::test]
+    fn cmd_click_symbol_jumps_to_its_definition(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let lib = "const pad = 1;\nexport const answer = 42;\n";
+        std::fs::write(dir.join("lib.ts"), lib).unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { answer } from './lib';\nconsole.log(answer);\n",
+        )
+        .unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.plugins.install("typescript"); // effective_lang must see Ts for lib.ts
+                k.open_file(PathBuf::from("main.ts"), cx);
+                let src = "import { answer } from './lib';\nconsole.log(answer);\n";
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                    e.set_content(src.into(), Lang::Ts, cx);
+                });
+                let binds = highlight::import_bindings(src, Lang::Ts);
+                let (name, link) = binds[0].clone();
+                assert_eq!(name, "answer");
+                k.open_import_symbol(link, name, cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+                let sel = k.browse.editor.read(cx).selection();
+                assert_eq!(&lib[sel], "answer", "selection lands on the definition");
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click on a METHOD of an imported class resolves through the
+    /// external-defs index: the imported file's definitions are indexed in the
+    /// background, and clicking the method name opens that file at the method.
+    #[gpui::test]
+    fn cmd_click_method_resolves_via_imported_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let lib = "export class Cat {\n  meow() { return 1; }\n}\n";
+        std::fs::write(dir.join("lib.ts"), lib).unwrap();
+        let main = "import { Cat } from './lib';\nnew Cat().meow();\n";
+        std::fs::write(dir.join("main.ts"), main).unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.plugins.install("typescript");
+                k.open_file(PathBuf::from("main.ts"), cx);
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                });
+                // open_file may have skipped the index (pack installed just
+                // now) — force a fresh compute with links enabled.
+                k.browse.ext_defs_targets.clear();
+                k.refresh_external_defs(cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // background index lands
+        handle
+            .update(cx, |k, _w, cx| {
+                // The editor's external index must now know `meow` → lib.ts.
+                let (path, range) = k
+                    .browse
+                    .editor
+                    .read(cx)
+                    .external_def_for("meow")
+                    .expect("method of the imported class is indexed");
+                assert_eq!(path, PathBuf::from("lib.ts"));
+                k.open_definition_at(path, range, cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+                let sel = k.browse.editor.read(cx).selection();
+                assert_eq!(&lib[sel], "meow", "selection lands on the method");
             })
             .unwrap();
     }
