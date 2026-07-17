@@ -550,6 +550,14 @@ impl Kyde {
                 window.focus(&self.focus_handle);
                 self.sort_object_keys_at_caret(cx);
             }
+            PaletteAction::NavBack => {
+                window.focus(&self.focus_handle);
+                self.nav_back(cx);
+            }
+            PaletteAction::NavForward => {
+                window.focus(&self.focus_handle);
+                self.nav_forward(cx);
+            }
         }
     }
 

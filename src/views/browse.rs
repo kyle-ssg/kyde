@@ -831,6 +831,7 @@ impl Kyde {
     }
 
     fn open_file_inner(&mut self, rel: PathBuf, preview: bool, cx: &mut Context<Self>) {
+        self.nav_record(&rel);
         // Images preview via `img()` and font files preview in their own typeface (see
         // render_browse) — don't load their binary bytes into the text editor.
         if !is_image(&rel) && !is_font_file(&rel) {
@@ -1021,6 +1022,77 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         self.sort_object_keys_at_caret(cx);
+    }
+
+    // ── back/forward file navigation (⌘⌥← / ⌘⌥→) ─────────────────
+    /// Record a visit in the file-navigation history. Opening a new file after
+    /// going back discards the forward branch (the IDE convention); navigating
+    /// via back/forward itself records nothing (`nav_suppress`). Consecutive
+    /// duplicates collapse; capped at 100 entries.
+    fn nav_record(&mut self, rel: &PathBuf) {
+        if self.browse.nav_suppress {
+            return;
+        }
+        let h = &mut self.browse.nav_history;
+        if h.get(self.browse.nav_index) == Some(rel) {
+            return; // re-activating the current file (tab click) — no new entry
+        }
+        h.truncate(self.browse.nav_index.saturating_add(1).min(h.len()));
+        h.push(rel.clone());
+        if h.len() > 100 {
+            h.remove(0);
+        }
+        self.browse.nav_index = h.len() - 1;
+    }
+
+    /// ⌘⌥← — reopen the previously visited file (no-op at the start of history).
+    pub(crate) fn nav_back(&mut self, cx: &mut Context<Self>) {
+        if self.browse.nav_index == 0 {
+            return;
+        }
+        self.browse.nav_index -= 1;
+        self.nav_open_current(cx);
+    }
+
+    /// ⌘⌥→ — reopen the next file (no-op at the end of history).
+    pub(crate) fn nav_forward(&mut self, cx: &mut Context<Self>) {
+        if self.browse.nav_index + 1 >= self.browse.nav_history.len() {
+            return;
+        }
+        self.browse.nav_index += 1;
+        self.nav_open_current(cx);
+    }
+
+    /// Open the history entry at `nav_index` without recording a new visit.
+    /// A file deleted since it was visited just refreshes empty-ish via the
+    /// normal open path (never an error).
+    fn nav_open_current(&mut self, cx: &mut Context<Self>) {
+        let Some(rel) = self.browse.nav_history.get(self.browse.nav_index).cloned() else {
+            return;
+        };
+        self.mode = Mode::Browse;
+        self.browse.nav_suppress = true;
+        self.open_file(rel, cx);
+        self.browse.nav_suppress = false;
+        cx.notify();
+    }
+
+    pub(crate) fn act_nav_back(
+        &mut self,
+        _: &NavBack,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav_back(cx);
+    }
+
+    pub(crate) fn act_nav_forward(
+        &mut self,
+        _: &NavForward,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.nav_forward(cx);
     }
 
     // ── ⌘-click import navigation (issue #26) ─────────────────────

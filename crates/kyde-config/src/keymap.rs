@@ -77,6 +77,18 @@ pub const ACTIONS: &[ActionDef] = &[
         vscode: "cmd-alt-s",
         label: "Sort Object Keys",
     },
+    ActionDef {
+        name: "nav_back",
+        webstorm: "cmd-alt-left",
+        vscode: "cmd-alt-left",
+        label: "Back (previous file)",
+    },
+    ActionDef {
+        name: "nav_forward",
+        webstorm: "cmd-alt-right",
+        vscode: "cmd-alt-right",
+        label: "Forward (next file)",
+    },
 ];
 
 /// A configurable action: its stable name, the default keystroke under each preset, and a

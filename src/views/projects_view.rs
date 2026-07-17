@@ -516,6 +516,8 @@ impl Kyde {
             self.browse.open_tabs.clear();
             self.browse.preview_tab = None;
             self.browse.multi_selected.clear();
+            self.browse.nav_history.clear();
+            self.browse.nav_index = 0;
             self.selected = None;
             self.browse.expanded.clear();
             self.browse.expanded.insert(PathBuf::new()); // root folder visible by default
@@ -543,6 +545,8 @@ impl Kyde {
             self.browse.open_tabs.clear();
             self.browse.preview_tab = None;
             self.browse.multi_selected.clear();
+            self.browse.nav_history.clear();
+            self.browse.nav_index = 0;
             self.selected = None;
         } else {
             // Prefer the tab that shifted into this slot, else the previous one.

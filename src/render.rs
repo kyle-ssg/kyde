@@ -308,6 +308,8 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_mode_browse))
             .on_action(cx.listener(Self::act_sort_lines))
             .on_action(cx.listener(Self::act_sort_keys))
+            .on_action(cx.listener(Self::act_nav_back))
+            .on_action(cx.listener(Self::act_nav_forward))
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::open_recent_project))
             .on_action(cx.listener(Self::act_open_project))

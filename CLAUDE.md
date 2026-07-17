@@ -653,6 +653,15 @@ already sorted / read-only) and re-select the sorted block. Smoke test:
 `sort_ops_rewrite_selection_and_object`. Debug shot: `KYDE_SHOT=sort-menu` +
 `KYDE_SHOT_FILE=<json>`.
 
+## Back/forward file navigation (⌘⌥← / ⌘⌥→)
+Visited-file history on `BrowseView` (`nav_history`/`nav_index`/`nav_suppress`, capped
+100): every `open_file_inner` records a visit (`nav_record` — consecutive dupes collapse;
+tab re-activation records nothing); `nav_back`/`nav_forward` walk it and reopen via the
+normal open path with `nav_suppress` on, so navigating never records; opening a NEW file
+after going back truncates the forward branch (IDE convention). Configurable actions
+`nav_back`/`nav_forward` (⌘⌥←/⌘⌥→ both presets) + ⌘⇧A palette entries; history cleared
+on project switch/close. Smoke test: `nav_back_and_forward_walk_the_visit_history`.
+
 ## Views & right-click flow (main.rs)
 Opening a project lands in **Browse (code) view**, not git — `open_project`/`new` default
 `Mode::Browse`. Git is reached on demand:
