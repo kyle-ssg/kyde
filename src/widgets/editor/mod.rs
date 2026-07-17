@@ -122,6 +122,47 @@ pub enum EditorEvent {
     /// ⌘-click landed on an import link — the app resolves the target against
     /// the project's file list and opens it (issue #26).
     OpenImport(highlight::ImportLink),
+    /// ⌘-click landed on a USE of an imported symbol — the app opens the
+    /// import's file and jumps to `name`'s definition inside it.
+    OpenSymbol {
+        /// The import that binds the symbol (resolves to the target file).
+        link: highlight::ImportLink,
+        /// The symbol to land on in that file.
+        name: String,
+    },
+}
+
+/// What a ⌘-click at some offset targets (see `CodeEditor::symbol_at`).
+enum SymbolTarget {
+    /// The import specifier itself → open the referenced file.
+    Link(highlight::ImportLink),
+    /// A symbol defined in THIS buffer → jump to its definition range.
+    LocalDef(Range<usize>),
+    /// A use of an imported symbol → open its file, land on the definition.
+    ImportedSymbol(highlight::ImportLink, String),
+}
+
+/// The ⌘-click navigation caches, computed together on one parse-adjacent pass:
+/// the import links (sorted), the imported-name → link map, and the
+/// definition-site index (name → sorted name-ranges).
+type NavCaches = (
+    Vec<highlight::ImportLink>,
+    std::collections::HashMap<String, highlight::ImportLink>,
+    std::collections::HashMap<String, Vec<Range<usize>>>,
+);
+
+/// Build the navigation caches for `source` (see [`NavCaches`]).
+fn compute_nav(source: &str, lang: Lang) -> NavCaches {
+    let links = highlight::import_links(source, lang);
+    let bound = highlight::import_bindings(source, lang)
+        .into_iter()
+        .collect();
+    let mut defs: std::collections::HashMap<String, Vec<Range<usize>>> =
+        std::collections::HashMap::new();
+    for (name, r) in highlight::definition_sites(source, lang) {
+        defs.entry(name).or_default().push(r);
+    }
+    (links, bound, defs)
 }
 
 /// A point-in-time editor state for the undo/redo stacks.
@@ -202,15 +243,21 @@ pub struct CodeEditor {
     /// Cached import links (sorted by position), recomputed with `spans` — but
     /// ONLY when `links_on`, so editors without the toggle never pay the parse.
     import_links: Vec<highlight::ImportLink>,
-    /// ⌘-click import navigation for this editor's language (same push model as
-    /// `errors_on`: per-pack toggle, on by default for installed packs).
+    /// Names bound by imports → their link, for jump-through-the-import on a
+    /// USE of an imported symbol. Recomputed with `import_links`.
+    import_bound: std::collections::HashMap<String, highlight::ImportLink>,
+    /// Definition sites (name → sorted name-ranges), for same-file
+    /// go-to-definition. Recomputed with `import_links`.
+    defs: std::collections::HashMap<String, Vec<Range<usize>>>,
+    /// ⌘-click navigation (imports + definitions) for this editor's language
+    /// (same push model as `errors_on`: per-pack toggle, default on).
     links_on: bool,
-    /// Live ⌘-held state (tracked via `ModifiersChanged`) — gates the link hover
+    /// Live ⌘-held state (tracked via `ModifiersChanged`) — gates the hover
     /// affordance and the click intercept.
     cmd_held: bool,
-    /// Index into `import_links` under the pointer while ⌘ is held (drives the
-    /// underline + pointer cursor).
-    hover_link: Option<usize>,
+    /// Byte range under the pointer that ⌘-click would act on (an import link
+    /// or a symbol with a known target) — drives the underline + pointer cursor.
+    hover_range: Option<Range<usize>>,
     /// Longest line length in bytes (recomputed on content change) — drives the element's
     /// content width so long lines scroll horizontally instead of clipping.
     max_line_len: usize,
@@ -335,9 +382,11 @@ impl CodeEditor {
             error_ranges: Vec::new(),
             errors_on: false,
             import_links: Vec::new(),
+            import_bound: std::collections::HashMap::new(),
+            defs: std::collections::HashMap::new(),
             links_on: false,
             cmd_held: false,
-            hover_link: None,
+            hover_range: None,
             max_line_len: 0,
             line_layouts: HashMap::new(),
             display_rows: 0,
@@ -494,15 +543,17 @@ impl CodeEditor {
             self.spans = Vec::new();
             self.error_ranges = Vec::new();
             self.import_links = Vec::new();
-            self.hover_link = None;
+            self.import_bound.clear();
+            self.defs.clear();
+            self.hover_range = None;
             self.foldable = Vec::new();
             self.foldable_starts.clear();
             self.max_line_len = 0;
             return;
         }
-        self.hover_link = None; // ranges may have shifted under the pointer
-                                // Longest line (bytes) → element content width for horizontal scroll. Cheap byte
-                                // scan, only on content change (not per frame).
+        self.hover_range = None; // ranges may have shifted under the pointer
+                                 // Longest line (bytes) → element content width for horizontal scroll. Cheap byte
+                                 // scan, only on content change (not per frame).
         self.max_line_len = self.content.split('\n').map(str::len).max().unwrap_or(0);
         // Small files: highlight + find folds inline (correct on the very first frame, no
         // flicker). Big files: clear now so the file opens instantly as plain text, then
@@ -521,11 +572,14 @@ impl CodeEditor {
             } else {
                 Vec::new()
             };
-            self.import_links = if self.links_on {
-                highlight::import_links(&self.content, self.lang)
+            let (links, bound, defs) = if self.links_on {
+                compute_nav(&self.content, self.lang)
             } else {
-                Vec::new()
+                Default::default()
             };
+            self.import_links = links;
+            self.import_bound = bound;
+            self.defs = defs;
             self.foldable = highlight::fold_regions(&self.content, self.lang);
             self.foldable_starts = self.foldable.iter().map(|r| r.0).collect();
             self.folded.retain(|l| self.foldable_starts.contains(l));
@@ -534,6 +588,8 @@ impl CodeEditor {
         self.spans = Vec::new();
         self.error_ranges = Vec::new();
         self.import_links = Vec::new();
+        self.import_bound.clear();
+        self.defs.clear();
         self.foldable = Vec::new();
         self.foldable_starts.clear();
         let gen = self.compute_gen;
@@ -542,7 +598,7 @@ impl CodeEditor {
         let errors_on = self.errors_on;
         let links_on = self.links_on;
         cx.spawn(async move |this, cx| {
-            let (spans, foldable, errors, links) = cx
+            let (spans, foldable, errors, nav) = cx
                 .background_executor()
                 .spawn(async move {
                     (
@@ -554,9 +610,9 @@ impl CodeEditor {
                             Vec::new()
                         },
                         if links_on {
-                            highlight::import_links(&content, lang)
+                            compute_nav(&content, lang)
                         } else {
-                            Vec::new()
+                            Default::default()
                         },
                     )
                 })
@@ -566,7 +622,7 @@ impl CodeEditor {
                     // Still the current content → apply the highlight + folds.
                     ed.spans = spans;
                     ed.error_ranges = errors;
-                    ed.import_links = links;
+                    (ed.import_links, ed.import_bound, ed.defs) = nav;
                     ed.foldable_starts = foldable.iter().map(|r| r.0).collect();
                     ed.foldable = foldable;
                     ed.folded.retain(|l| ed.foldable_starts.contains(l));
@@ -612,19 +668,67 @@ impl CodeEditor {
         (off < self.import_links[i].range.end).then_some(i)
     }
 
-    /// Recompute which import link the pointer sits on (from `last_mouse`),
-    /// honoring the ⌘ + toggle gates; notifies only on change. Called from
-    /// mouse-move AND `ModifiersChanged`, so pressing ⌘ over a link lights it up
-    /// without needing the mouse to move first.
+    /// The word (identifier: alphanumeric/`_` run) containing byte offset `off`.
+    fn word_range_at(&self, off: usize) -> Option<Range<usize>> {
+        let bytes = self.content.as_bytes();
+        let off = off.min(self.content.len());
+        let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        if off >= bytes.len() || !is_word(bytes[off]) {
+            return None;
+        }
+        let mut start = off;
+        while start > 0 && is_word(bytes[start - 1]) {
+            start -= 1;
+        }
+        let mut end = off;
+        while end < bytes.len() && is_word(bytes[end]) {
+            end += 1;
+        }
+        Some(start..end)
+    }
+
+    /// What ⌘-click at `off` would act on: an import link's specifier, a USE of
+    /// an imported symbol (jump through to its file), or a symbol defined in
+    /// this buffer (jump to the definition). Returns the range to underline plus
+    /// the action. A definition site itself doesn't self-target.
+    fn symbol_at(&self, off: usize) -> Option<(Range<usize>, SymbolTarget)> {
+        if let Some(i) = self.link_at(off) {
+            let l = &self.import_links[i];
+            return Some((l.range.clone(), SymbolTarget::Link(l.clone())));
+        }
+        let word = self.word_range_at(off)?;
+        let name = &self.content[word.clone()];
+        // Definitions win over import bindings: shadowing (a local `let x` over
+        // an imported `x`) resolves locally, like the compiler would.
+        if let Some(sites) = self.defs.get(name) {
+            if let Some(def) = sites.iter().find(|r| **r != word) {
+                return Some((word.clone(), SymbolTarget::LocalDef(def.clone())));
+            }
+        }
+        if let Some(link) = self.import_bound.get(name) {
+            // The imported name itself (in the import statement) rides the
+            // link range already; a USE elsewhere jumps through the import.
+            return Some((
+                word.clone(),
+                SymbolTarget::ImportedSymbol(link.clone(), name.to_string()),
+            ));
+        }
+        None
+    }
+
+    /// Recompute what the pointer sits on (from `last_mouse`), honoring the ⌘ +
+    /// toggle gates; notifies only on change. Called from mouse-move AND
+    /// `ModifiersChanged`, so pressing ⌘ over a symbol lights it up without
+    /// needing the mouse to move first.
     fn refresh_link_hover(&mut self, cx: &mut Context<Self>) {
         let hit = match self.last_mouse {
-            Some(pos) if self.cmd_held && self.links_on && !self.is_selecting => {
-                self.link_at(self.offset_for_position(pos))
-            }
+            Some(pos) if self.cmd_held && self.links_on && !self.is_selecting => self
+                .symbol_at(self.offset_for_position(pos))
+                .map(|(r, _)| r),
             _ => None,
         };
-        if hit != self.hover_link {
-            self.hover_link = hit;
+        if hit != self.hover_range {
+            self.hover_range = hit;
             cx.notify();
         }
     }
@@ -634,8 +738,8 @@ impl CodeEditor {
     /// whether such a link exists (false = nothing will underline).
     pub fn force_link_hover(&mut self, i: usize) -> bool {
         self.cmd_held = true;
-        self.hover_link = Some(i);
-        self.import_links.len() > i
+        self.hover_range = self.import_links.get(i).map(|l| l.range.clone());
+        self.hover_range.is_some()
     }
 
     /// (Re)start the caret blink: show it now and bump the epoch so any prior blink loop exits,
@@ -1031,14 +1135,28 @@ impl CodeEditor {
         // IME text can route here incidentally while actions (cmd-z, etc.) don't dispatch.
         self.focus_handle.focus(window);
         self.restart_blink(cx);
-        // ⌘-click on an import link opens the target file (issue #26) instead of
-        // moving the caret.
+        // ⌘-click navigation (issue #26): an import specifier opens its file, a
+        // locally-defined symbol jumps to its definition here, and a use of an
+        // imported symbol jumps through the import to the definition over there.
         if ev.modifiers.platform && self.links_on {
             let off = self.offset_for_position(ev.position);
-            if let Some(i) = self.link_at(off) {
-                cx.emit(EditorEvent::OpenImport(self.import_links[i].clone()));
-                cx.stop_propagation();
-                return;
+            match self.symbol_at(off) {
+                Some((_, SymbolTarget::Link(link))) => {
+                    cx.emit(EditorEvent::OpenImport(link));
+                    cx.stop_propagation();
+                    return;
+                }
+                Some((_, SymbolTarget::LocalDef(def))) => {
+                    self.select_range(def, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                Some((_, SymbolTarget::ImportedSymbol(link, name))) => {
+                    cx.emit(EditorEvent::OpenSymbol { link, name });
+                    cx.stop_propagation();
+                    return;
+                }
+                None => {}
             }
         }
         // A click in the fold gutter toggles the fold on that display row instead
@@ -1590,7 +1708,7 @@ impl Render for CodeEditor {
             .key_context(ctx.as_str())
             .track_focus(&self.focus_handle)
             // Pointer over a ⌘-hovered import link (it's clickable); I-beam otherwise.
-            .cursor(if self.cmd_held && self.hover_link.is_some() {
+            .cursor(if self.cmd_held && self.hover_range.is_some() {
                 CursorStyle::PointingHand
             } else {
                 CursorStyle::IBeam

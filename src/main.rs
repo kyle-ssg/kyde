@@ -936,6 +936,11 @@ impl BrowseView {
             // ⌘-click on an import link → resolve against the project file list
             // and open the target (issue #26).
             EditorEvent::OpenImport(link) => this.open_import_link(link.clone(), cx),
+            // ⌘-click on a USE of an imported symbol → open its file and land
+            // on the definition.
+            EditorEvent::OpenSymbol { link, name } => {
+                this.open_import_symbol(link.clone(), name.clone(), cx);
+            }
             EditorEvent::Changed => {}
         })
         .detach();
@@ -3086,6 +3091,41 @@ mod gpui_smoke_tests {
                 let npm = highlight::import_links("import r from 'react';\n", Lang::Ts);
                 k.open_import_link(npm[0].clone(), cx);
                 assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click on a USE of an imported symbol jumps THROUGH the import: opens
+    /// the target file and lands the selection on the definition. The pack for
+    /// the target must be installed (effective lang drives the definition scan).
+    #[gpui::test]
+    fn cmd_click_symbol_jumps_to_its_definition(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let lib = "const pad = 1;\nexport const answer = 42;\n";
+        std::fs::write(dir.join("lib.ts"), lib).unwrap();
+        std::fs::write(
+            dir.join("main.ts"),
+            "import { answer } from './lib';\nconsole.log(answer);\n",
+        )
+        .unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.plugins.install("typescript"); // effective_lang must see Ts for lib.ts
+                k.open_file(PathBuf::from("main.ts"), cx);
+                let src = "import { answer } from './lib';\nconsole.log(answer);\n";
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                    e.set_content(src.into(), Lang::Ts, cx);
+                });
+                let binds = highlight::import_bindings(src, Lang::Ts);
+                let (name, link) = binds[0].clone();
+                assert_eq!(name, "answer");
+                k.open_import_symbol(link, name, cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+                let sel = k.browse.editor.read(cx).selection();
+                assert_eq!(&lib[sel], "answer", "selection lands on the definition");
             })
             .unwrap();
     }

@@ -120,15 +120,11 @@ impl Element for EditorElement {
         // rows never pay for the run splitting.
         let errors: &[std::ops::Range<usize>] = if empty { &[] } else { &editor.error_ranges };
         let error_color: Hsla = theme::get().syn_error.into();
-        // The ⌘-hovered import link (at most one) gets a straight underline in
-        // the accent color — the visible "this is clickable" affordance.
+        // The ⌘-hovered symbol (at most one — an import link or a navigable
+        // identifier) gets a straight underline in the accent color — the
+        // visible "this is clickable" affordance.
         let link_range: Option<[std::ops::Range<usize>; 1]> = (editor.cmd_held && !empty)
-            .then(|| {
-                editor
-                    .hover_link
-                    .and_then(|i| editor.import_links.get(i))
-                    .map(|l| [l.range.clone()])
-            })
+            .then(|| editor.hover_range.clone().map(|r| [r]))
             .flatten();
         let link_style = UnderlineStyle {
             thickness: px(1.0),

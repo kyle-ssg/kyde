@@ -862,6 +862,28 @@ pub struct ImportLink {
 /// assert!(import_links("hello\n", Lang::PlainText).is_empty());
 /// ```
 pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
+    imports_with_bindings(source, lang)
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect()
+}
+
+/// The local names each import binds, paired with that import's [`ImportLink`]
+/// — so ⌘-clicking a USE of an imported symbol can jump through to the file it
+/// came from. Rust `use` names/aliases/lists, TS/JS default + named (incl.
+/// `as`) + namespace imports, Python module first-segments and `from`-names.
+/// Wildcards bind nothing knowable and are skipped.
+#[must_use]
+pub fn import_bindings(source: &str, lang: Lang) -> Vec<(String, ImportLink)> {
+    imports_with_bindings(source, lang)
+        .into_iter()
+        .flat_map(|(l, names)| names.into_iter().map(move |n| (n, l.clone())))
+        .collect()
+}
+
+/// Shared walk behind [`import_links`] / [`import_bindings`]: every import in
+/// `source` as `(link, names it binds locally)`, sorted by position.
+fn imports_with_bindings(source: &str, lang: Lang) -> Vec<(ImportLink, Vec<String>)> {
     if !matches!(
         lang,
         Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python
@@ -878,26 +900,56 @@ pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
     let Some(tree) = parser.parse(source, None) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    let mut out: Vec<(ImportLink, Vec<String>)> = Vec::new();
     let text = |n: tree_sitter::Node| source.get(n.byte_range()).unwrap_or("").to_string();
-    let push = |out: &mut Vec<ImportLink>, n: tree_sitter::Node, kind: ImportKind, src: &str| {
-        let target = src.get(n.byte_range()).unwrap_or("").to_string();
-        if !target.is_empty() {
-            out.push(ImportLink {
-                range: n.byte_range(),
-                target,
-                kind,
-            });
-        }
+    let link = |n: tree_sitter::Node, kind: ImportKind| -> Option<ImportLink> {
+        let target = source.get(n.byte_range()).unwrap_or("").to_string();
+        (!target.is_empty()).then_some(ImportLink {
+            range: n.byte_range(),
+            target,
+            kind,
+        })
     };
+    // The names a Rust use-tree binds: plain/scoped idents bind their last
+    // segment, `as` clauses their alias, `{…}` lists each entry (recursively);
+    // wildcards bind nothing knowable.
+    fn rust_use_names(n: tree_sitter::Node, src: &str, out: &mut Vec<String>) {
+        let txt = |m: tree_sitter::Node| src.get(m.byte_range()).unwrap_or("").to_string();
+        match n.kind() {
+            "identifier" => out.push(txt(n)),
+            "scoped_identifier" => {
+                if let Some(name) = n.child_by_field_name("name") {
+                    out.push(txt(name));
+                }
+            }
+            "use_as_clause" => {
+                if let Some(a) = n.child_by_field_name("alias") {
+                    out.push(txt(a));
+                }
+            }
+            "scoped_use_list" | "use_list" => {
+                let list = n.child_by_field_name("list").unwrap_or(n);
+                for i in 0..list.named_child_count() {
+                    if let Some(c) = list.named_child(i) {
+                        rust_use_names(c, src, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
         match (lang, node.kind()) {
-            // Rust: `mod name;` with no inline body → sibling file module.
+            // Rust: `mod name;` with no inline body → sibling file module. Binds
+            // the module name (`widgets::x` paths then resolve via the mod file).
             (Lang::Rust, "mod_item") => {
                 if node.child_by_field_name("body").is_none() {
                     if let Some(name) = node.child_by_field_name("name") {
-                        push(&mut out, name, ImportKind::RustMod, source);
+                        if let Some(l) = link(name, ImportKind::RustMod) {
+                            let names = vec![text(name)];
+                            out.push((l, names));
+                        }
                     }
                 }
             }
@@ -914,17 +966,52 @@ pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
                         _ => None,
                     };
                     if let Some(p) = path {
-                        push(&mut out, p, ImportKind::RustUse, source);
+                        if let Some(l) = link(p, ImportKind::RustUse) {
+                            let mut names = Vec::new();
+                            rust_use_names(arg, source, &mut names);
+                            out.push((l, names));
+                        }
                     }
                 }
             }
-            // TS/TSX/JS: `import … from "x"` / `export … from "x"`.
+            // TS/TSX/JS: `import … from "x"` / `export … from "x"`. Only the
+            // import form binds local names (default / named / namespace).
             (Lang::Ts | Lang::Tsx | Lang::Js, "import_statement" | "export_statement") => {
                 if let Some(s) = node.child_by_field_name("source") {
-                    push(&mut out, string_body(s), ImportKind::Specifier, source);
+                    if let Some(l) = link(string_body(s), ImportKind::Specifier) {
+                        let mut names = Vec::new();
+                        if node.kind() == "import_statement" {
+                            let mut st = vec![node];
+                            while let Some(n) = st.pop() {
+                                match n.kind() {
+                                    // Default import + namespace ident both land here.
+                                    "identifier" => names.push(text(n)),
+                                    "import_specifier" => {
+                                        if let Some(b) = n
+                                            .child_by_field_name("alias")
+                                            .or_else(|| n.child_by_field_name("name"))
+                                        {
+                                            names.push(text(b));
+                                        }
+                                        continue;
+                                    }
+                                    "string" => continue, // the source — not a binding
+                                    _ => {}
+                                }
+                                for i in 0..n.named_child_count() {
+                                    if let Some(c) = n.named_child(i) {
+                                        st.push(c);
+                                    }
+                                }
+                            }
+                        }
+                        out.push((l, names));
+                    }
                 }
             }
-            // TS/TSX/JS: `require("x")` and dynamic `import("x")`.
+            // TS/TSX/JS: `require("x")` and dynamic `import("x")`. The binding
+            // (if any) is an ordinary variable declarator — a local definition —
+            // so the import itself binds nothing here.
             (Lang::Ts | Lang::Tsx | Lang::Js, "call_expression") => {
                 let is_import_call = node.child_by_field_name("function").is_some_and(|f| {
                     f.kind() == "import" || (f.kind() == "identifier" && text(f) == "require")
@@ -935,30 +1022,60 @@ pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
                         .and_then(|a| a.named_child(0))
                         .filter(|a| a.kind() == "string")
                     {
-                        push(&mut out, string_body(s), ImportKind::Specifier, source);
+                        if let Some(l) = link(string_body(s), ImportKind::Specifier) {
+                            out.push((l, Vec::new()));
+                        }
                     }
                 }
             }
-            // Python: `import a.b, c` — each dotted/aliased name.
+            // Python: `import a.b, c` — each dotted/aliased name. `import a.b`
+            // binds `a` (the first segment); an alias binds the alias.
             (Lang::Python, "import_statement") => {
                 for i in 0..node.named_child_count() {
                     let Some(c) = node.named_child(i) else {
                         continue;
                     };
-                    let name = match c.kind() {
-                        "dotted_name" => Some(c),
-                        "aliased_import" => c.child_by_field_name("name"),
-                        _ => None,
+                    let (name, bound) = match c.kind() {
+                        "dotted_name" => {
+                            let first = c.named_child(0).map(text);
+                            (Some(c), first)
+                        }
+                        "aliased_import" => (
+                            c.child_by_field_name("name"),
+                            c.child_by_field_name("alias").map(text),
+                        ),
+                        _ => (None, None),
                     };
                     if let Some(n) = name {
-                        push(&mut out, n, ImportKind::Specifier, source);
+                        if let Some(l) = link(n, ImportKind::Specifier) {
+                            out.push((l, bound.into_iter().collect()));
+                        }
                     }
                 }
             }
-            // Python: `from a.b import c` / `from .rel import d`.
+            // Python: `from a.b import c as d, e` — binds d + e against the module.
             (Lang::Python, "import_from_statement") => {
                 if let Some(m) = node.child_by_field_name("module_name") {
-                    push(&mut out, m, ImportKind::Specifier, source);
+                    if let Some(l) = link(m, ImportKind::Specifier) {
+                        let mut names = Vec::new();
+                        let mut w = node.walk();
+                        for c in node.children_by_field_name("name", &mut w) {
+                            match c.kind() {
+                                "dotted_name" => {
+                                    if let Some(f) = c.named_child(0) {
+                                        names.push(text(f));
+                                    }
+                                }
+                                "aliased_import" => {
+                                    if let Some(a) = c.child_by_field_name("alias") {
+                                        names.push(text(a));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        out.push((l, names));
+                    }
                 }
             }
             _ => {}
@@ -969,7 +1086,139 @@ pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
             }
         }
     }
-    out.sort_by_key(|l| l.range.start);
+    out.sort_by_key(|(l, _)| l.range.start);
+    out
+}
+
+/// Definition sites in `source` as `(name, byte range of the name)`, sorted by
+/// position — the go-to-definition index behind ⌘-clicking a variable/type.
+/// Covers the declaration forms of the supported languages (Rust items +
+/// `let`/params, TS/JS declarations + declarators/params/methods, Python
+/// `def`/`class`/assignments/params); other languages return no sites.
+///
+/// ```
+/// use kyde_syntax::{definition_sites, Lang};
+/// let sites = definition_sites("const foo = 1;\n", Lang::Ts);
+/// assert_eq!(sites.len(), 1);
+/// assert_eq!(sites[0].0, "foo");
+/// ```
+#[must_use]
+pub fn definition_sites(source: &str, lang: Lang) -> Vec<(String, std::ops::Range<usize>)> {
+    if !matches!(
+        lang,
+        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python
+    ) {
+        return Vec::new();
+    }
+    let Some(grammar) = lang.grammar() else {
+        return Vec::new();
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, std::ops::Range<usize>)> = Vec::new();
+    let push = |out: &mut Vec<(String, std::ops::Range<usize>)>, n: tree_sitter::Node| {
+        if let Some(t) = source.get(n.byte_range()) {
+            if !t.is_empty() {
+                out.push((t.to_string(), n.byte_range()));
+            }
+        }
+    };
+    // Collect the bound identifiers inside a (possibly destructuring) pattern.
+    // Property KEYS are `property_identifier`/`field_identifier` nodes, not
+    // `identifier`, so walking for identifiers never picks up map keys.
+    let bind_pattern = |out: &mut Vec<(String, std::ops::Range<usize>)>, p: tree_sitter::Node| {
+        let mut st = vec![p];
+        while let Some(n) = st.pop() {
+            match n.kind() {
+                "identifier" | "shorthand_property_identifier_pattern" => push(out, n),
+                _ => {
+                    for i in 0..n.named_child_count() {
+                        if let Some(c) = n.named_child(i) {
+                            st.push(c);
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        match (lang, node.kind()) {
+            // Rust items — the `name` field is the definition site.
+            (
+                Lang::Rust,
+                "function_item" | "struct_item" | "enum_item" | "union_item" | "trait_item"
+                | "type_item" | "const_item" | "static_item" | "mod_item" | "macro_definition",
+            )
+            | (
+                Lang::Ts | Lang::Tsx | Lang::Js,
+                "function_declaration"
+                | "generator_function_declaration"
+                | "class_declaration"
+                | "abstract_class_declaration"
+                | "interface_declaration"
+                | "type_alias_declaration"
+                | "enum_declaration"
+                | "method_definition",
+            )
+            | (Lang::Python, "function_definition" | "class_definition") => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    push(&mut out, name);
+                }
+            }
+            // Rust `let` bindings + parameters (incl. destructuring patterns).
+            (Lang::Rust, "let_declaration" | "parameter" | "for_expression") => {
+                if let Some(p) = node.child_by_field_name("pattern") {
+                    bind_pattern(&mut out, p);
+                }
+            }
+            (Lang::Rust, "closure_parameters") => bind_pattern(&mut out, node),
+            // TS/JS `const`/`let`/`var` declarators + parameters.
+            (Lang::Ts | Lang::Tsx | Lang::Js, "variable_declarator") => {
+                if let Some(n) = node.child_by_field_name("name") {
+                    bind_pattern(&mut out, n);
+                }
+            }
+            (Lang::Ts | Lang::Tsx | Lang::Js, "required_parameter" | "optional_parameter") => {
+                if let Some(p) = node.child_by_field_name("pattern") {
+                    bind_pattern(&mut out, p);
+                }
+            }
+            // `x => …` — the bare arrow parameter is a plain identifier.
+            (Lang::Ts | Lang::Tsx | Lang::Js, "arrow_function") => {
+                if let Some(p) = node
+                    .child_by_field_name("parameter")
+                    .filter(|p| p.kind() == "identifier")
+                {
+                    push(&mut out, p);
+                }
+            }
+            // Python assignments, parameters, and `for` targets.
+            (Lang::Python, "assignment") => {
+                if let Some(l) = node.child_by_field_name("left") {
+                    bind_pattern(&mut out, l);
+                }
+            }
+            (Lang::Python, "parameters") => bind_pattern(&mut out, node),
+            (Lang::Python, "for_statement") => {
+                if let Some(l) = node.child_by_field_name("left") {
+                    bind_pattern(&mut out, l);
+                }
+            }
+            _ => {}
+        }
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out.sort_by_key(|(_, r)| r.start);
     out
 }
 
@@ -1587,6 +1836,107 @@ mod tests {
             resolve_import(&links[4], Lang::Rust, &cur, &files),
             Some(pb("src/util/mod.rs")),
             "use list prefix → module dir"
+        );
+    }
+
+    #[test]
+    fn definition_sites_cover_declaration_forms() {
+        // Rust: items, let patterns, params.
+        let rs = "fn hello(count: i32) {\n    let (a, b) = (1, 2);\n}\nstruct Thing;\nconst MAX: u32 = 9;\n";
+        let sites = definition_sites(rs, Lang::Rust);
+        let names: Vec<&str> = sites.iter().map(|(n, _)| n.as_str()).collect();
+        for want in ["hello", "count", "a", "b", "Thing", "MAX"] {
+            assert!(names.contains(&want), "Rust missing {want}: {names:?}");
+        }
+        // Ranges point at the NAME text.
+        for (n, r) in definition_sites(rs, Lang::Rust) {
+            assert_eq!(&rs[r], n);
+        }
+        // Python: def/class/assignment/params/for.
+        let py = "class Cat:\n    def meow(self, times):\n        volume = times\n";
+        let names: Vec<String> = definition_sites(py, Lang::Python)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for want in ["Cat", "meow", "self", "times", "volume"] {
+            assert!(names.iter().any(|n| n == want), "Py missing {want}");
+        }
+        // Unsupported langs → empty.
+        assert!(definition_sites("a = 1", Lang::Yaml).is_empty());
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn definition_sites_ts_declarators_params_methods() {
+        let ts = "const { a, b: renamed } = obj;\nfunction go(x: number) {}\nclass K { run() {} }\nconst f = (y) => y;\ntype Alias = string;\n";
+        let names: Vec<String> = definition_sites(ts, Lang::Ts)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        for want in ["a", "renamed", "go", "x", "K", "run", "f", "y", "Alias"] {
+            assert!(
+                names.iter().any(|n| n == want),
+                "TS missing {want}: {names:?}"
+            );
+        }
+        // Destructuring KEYS are not definitions (only bound values).
+        assert!(!names.iter().any(|n| n == "b"), "key `b` must not bind");
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn import_bindings_map_names_to_their_links() {
+        let ts = "import Def, { a, b as c } from './x';\nimport * as ns from './y';\n";
+        let binds = import_bindings(ts, Lang::Ts);
+        let names: Vec<&str> = binds.iter().map(|(n, _)| n.as_str()).collect();
+        for want in ["Def", "a", "c", "ns"] {
+            assert!(
+                names.contains(&want),
+                "TS binding missing {want}: {names:?}"
+            );
+        }
+        assert!(!names.contains(&"b"), "`b as c` binds c, not b");
+        assert!(binds
+            .iter()
+            .all(|(n, l)| { (l.target == "./x") == ["Def", "a", "c"].contains(&n.as_str()) }));
+
+        let rs = "use crate::views::browse;\nuse crate::util::{a, b as c};\nmod widgets;\n";
+        let binds = import_bindings(rs, Lang::Rust);
+        let names: Vec<&str> = binds.iter().map(|(n, _)| n.as_str()).collect();
+        for want in ["browse", "a", "c", "widgets"] {
+            assert!(
+                names.contains(&want),
+                "Rust binding missing {want}: {names:?}"
+            );
+        }
+
+        let py = "import os.path\nfrom pkg.mod import thing as t, other\n";
+        let binds = import_bindings(py, Lang::Python);
+        let names: Vec<&str> = binds.iter().map(|(n, _)| n.as_str()).collect();
+        for want in ["os", "t", "other"] {
+            assert!(
+                names.contains(&want),
+                "Py binding missing {want}: {names:?}"
+            );
+        }
+    }
+
+    /// Performance regression guard — see CLAUDE.md "Performance regression tests".
+    /// `definition_sites` + `import_bindings` recompute per keystroke alongside
+    /// `import_links` when a pack's ⌘-click navigation is on.
+    #[test]
+    fn perf_definition_sites_large_file_stays_fast() {
+        let unit =
+            "fn f(x: i32) -> i32 {\n    let y = x + 1;\n    y * 2\n}\nuse crate::views::browse;\n";
+        let src = unit.repeat(1200); // ~6000 lines
+        let start = std::time::Instant::now();
+        let defs = definition_sites(&src, Lang::Rust);
+        let binds = import_bindings(&src, Lang::Rust);
+        let elapsed = start.elapsed();
+        assert!(!defs.is_empty() && !binds.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "definition_sites+bindings on ~6000 lines took {elapsed:?} (budget 2s)"
         );
     }
 

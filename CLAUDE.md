@@ -518,28 +518,55 @@ CVD variants ride the conflict accent) — the squiggle paints inside the normal
 appear wherever the editor's flag is on (Browse; diff/merge panes never set it).
 Debug shot: `KYDE_SHOT=error-highlight` + `KYDE_SHOT_FILE=<invalid .json>`.
 
-### ⌘-click imports (on by default per pack — issue #26)
-Hold ⌘ and hover an import → it underlines in the accent color with a pointer cursor;
-⌘-click opens the target file. ON by default for every installed pack that supports it
-(Rust, TypeScript/TSX, JavaScript, Python), per-pack opt-OUT via the "⌘-click imports"
-checkbox on the pack's row (persisted as `links_disabled` in plugins.json,
-`Plugins::links_on/set_links` — same model as error highlighting). Pipeline:
-`kyde_syntax::import_links(source, lang)` (pure — Rust `mod x;`/`use` paths incl.
-wildcards + `as`, TS/JS `import`/`export from`/`require()`/dynamic `import()`, Python
-`import a.b`/`from .rel import c`; perf guard `perf_import_links_large_file_stays_fast`)
-→ cached on `CodeEditor.import_links`, recomputed with `spans` only when `links_on`
-(`set_link_navigation`, pushed by the app from `Kyde::links_enabled_for(lang)` at the
-same four sites as the error flag). The editor tracks ⌘ via `on_modifiers_changed`
-(`cmd_held`) and hover via `on_mouse_move` (`hover_link`); the hovered link underlines
-through `apply_underline_ranges` (the generalized run-splitter behind the error
-squiggles) and the div cursor flips to PointingHand. ⌘-click emits
-`EditorEvent::OpenImport(link)` → `Kyde::open_import_link` resolves it with
-`kyde_syntax::resolve_import` (pure: TS relative specifiers + extension/index
-candidates, Python dotted/relative → `x.py`/`__init__.py`, Rust `mod` → sibling and
-`crate::`/`super::`/`self::` → progressively-shorter `src/` paths; bare specifiers =
-external → `None`) against `browse.all_files` and opens the hit. Smoke test:
-`cmd_click_import_opens_the_target_file`. Debug shot: `KYDE_SHOT=imports`
-(`CodeEditor::force_link_hover` fakes the ⌘-hover).
+### ⌘-click navigation (on by default per pack — issue #26)
+Hold ⌘ and hover a NAVIGABLE thing → accent underline + pointer cursor; ⌘-click acts.
+Three targets (classified by `CodeEditor::symbol_at`, in priority order):
+1. **An import specifier** → opens the referenced file. `kyde_syntax::import_links`
+   (Rust `mod x;`/`use` paths incl. wildcards + `as`; TS/JS `import`/`export from`/
+   `require()`/dynamic `import()`; Python `import a.b`/`from .rel import c`) →
+   `EditorEvent::OpenImport` → `Kyde::open_import_link` → `kyde_syntax::resolve_import`
+   (pure: TS relative specifiers + extension/index candidates, Python dotted/relative →
+   `x.py`/`__init__.py`, Rust `mod` → sibling and `crate::`/`super::`/`self::` →
+   progressively-shorter `src/` paths; bare specifiers = external → `None`) against
+   `browse.all_files`.
+2. **A symbol defined in THIS buffer** (vars/types/fns — `kyde_syntax::definition_sites`:
+   Rust items + `let`/params/closures/for-patterns, TS/JS declarations + declarators/
+   params/methods/arrows, Python `def`/`class`/assignments/params/for) → the editor
+   jumps in place (`select_range`, reveals). Definitions shadow import bindings.
+3. **A use of an IMPORTED symbol** (`kyde_syntax::import_bindings` — Rust use
+   names/aliases/lists, TS default/named-`as`/namespace, Python module first-segments +
+   `from` names/aliases) → `EditorEvent::OpenSymbol{link,name}` →
+   `Kyde::open_import_symbol`: resolve the import's file, open it (new tab), find
+   `name` in ITS definition_sites, select it.
+ON by default for every installed pack that supports it (Rust, TS/TSX, JS, Python);
+per-pack opt-OUT via the "⌘-click imports" checkbox (persisted `links_disabled`,
+`Plugins::links_on/set_links` — the error-highlighting model). Editor caches
+(`import_links` + `import_bound` + `defs` = `compute_nav`) recompute with `spans` only
+when `links_on` (`set_link_navigation`, pushed from `Kyde::links_enabled_for` at the
+same four sites as the error flag); perf guards `perf_import_links_*` +
+`perf_definition_sites_*`. ⌘ state rides each mouse-move's OWN `modifiers` (a
+`ModifiersChanged` only reaches the editor via focus — unreliable on unfocused panes)
+AND `on_modifiers_changed` recomputes hover from `last_mouse`, so pressing ⌘ over a
+symbol lights it up without moving. Underline = `apply_underline_ranges` on
+`hover_range`. Smoke tests: `cmd_click_import_opens_the_target_file`,
+`cmd_click_symbol_jumps_to_its_definition`. Debug shot: `KYDE_SHOT=imports`
+(`force_link_hover`).
+
+### What "adding a language pack" MEANS (the per-language feature contract)
+A pack is not just colors. Wiring a new `Lang` into kyde-syntax involves up to FIVE
+per-language capabilities — implement what the grammar supports, and note the gaps:
+1. **Highlighting** (required): `config()` arm (grammar + highlight query + CAPTURES).
+2. **Folding** (free): `grammar()` arm — `fold_regions` works generically from it.
+3. **Error highlighting** (free): `error_ranges` works generically from `grammar()`.
+4. **⌘-click imports** (opt-in per lang): arms in `imports_with_bindings` (link + the
+   names it binds) + a `resolve_import` strategy for the language's module system +
+   the lang in `import_links`/`definition_sites`/`sort_object_keys` gate matches.
+5. **Definitions** (opt-in per lang): `definition_sites` arms for the language's
+   declaration forms (drives same-file jump + imported-symbol landing).
+Also: `Lang::from_path` extension mapping, `Lang::pack` id, `PACKS` entry behind the
+Cargo feature, `pack_ext`/`pack_size` in modals.rs, and tests for each capability
+added (the `every_lang_with_a_pack_actually_highlights` style). Langs 4+5 currently
+cover: Rust, TS/TSX, JS, Python. JSON additionally has `sort_object_keys` (with JS/TS).
 
 ### Two independent layers — Cargo features (build) vs install list (runtime)
 The plugin system is **two separate gates**, do not conflate them:

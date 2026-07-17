@@ -1032,4 +1032,38 @@ impl Kyde {
             self.open_file(target, cx);
         }
     }
+
+    /// ⌘-click on a USE of an imported symbol: open the import's file (a new
+    /// tab if not already open) and land the caret on `name`'s definition
+    /// there. No definition found (or unresolvable module) → the file still
+    /// opens (or nothing happens), never an error.
+    pub(crate) fn open_import_symbol(
+        &mut self,
+        link: highlight::ImportLink,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(cur) = self.browse.open_path.clone() else {
+            return;
+        };
+        let lang = self.browse.editor.read(cx).lang;
+        let Some(target) = highlight::resolve_import(&link, lang, &cur, &self.browse.all_files)
+        else {
+            return;
+        };
+        self.open_file(target.clone(), cx);
+        // The editor now holds the target file — find the symbol's definition in
+        // its (possibly PlainText-gated) effective language and select it.
+        let tl = self.effective_lang(&target);
+        let def = {
+            let ed = self.browse.editor.read(cx);
+            highlight::definition_sites(ed.text(), tl)
+                .into_iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, r)| r)
+        };
+        if let Some(r) = def {
+            self.browse.editor.update(cx, |e, cx| e.select_range(r, cx));
+        }
+    }
 }
