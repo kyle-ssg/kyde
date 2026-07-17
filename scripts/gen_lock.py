@@ -7,7 +7,7 @@ path is argv[1]; line target is argv[2] (optional)."""
 import json
 import sys
 
-out = sys.argv[1]d
+out = sys.argv[1]
 target_lines = int(sys.argv[2]) if len(sys.argv) > 2 else 37000
 
 # Each package entry is ~6 lines when pretty-printed at indent=2.
