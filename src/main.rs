@@ -2478,6 +2478,28 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 cx.notify();
             });
         }
+        // The tab strip with more tabs than fit — the active tab must be
+        // scrolled into view (strip overflows + scrolls; regression: the bar
+        // sized itself to content and no scroll ever applied).
+        "tab-scroll" => {
+            set_packs(view, &["rust"]);
+            for f in [
+                "src/main.rs",
+                "src/app.rs",
+                "src/render.rs",
+                "src/divider.rs",
+                "src/views/browse.rs",
+                "src/views/commit.rs",
+                "src/views/diff_view.rs",
+                "src/views/history.rs",
+                "src/views/merge.rs",
+                "src/views/compare.rs",
+                "src/views/finder.rs",
+                "src/views/tabs.rs",
+            ] {
+                view.open_file(PathBuf::from(f), cx);
+            }
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {

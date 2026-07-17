@@ -290,7 +290,7 @@ impl Kyde {
                 // edge — which is exactly where the tab-bar's trailing controls live, so the
                 // `▾` overflow button vanished once tabs/content got wide.
                 .min_w_0()
-                .child(self.render_tab_bar(ui, fs, cx));
+                .child(self.render_tab_bar(ui, fs, self.editor_island_w(window), cx));
             // Install banner only applies to text/code files, not image previews.
             if image.is_none() {
                 // Unresolved-conflict banner first — resolving beats installing a grammar.
@@ -907,6 +907,28 @@ impl Kyde {
             .and_then(|p| self.browse.open_tabs.iter().position(|t| t == p))
         {
             self.browse.tab_scroll.scroll_to_item(i);
+            // Re-issue once shortly after: a scroll requested BEFORE the strip's
+            // first paint (session restore, burst opens) gets consumed by gpui
+            // against a zeroed container-bounds snapshot and lands at offset 0.
+            // By the retry the strip has painted, so the request applies for real.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(60))
+                    .await;
+                this.update(cx, |k, cx| {
+                    let active = k
+                        .browse
+                        .open_path
+                        .as_ref()
+                        .and_then(|p| k.browse.open_tabs.iter().position(|t| t == p));
+                    if let Some(i) = active {
+                        k.browse.tab_scroll.scroll_to_item(i);
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
         }
         self.load_font_preview(cx);
     }
