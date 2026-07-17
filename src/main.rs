@@ -2322,6 +2322,15 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 .set_offset(gpui::point(px(0.0), px(-600.0 * editor::line_height_px())));
             cx.notify();
         }
+        // Browse an invalid JSON file (KYDE_SHOT_FILE) with the JSON pack installed →
+        // wavy red squiggles under the parse errors (error highlighting is on by
+        // default for installed packs).
+        "error-highlight" => {
+            set_packs(view, &["json"]);
+            if let Ok(f) = std::env::var("KYDE_SHOT_FILE") {
+                view.open_file(PathBuf::from(f), cx);
+            }
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {

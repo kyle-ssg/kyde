@@ -115,6 +115,11 @@ impl Element for EditorElement {
         let empty = editor.content.is_empty();
         // Cached on the editor (recomputed only on content change), not per paint.
         let spans: &[highlight::Span] = if empty { &[] } else { &editor.spans };
+        // Parse-error squiggles (empty unless the pack's opt-in is on — see
+        // `set_error_highlight`). Applied per visible row below, so off-screen
+        // rows never pay for the run splitting.
+        let errors: &[std::ops::Range<usize>] = if empty { &[] } else { &editor.error_ranges };
+        let error_color: Hsla = theme::get().syn_error.into();
 
         // Byte offset of every buffer line start — ONE pass over the content per frame.
         // (Previously the content was `split('\n')`-scanned 3-4× per frame — for a 37k-line
@@ -265,8 +270,13 @@ impl Element for EditorElement {
                         line_starts.push(start + seg);
                         visible_lines.push(b);
                         if on_screen(dr) {
-                            let s_runs =
-                                line_runs(seg_str, start + seg, spans, &font, default_color);
+                            let s_runs = apply_error_squiggles(
+                                line_runs(seg_str, start + seg, spans, &font, default_color),
+                                start + seg,
+                                seg_str.len(),
+                                errors,
+                                error_color,
+                            );
                             lines.insert(
                                 dr,
                                 window.text_system().shape_line(
@@ -288,7 +298,13 @@ impl Element for EditorElement {
                     gutter.push((dr, editor.folded.contains(&b)));
                 }
                 if on_screen(dr) {
-                    let runs = line_runs(line, start, spans, &font, default_color);
+                    let runs = apply_error_squiggles(
+                        line_runs(line, start, spans, &font, default_color),
+                        start,
+                        line.len(),
+                        errors,
+                        error_color,
+                    );
                     lines.insert(
                         dr,
                         window.text_system().shape_line(

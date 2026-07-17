@@ -798,8 +798,12 @@ impl Kyde {
                 String::new()
             };
             let lang = self.effective_lang(&rel);
+            let errs = self.errors_enabled_for(lang);
             self.browse.editor.update(cx, |e, cx| {
                 e.line_numbers = true;
+                // Flag first so `set_content`'s recompute already parses (or skips)
+                // errors for the new file's opt-in.
+                e.set_error_highlight(errs, cx);
                 e.set_content(content, lang, cx);
             });
             // Point the editor at whichever scroll container it renders in, so caret-follow

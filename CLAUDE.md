@@ -478,6 +478,27 @@ Shell (bash), CSS, SCSS (reuses CSS grammar), `.env`, `.gitignore`. `.env`/`.git
 use small builtin line highlighters (no grammar). tree-sitter core bumped to **0.25**
 because tree-sitter-md 0.5 emits grammar ABI 15 (0.24's highlighter caps at ABI 14).
 
+### Error highlighting (on by default per pack — issue #47)
+Wavy red squiggles under parse errors (tree-sitter `ERROR` + `MISSING` nodes), **ON by
+default for every installed pack**, with a per-pack opt-OUT: the "Error highlighting"
+checkbox on each installed pack's row in the Language Plugins window
+(`toggle_pack_errors`; hidden for "font" — not a language). Persisted as
+`errors_disabled` in plugins.json (`Plugins::errors_on/set_errors`; empty set — and any
+pre-existing plugins.json — means all on; uninstall drops the opt-out, so reinstall
+returns to default-on). Pipeline: `kyde_syntax::error_ranges(source, lang)` (pure —
+parses, prunes clean subtrees via `node.has_error()`, merges overlaps, widens
+zero-width MISSING to one char; perf guard `perf_error_ranges_large_files_stay_fast`)
+→ cached on `CodeEditor.error_ranges`, recomputed with `spans` in `recompute_folds`
+only when `errors_on` (`set_error_highlight`, set by the app from
+`Kyde::errors_enabled_for(lang)` on open/install/toggle — flag BEFORE
+`set_content`/`set_lang` so one recompute does the right thing) → element prepaint
+splits each visible row's `TextRun`s at error boundaries (`apply_error_squiggles`,
+pure + unit-tested) and sets `underline: wavy` in `theme.syn_error` (new palette key,
+CVD variants ride the conflict accent) — the squiggle paints inside the normal
+`ShapedLine` pass, so virtualization is free (off-screen rows never split). Squiggles
+appear wherever the editor's flag is on (Browse; diff/merge panes never set it).
+Debug shot: `KYDE_SHOT=error-highlight` + `KYDE_SHOT_FILE=<invalid .json>`.
+
 ### Two independent layers — Cargo features (build) vs install list (runtime)
 The plugin system is **two separate gates**, do not conflate them:
 - **Cargo features** (`Cargo.toml [features]`, one per pack: `rust`, `typescript`,

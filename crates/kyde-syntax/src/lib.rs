@@ -577,6 +577,83 @@ pub fn fold_regions(source: &str, lang: Lang) -> Vec<(usize, usize)> {
     out
 }
 
+/// Widen a zero-width range (a `MISSING` node) to cover one character so the UI
+/// has something to underline: the char at the position, or the one before it at
+/// end-of-source. Char-boundary safe; empty source stays empty.
+fn widen_if_empty(source: &str, r: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    if r.start < r.end {
+        return r;
+    }
+    let start = r.start.min(source.len());
+    if let Some(c) = source[start..].chars().next() {
+        return start..start + c.len_utf8();
+    }
+    let prev = source[..start]
+        .chars()
+        .next_back()
+        .map_or(start, |c| start - c.len_utf8());
+    prev..start
+}
+
+/// Byte ranges the parser could not make sense of: `ERROR` nodes (unparseable
+/// source) plus `MISSING` nodes (a required token the parser inserted to
+/// recover, e.g. an unclosed brace), sorted and merged. Empty when the source
+/// parses cleanly or the language has no compiled-in grammar (`PlainText`, the
+/// builtin line-highlighters, feature-trimmed builds). Zero-width `MISSING`
+/// ranges are widened to one character so a squiggle can always be drawn.
+///
+/// ```
+/// use kyde_syntax::{error_ranges, Lang};
+/// assert!(error_ranges("{\"a\": 1}", Lang::Json).is_empty());
+/// assert!(!error_ranges("{\"a\" 1}", Lang::Json).is_empty());
+/// assert!(error_ranges("anything at all", Lang::PlainText).is_empty());
+/// ```
+pub fn error_ranges(source: &str, lang: Lang) -> Vec<std::ops::Range<usize>> {
+    let Some(grammar) = lang.grammar() else {
+        return Vec::new();
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return Vec::new();
+    };
+    // Fast path: a clean parse (the overwhelmingly common case) never walks.
+    if !tree.root_node().has_error() {
+        return Vec::new();
+    }
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.is_error() || node.is_missing() {
+            // Children of an ERROR are partial re-parses of the broken region —
+            // one range covering the whole node is the honest report.
+            out.push(widen_if_empty(source, node.byte_range()));
+            continue;
+        }
+        // `has_error` is true iff an ERROR/MISSING exists in the subtree, so
+        // clean subtrees are pruned without visiting their children.
+        if !node.has_error() {
+            continue;
+        }
+        for i in 0..node.child_count() {
+            if let Some(c) = node.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.start.cmp(&b.start).then(a.end.cmp(&b.end)));
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for r in out {
+        match merged.last_mut() {
+            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
 /// Iterate `(byte_start, line)` over `source`, tracking byte offsets including '\n'.
 fn lines_with_offsets(source: &str) -> impl Iterator<Item = (usize, &str)> {
     let mut off = 0usize;
@@ -790,6 +867,64 @@ mod tests {
             .all(|&(s, e)| e > s));
         // no grammar → no folds
         assert!(fold_regions("a\nb\n", Lang::PlainText).is_empty());
+    }
+
+    #[test]
+    fn error_ranges_flags_invalid_source() {
+        // Extra comma is an ERROR node in the JSON grammar.
+        let bad = "{\"a\": 1,, \"b\": 2}";
+        let ranges = error_ranges(bad, Lang::Json);
+        assert!(!ranges.is_empty(), "invalid JSON produced no error ranges");
+        for r in &ranges {
+            assert!(r.start < r.end, "empty range {r:?}");
+            assert!(r.end <= bad.len(), "range {r:?} out of bounds");
+            assert!(
+                bad.is_char_boundary(r.start) && bad.is_char_boundary(r.end),
+                "range {r:?} splits a char"
+            );
+        }
+        // Clean parses stay empty.
+        assert!(error_ranges("{\"a\": 1}", Lang::Json).is_empty());
+        assert!(error_ranges("fn main() {}", Lang::Rust).is_empty());
+        // No grammar → no ranges, ever.
+        assert!(error_ranges("{{{{", Lang::PlainText).is_empty());
+        assert!(error_ranges("KEY=", Lang::Env).is_empty());
+    }
+
+    #[test]
+    fn error_ranges_widens_missing_at_eof() {
+        // Unclosed object → zero-width MISSING `}` at end-of-source, widened to
+        // cover the last character so the UI can draw a squiggle.
+        let src = "{\"a\": 1";
+        let ranges = error_ranges(src, Lang::Json);
+        assert!(!ranges.is_empty(), "unclosed JSON produced no error ranges");
+        assert!(ranges.iter().all(|r| r.start < r.end && r.end <= src.len()));
+        // Ranges are sorted and non-overlapping after the merge pass.
+        for w in ranges.windows(2) {
+            assert!(w[0].end <= w[1].start, "unmerged overlap: {ranges:?}");
+        }
+    }
+
+    /// Performance regression guard — see CLAUDE.md "Performance regression tests".
+    /// `error_ranges` runs on every keystroke (alongside `highlight` +
+    /// `fold_regions`) when a language's error highlighting is opted in, so it
+    /// must stay parse-speed. Two shapes: a big file with ONE error at the end
+    /// (the walk must prune clean subtrees, not visit ~4000 lines of nodes) and
+    /// an error-DENSE file (every statement broken — the walk visits everything).
+    #[test]
+    fn perf_error_ranges_large_files_stay_fast() {
+        let unit = "fn f(x: i32) -> i32 {\n    let y = x + 1;\n    y * 2\n}\n";
+        let mostly_clean = format!("{}fn broken(", unit.repeat(1000));
+        let error_dense = "let x = ;\n".repeat(4000);
+        let start = std::time::Instant::now();
+        let sparse = error_ranges(&mostly_clean, Lang::Rust);
+        let dense = error_ranges(&error_dense, Lang::Rust);
+        let elapsed = start.elapsed();
+        assert!(!sparse.is_empty() && !dense.is_empty());
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "error_ranges on ~4000-line files took {elapsed:?} (budget 2s) — perf regression?"
+        );
     }
 
     #[test]

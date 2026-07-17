@@ -555,6 +555,14 @@ impl Kyde {
         }
     }
 
+    /// Whether error highlighting (parse-error squiggles) is opted in for `lang`:
+    /// its pack installed AND the pack's error toggle on. `PlainText` and the
+    /// builtin line-highlighter langs have no pack → always false.
+    pub(crate) fn errors_enabled_for(&self, lang: Lang) -> bool {
+        lang.pack()
+            .is_some_and(|p| self.plugins.is_installed(p.id) && self.plugins.errors_on(p.id))
+    }
+
     /// Persist `rel`'s `text` to disk: through the repo's working tree in a git repo, else
     /// straight to disk under the project root (non-git Browse). Absolute paths (scratch
     /// files) write to themselves, since `join` keeps an absolute right-hand side. Returns
