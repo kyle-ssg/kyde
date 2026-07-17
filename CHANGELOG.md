@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [2.3.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.2.0...kyde-v2.3.0) (2026-07-17)
+
+
+### Features
+
+* ⌘-click imports to open the referenced file ([#52](https://github.com/kyle-ssg/kyde/issues/52)) ([9f818fa](https://github.com/kyle-ssg/kyde/commit/9f818fa8309dd5655332e20bbab31c82d1386649))
+* compare two files with a bidirectional apply gutter ([#42](https://github.com/kyle-ssg/kyde/issues/42)) ([#51](https://github.com/kyle-ssg/kyde/issues/51)) ([3d4c867](https://github.com/kyle-ssg/kyde/commit/3d4c86768ed4f9b9dc460fe58be77b1c71067dfc))
+* error highlighting — parse-error squiggles, on by default per pack ([#48](https://github.com/kyle-ssg/kyde/issues/48)) ([444dafd](https://github.com/kyle-ssg/kyde/commit/444dafdb1893d86034d75e517f905b49167da733))
+* Sort Lines + Sort Object Keys ([#50](https://github.com/kyle-ssg/kyde/issues/50)) ([3605506](https://github.com/kyle-ssg/kyde/commit/36055069824be62535dfd9f12a7a0d853e2e5c84))
+
 ## [2.2.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.1.0...kyde-v2.2.0) (2026-07-17)
 
 
