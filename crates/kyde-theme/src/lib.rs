@@ -151,6 +151,9 @@ pub struct Theme {
     /// Syntax colour for operators + punctuation.
     #[serde(with = "hex")]
     pub syn_operator: Rgba,
+    /// Squiggly-underline colour for parse errors (error highlighting).
+    #[serde(with = "hex")]
+    pub syn_error: Rgba,
 
     // Font sizes (px). Not colours — plain numbers, hand-editable like the rest.
     /// Code surfaces: editor + diff panes + commit box.
@@ -278,6 +281,9 @@ fn apply_cvd(base: Theme, a: Cvd) -> Theme {
         syn_constant: base.text,
         syn_identifier: base.text,
         syn_operator: base.text,
+        // Error squiggle rides the conflict accent — same "needs attention" semantic,
+        // already tuned for the deficiency.
+        syn_error: c(a.conflict),
         ..base
     }
 }
@@ -333,6 +339,9 @@ impl Default for Theme {
             syn_constant: c(0xC77DBB),
             syn_identifier: c(0xD1D3D9),
             syn_operator: c(0xD1D3D9),
+            // Squiggle red — hotter than status_conflict so a parse error reads as
+            // "broken", not merely "conflicted".
+            syn_error: c(0xF75464),
 
             editor_font_size: 14.0,
             ui_font_size: 13.0,
@@ -399,6 +408,7 @@ impl Theme {
             syn_constant: c(0xA42F89),
             syn_identifier: c(0x1D1D1F),
             syn_operator: c(0x1D1D1F),
+            syn_error: c(0xD70015), // danger900, same family as status_conflict
 
             // Sizes inherited from the dark default; callers preserve the user's live values.
             editor_font_size: 14.0,

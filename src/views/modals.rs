@@ -157,6 +157,30 @@ impl Kyde {
                                     .child(SharedString::from(pack_size(p.id))),
                             ),
                     )
+                    // Per-pack error-highlighting opt-in — only meaningful once the
+                    // grammar is active ("font" isn't a language, no parse to check).
+                    .when(installed && id != "font", |row| {
+                        let errs_on = self.plugins.errors_on(id);
+                        row.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .flex_none()
+                                .cursor_pointer()
+                                .text_size(px(11.0))
+                                .text_color(t.secondary_text)
+                                .child(checkbox_box(errs_on))
+                                .child("Error highlighting")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e, _w, cx| {
+                                        this.toggle_pack_errors(id, cx);
+                                    }),
+                                ),
+                        )
+                    })
                     .child(btn)
                     .into_any_element()
             })
@@ -545,7 +569,11 @@ impl Kyde {
             self.plugins.save();
             // Re-highlight in place so the colors appear immediately — previously this only
             // set the lang, leaving the cached (plain) spans until the file was reopened.
-            self.browse.editor.update(cx, |e, cx| e.set_lang(lang, cx));
+            let errs = self.errors_enabled_for(lang);
+            self.browse.editor.update(cx, |e, cx| {
+                e.set_error_highlight(errs, cx);
+                e.set_lang(lang, cx);
+            });
         }
     }
 
@@ -595,7 +623,11 @@ impl Kyde {
             self.load_font_preview(cx);
         } else if let Some(rel) = self.browse.open_path.clone() {
             let eff = self.effective_lang(&rel);
-            self.browse.editor.update(cx, |e, cx| e.set_lang(eff, cx));
+            let errs = self.errors_enabled_for(eff);
+            self.browse.editor.update(cx, |e, cx| {
+                e.set_error_highlight(errs, cx);
+                e.set_lang(eff, cx);
+            });
         }
         cx.notify();
     }
@@ -614,7 +646,29 @@ impl Kyde {
             let lang = Lang::from_path(&rel);
             if lang.pack().map(|p| p.id) == Some(pack_id) {
                 let eff = self.effective_lang(&rel);
-                self.browse.editor.update(cx, |e, cx| e.set_lang(eff, cx));
+                let errs = self.errors_enabled_for(eff);
+                self.browse.editor.update(cx, |e, cx| {
+                    e.set_error_highlight(errs, cx);
+                    e.set_lang(eff, cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle a pack's error-highlighting opt-in (the second gate on top of
+    /// installed), persist it, and re-run the open file's error pass in place
+    /// so squiggles appear/clear immediately.
+    pub(crate) fn toggle_pack_errors(&mut self, pack_id: &str, cx: &mut Context<Self>) {
+        let on = !self.plugins.errors_on(pack_id);
+        self.plugins.set_errors(pack_id, on);
+        self.plugins.save();
+        if let Some(rel) = self.browse.open_path.clone() {
+            let eff = self.effective_lang(&rel);
+            if eff.pack().map(|p| p.id) == Some(pack_id) {
+                self.browse
+                    .editor
+                    .update(cx, |e, cx| e.set_error_highlight(on, cx));
             }
         }
         cx.notify();

@@ -16,7 +16,7 @@ use gpui::{
     ElementId, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
     Focusable, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollHandle, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, Window,
+    UTF16Selection, UnderlineStyle, Window,
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -187,6 +187,13 @@ pub struct CodeEditor {
     /// change (in `recompute_folds`) — NOT per paint. This is the big-file win:
     /// scrolling/caret-moving no longer re-highlights the entire file each frame.
     spans: Vec<highlight::Span>,
+    /// Cached parse-error byte ranges (sorted, non-overlapping), recomputed with
+    /// `spans` — but ONLY when `errors_on`; empty otherwise, so editors without
+    /// the opt-in never pay the extra parse.
+    error_ranges: Vec<Range<usize>>,
+    /// Error highlighting opt-in for this editor's language (set by the app from
+    /// the pack's plugins.json toggle; default off).
+    errors_on: bool,
     /// Longest line length in bytes (recomputed on content change) — drives the element's
     /// content width so long lines scroll horizontally instead of clipping.
     max_line_len: usize,
@@ -305,6 +312,8 @@ impl CodeEditor {
             foldable_starts: HashSet::new(),
             compute_gen: 0,
             spans: Vec::new(),
+            error_ranges: Vec::new(),
+            errors_on: false,
             max_line_len: 0,
             line_layouts: HashMap::new(),
             display_rows: 0,
@@ -446,6 +455,7 @@ impl CodeEditor {
     fn recompute_folds(&mut self, cx: &mut Context<Self>) {
         if self.single_line || self.content.is_empty() {
             self.spans = Vec::new();
+            self.error_ranges = Vec::new();
             self.foldable = Vec::new();
             self.foldable_starts.clear();
             self.max_line_len = 0;
@@ -460,27 +470,42 @@ impl CodeEditor {
         // whole-file tree-sitter parse never blocks the UI (Zed-style async highlighting).
         let lines = self.content.bytes().filter(|&b| b == b'\n').count();
         const ASYNC_THRESHOLD: usize = 4000;
+        // Bump the generation on EVERY recompute (not just async ones) so a pending
+        // big-file background job can never land its stale spans on content that was
+        // since replaced via the inline path (big file → small file open).
+        self.compute_gen = self.compute_gen.wrapping_add(1);
         if lines < ASYNC_THRESHOLD {
             self.spans = highlight::highlight(&self.content, self.lang);
+            self.error_ranges = if self.errors_on {
+                highlight::error_ranges(&self.content, self.lang)
+            } else {
+                Vec::new()
+            };
             self.foldable = highlight::fold_regions(&self.content, self.lang);
             self.foldable_starts = self.foldable.iter().map(|r| r.0).collect();
             self.folded.retain(|l| self.foldable_starts.contains(l));
             return;
         }
         self.spans = Vec::new();
+        self.error_ranges = Vec::new();
         self.foldable = Vec::new();
         self.foldable_starts.clear();
-        self.compute_gen = self.compute_gen.wrapping_add(1);
         let gen = self.compute_gen;
         let content = self.content.clone();
         let lang = self.lang;
+        let errors_on = self.errors_on;
         cx.spawn(async move |this, cx| {
-            let (spans, foldable) = cx
+            let (spans, foldable, errors) = cx
                 .background_executor()
                 .spawn(async move {
                     (
                         highlight::highlight(&content, lang),
                         highlight::fold_regions(&content, lang),
+                        if errors_on {
+                            highlight::error_ranges(&content, lang)
+                        } else {
+                            Vec::new()
+                        },
                     )
                 })
                 .await;
@@ -488,6 +513,7 @@ impl CodeEditor {
                 if ed.compute_gen == gen {
                     // Still the current content → apply the highlight + folds.
                     ed.spans = spans;
+                    ed.error_ranges = errors;
                     ed.foldable_starts = foldable.iter().map(|r| r.0).collect();
                     ed.foldable = foldable;
                     ed.folded.retain(|l| ed.foldable_starts.contains(l));
@@ -497,6 +523,18 @@ impl CodeEditor {
             .ok();
         })
         .detach();
+    }
+
+    /// Toggle error highlighting (wavy squiggles under parse errors) for this
+    /// editor. The app derives `on` from the language pack's plugins.json opt-in;
+    /// idempotent, recomputes the cached ranges only when the flag flips.
+    pub fn set_error_highlight(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.errors_on == on {
+            return;
+        }
+        self.errors_on = on;
+        self.recompute_folds(cx);
+        cx.notify();
     }
 
     /// (Re)start the caret blink: show it now and bump the epoch so any prior blink loop exits,
@@ -1541,6 +1579,73 @@ pub fn line_runs(
     runs
 }
 
+/// Split `runs` (built by [`line_runs`] for the line at `line_start..line_start+line_len`)
+/// at error-range boundaries and give the error pieces a wavy underline — the
+/// squiggle then rides the normal `ShapedLine` paint, so virtualization is free
+/// (only visible rows are ever shaped). `errors` are whole-buffer byte ranges,
+/// sorted + non-overlapping (`highlight::error_ranges` guarantees both). Total
+/// run length is preserved, so shaping/metrics are unaffected.
+fn apply_error_squiggles(
+    runs: Vec<TextRun>,
+    line_start: usize,
+    line_len: usize,
+    errors: &[Range<usize>],
+    color: Hsla,
+) -> Vec<TextRun> {
+    let line_end = line_start + line_len;
+    // Binary-search the first error reaching this line (same trick as `line_runs`),
+    // then clamp the overlapping ones to line-local offsets.
+    let first = errors.partition_point(|r| r.end <= line_start);
+    let mut local: Vec<(usize, usize)> = Vec::new();
+    for r in &errors[first..] {
+        if r.start >= line_end {
+            break;
+        }
+        local.push((
+            r.start.max(line_start) - line_start,
+            r.end.min(line_end) - line_start,
+        ));
+    }
+    if local.is_empty() {
+        return runs;
+    }
+    let squiggle = UnderlineStyle {
+        thickness: px(1.0),
+        color: Some(color),
+        wavy: true,
+    };
+    let mut out: Vec<TextRun> = Vec::with_capacity(runs.len() + local.len() * 2);
+    let mut pos = 0usize; // line-local byte cursor
+    let mut li = 0usize; // index into `local` (monotonic — both walks are in order)
+    for run in runs {
+        let end = pos + run.len;
+        if run.len == 0 {
+            out.push(run); // preserve the empty-line sentinel run
+            continue;
+        }
+        let mut cur = pos;
+        while cur < end {
+            while li < local.len() && local[li].1 <= cur {
+                li += 1;
+            }
+            let (boundary, in_err) = match local.get(li) {
+                Some(&(es, ee)) if cur >= es => (ee.min(end), true),
+                Some(&(es, _)) => (es.min(end), false),
+                None => (end, false),
+            };
+            let mut piece = run.clone();
+            piece.len = boundary - cur;
+            if in_err {
+                piece.underline = Some(squiggle);
+            }
+            out.push(piece);
+            cur = boundary;
+        }
+        pos = end;
+    }
+    out
+}
+
 // ── fold mapping (pure, unit-testable — no gpui) ───────────────────
 // These operate only on the editor's data (`content` + `folded` set + `foldable`
 // regions), so the index arithmetic that drives the fold display can be tested
@@ -1780,6 +1885,109 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "line_runs scanned linearly? {elapsed:?} for 200 frames × 60 rows over 200k spans"
         );
+    }
+
+    fn tfont() -> gpui::Font {
+        gpui::Font {
+            family: "monospace".into(),
+            features: Default::default(),
+            fallbacks: None,
+            weight: Default::default(),
+            style: Default::default(),
+        }
+    }
+
+    #[test]
+    fn error_squiggles_underline_exactly_the_error_bytes() {
+        let font = tfont();
+        let red: Hsla = gpui::rgb(0xff0000).into();
+        // One colored span (local 0..3) so the error range 2..5 crosses a run boundary.
+        let spans = vec![highlight::Span {
+            start: 100,
+            end: 103,
+            color: kyde_color::Color::rgb(0x00ff00),
+        }];
+        let line = "abcdefgh"; // line_start 100, len 8
+        let runs = line_runs(line, 100, &spans, &font, gpui::rgb(0xffffff).into());
+        let out = apply_error_squiggles(
+            runs,
+            100,
+            line.len(),
+            std::slice::from_ref(&(102..105)),
+            red,
+        );
+        // Total length preserved (shaping depends on it).
+        assert_eq!(out.iter().map(|r| r.len).sum::<usize>(), line.len());
+        // Underlined pieces cover exactly local bytes 2..5.
+        let mut pos = 0usize;
+        let mut underlined: Vec<(usize, usize)> = Vec::new();
+        for r in &out {
+            if let Some(u) = &r.underline {
+                assert!(u.wavy, "squiggle must be wavy");
+                assert_eq!(u.color, Some(red));
+                underlined.push((pos, pos + r.len));
+            }
+            pos += r.len;
+        }
+        assert_eq!(
+            underlined,
+            vec![(2, 3), (3, 5)],
+            "split at the span boundary"
+        );
+        // The colored piece keeps its syntax color under the squiggle.
+        assert_eq!(out.iter().filter(|r| r.underline.is_some()).count(), 2);
+    }
+
+    #[test]
+    fn error_squiggles_none_in_line_leaves_runs_untouched() {
+        let font = tfont();
+        let runs = line_runs("hello", 0, &[], &font, gpui::rgb(0xffffff).into());
+        let n = runs.len();
+        // Error entirely on a later line → unchanged (and no split allocations).
+        let out = apply_error_squiggles(
+            runs,
+            0,
+            5,
+            std::slice::from_ref(&(40..44)),
+            gpui::rgb(0xff0000).into(),
+        );
+        assert_eq!(out.len(), n);
+        assert!(out.iter().all(|r| r.underline.is_none()));
+    }
+
+    #[test]
+    fn error_squiggles_keep_empty_line_sentinel() {
+        let font = tfont();
+        // Empty line → line_runs emits the single zero-len sentinel run.
+        let runs = line_runs("", 10, &[], &font, gpui::rgb(0xffffff).into());
+        // A multi-line error range crossing the empty line clamps to zero width here.
+        let out = apply_error_squiggles(
+            runs,
+            10,
+            0,
+            std::slice::from_ref(&(9..12)),
+            gpui::rgb(0xff0000).into(),
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len, 0);
+        assert!(out[0].underline.is_none());
+    }
+
+    #[test]
+    fn error_squiggles_cover_a_whole_line_of_a_multiline_error() {
+        let font = tfont();
+        let line = "broken";
+        let runs = line_runs(line, 20, &[], &font, gpui::rgb(0xffffff).into());
+        // Error spans lines 18..40 — every byte of this line squiggles.
+        let out = apply_error_squiggles(
+            runs,
+            20,
+            line.len(),
+            std::slice::from_ref(&(18..40)),
+            gpui::rgb(0xff0000).into(),
+        );
+        assert_eq!(out.iter().map(|r| r.len).sum::<usize>(), line.len());
+        assert!(out.iter().all(|r| r.underline.is_some()));
     }
 
     #[test]

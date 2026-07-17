@@ -14,6 +14,10 @@ pub struct Plugins {
     /// Set of installed pack ids (see `highlight::PACKS`).
     #[serde(default)]
     installed: BTreeSet<String>,
+    /// Pack ids with error highlighting opted in (a second gate on top of
+    /// `installed`: the pack's parse already runs, this adds the error walk).
+    #[serde(default)]
+    errors_enabled: BTreeSet<String>,
 }
 
 impl Plugins {
@@ -29,8 +33,25 @@ impl Plugins {
 
     /// Remove a pack from the installed set (its grammar is still compiled in, but the
     /// editor falls back to `PlainText` for that language until re-installed).
+    /// Also drops the pack's error-highlighting opt-in.
     pub fn uninstall(&mut self, pack_id: &str) {
         self.installed.remove(pack_id);
+        self.errors_enabled.remove(pack_id);
+    }
+
+    /// Whether error highlighting is opted in for `pack_id`. Only meaningful when
+    /// the pack is installed — callers gate on `is_installed` first.
+    pub fn errors_on(&self, pack_id: &str) -> bool {
+        self.errors_enabled.contains(pack_id)
+    }
+
+    /// Turn error highlighting on/off for `pack_id` (opt-in, default off).
+    pub fn set_errors(&mut self, pack_id: &str, on: bool) {
+        if on {
+            self.errors_enabled.insert(pack_id.to_string());
+        } else {
+            self.errors_enabled.remove(pack_id);
+        }
     }
 
     // ── persistence ───────────────────────────────────────────────
@@ -69,5 +90,25 @@ mod tests {
         let back: Plugins = serde_json::from_str(&json).unwrap();
         assert!(back.is_installed("json"));
         assert!(!back.is_installed("rust"));
+    }
+
+    #[test]
+    fn errors_opt_in_round_trips_and_defaults_off() {
+        let mut p = Plugins::default();
+        p.install("json");
+        assert!(!p.errors_on("json"), "error highlighting must default OFF");
+        p.set_errors("json", true);
+        assert!(p.errors_on("json"));
+        let back: Plugins = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert!(back.errors_on("json"));
+        // Old plugins.json without the field still parses (serde default).
+        let old: Plugins = serde_json::from_str(r#"{"installed":["json"]}"#).unwrap();
+        assert!(old.is_installed("json") && !old.errors_on("json"));
+        // Uninstall drops the opt-in too.
+        let mut q = p.clone();
+        q.uninstall("json");
+        assert!(!q.errors_on("json"));
+        q.install("json");
+        assert!(!q.errors_on("json"), "reinstall must not resurrect opt-in");
     }
 }
