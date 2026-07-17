@@ -2918,6 +2918,18 @@ mod gpui_smoke_tests {
                     k.browse.editor.read(cx).text(),
                     "{\n  \"a\": 2,\n  \"b\": 1\n}"
                 );
+                // "Sort Lines" with the selection inside a JSON object delegates to
+                // the key sort (#43) — a textual line sort would strand the commas.
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_content("{\n  \"b\": 1,\n  \"a\": 2\n}".into(), Lang::Json, cx);
+                    e.select_range(2..20, cx);
+                });
+                k.sort_selected_lines(cx);
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "{\n  \"a\": 2,\n  \"b\": 1\n}",
+                    "line sort inside an object must key-sort, not text-sort"
+                );
                 // Guard: outside Browse the ops are inert.
                 k.mode = Mode::Commit;
                 k.browse

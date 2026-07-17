@@ -552,8 +552,12 @@ Launch: `kyde` shell function in `~/.zshrc` runs the newest of
 
 ## Sort ops (issues #43/#41 — Sort Lines + Sort Object Keys)
 Right-clicking the editor pane (the `MenuTarget::EditorGit` menu) offers, above the git
-commands: **Sort Lines** when the selection spans ≥2 lines, and **Sort Object Keys** when
-the caret sits in a JSON/JS/TS object literal. Availability is computed at MENU-OPEN in
+commands: **Sort Lines** when the selection spans ≥2 lines OR the caret sits in a
+JSON/JS/TS object, and **Sort Object Keys** when the caret sits in such an object.
+**Inside an object, Sort Lines DELEGATES to the key sort** (`object_sort`, issue #43's
+"within a JSON object it should just sort json") — a textual line sort there would move
+entries without their commas and break the syntax, so the textual path never runs when
+an object encloses the caret (even an already-sorted one). Availability is computed at MENU-OPEN in
 browse.rs (never in the render arm — an open menu must not re-parse per frame) and rides
 two bools on the `EditorGit` variant; the right-click first moves the caret under the
 pointer via `CodeEditor::caret_to` (kept if clicking inside the selection — IDE

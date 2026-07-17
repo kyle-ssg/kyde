@@ -267,11 +267,14 @@ impl Kyde {
                             let (lines, keys) = {
                                 let ed = this.browse.editor.read(cx);
                                 let sel = ed.selection();
-                                (
-                                    editor::sort_lines_in(ed.text(), sel.clone()).is_some(),
+                                let keys =
                                     highlight::sort_object_keys(ed.text(), ed.lang, sel.start)
-                                        .is_some(),
-                                )
+                                        .is_some();
+                                // Sort Lines also shows inside an object — there it
+                                // delegates to the key sort (issue #43).
+                                let lines =
+                                    keys || editor::sort_lines_in(ed.text(), sel.clone()).is_some();
+                                (lines, keys)
                             };
                             this.open_menu(e.position, MenuTarget::EditorGit(p, lines, keys), cx);
                         }
@@ -907,11 +910,17 @@ impl Kyde {
     }
 
     // ── sort ops (issues #43 / #41) ───────────────────────────────
-    /// Sort the Browse editor's selected lines alphabetically (undo-recorded via
-    /// `replace_range_text`; the sorted block stays selected). No-op outside
-    /// Browse, with no file open, or with fewer than two lines selected.
+    /// Sort the Browse editor's selected lines alphabetically — but inside a
+    /// JSON/JS/TS object "sort lines" MEANS "sort this object's keys" (issue
+    /// #43): a textual line sort there would move entries without their commas
+    /// and break the syntax, so it delegates to the key sort. Undo-recorded via
+    /// `replace_range_text`; the sorted block stays selected. No-op outside
+    /// Browse, with no file open, or (textual path) under two selected lines.
     pub(crate) fn sort_selected_lines(&mut self, cx: &mut Context<Self>) {
         if self.mode != Mode::Browse || self.browse.open_path.is_none() {
+            return;
+        }
+        if self.object_sort(cx) {
             return;
         }
         let Some((r, sorted)) = ({
@@ -937,20 +946,28 @@ impl Kyde {
         if self.mode != Mode::Browse || self.browse.open_path.is_none() {
             return;
         }
+        self.object_sort(cx);
+    }
+
+    /// Key-sort the object at the caret if there is one. Returns whether an
+    /// object was FOUND — found-but-already-sorted still counts, so
+    /// `sort_selected_lines` never falls back to a syntax-breaking textual sort
+    /// inside JSON/JS.
+    fn object_sort(&mut self, cx: &mut Context<Self>) -> bool {
         let Some((r, text)) = ({
             let ed = self.browse.editor.read(cx);
             highlight::sort_object_keys(ed.text(), ed.lang, ed.selection().start)
         }) else {
-            return;
+            return false;
         };
-        if self.browse.editor.read(cx).text()[r.clone()] == text {
-            return;
+        if self.browse.editor.read(cx).text()[r.clone()] != text {
+            self.browse.editor.update(cx, |e, cx| {
+                let end = r.start + text.len();
+                e.replace_range_text(r.clone(), &text, cx);
+                e.select_range(r.start..end, cx);
+            });
         }
-        self.browse.editor.update(cx, |e, cx| {
-            let end = r.start + text.len();
-            e.replace_range_text(r.clone(), &text, cx);
-            e.select_range(r.start..end, cx);
-        });
+        true
     }
 
     pub(crate) fn act_sort_lines(
