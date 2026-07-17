@@ -857,6 +857,10 @@ impl Kyde {
                 e.set_link_navigation(links, cx);
                 e.set_content(content, lang, cx);
             });
+            // New buffer → the previous file's imported-defs index is gone
+            // (set_content cleared it); force a fresh compute for this file.
+            self.browse.ext_defs_targets.clear();
+            self.refresh_external_defs(cx);
             // Point the editor at whichever scroll container it renders in, so caret-follow
             // and drag auto-scroll move the right one: the Markdown split uses
             // `md_editor_scroll`, plain Browse uses `file_scroll` (mirrors the `md` gate in
@@ -1031,6 +1035,97 @@ impl Kyde {
         if let Some(target) = highlight::resolve_import(&link, lang, &cur, &self.browse.all_files) {
             self.open_file(target, cx);
         }
+    }
+
+    /// ⌘-click on a symbol the external-defs index already resolved (a method
+    /// on an imported class): open the file and select the definition.
+    pub(crate) fn open_definition_at(
+        &mut self,
+        path: PathBuf,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_file(path, cx);
+        self.browse
+            .editor
+            .update(cx, |e, cx| e.select_range(range, cx));
+    }
+
+    /// (Re)build the imported-files definition index for the open buffer —
+    /// resolves each import to a project file, reads + indexes those files'
+    /// definitions IN THE BACKGROUND, and pushes the map into the editor
+    /// (`set_external_defs`). Skips recomputing when the buffer's import
+    /// target set hasn't changed. This is what lets ⌘-click resolve
+    /// `obj.method()` when the method lives with an imported class.
+    pub(crate) fn refresh_external_defs(&mut self, cx: &mut Context<Self>) {
+        let Some(cur) = self.browse.open_path.clone() else {
+            return;
+        };
+        let lang = self.effective_lang(&cur);
+        if !self.links_enabled_for(lang) {
+            return;
+        }
+        let targets = self.browse.editor.read(cx).import_targets();
+        if targets == self.browse.ext_defs_targets {
+            return; // same imports → index still valid
+        }
+        self.browse.ext_defs_targets = targets;
+        self.browse.ext_defs_gen = self.browse.ext_defs_gen.wrapping_add(1);
+        let gen = self.browse.ext_defs_gen;
+        // Resolve on the UI thread (cheap, needs all_files); read + parse the
+        // handful of target files on a background thread. Files are read from
+        // disk via the project root — kyde autosaves every edit, so disk is
+        // current.
+        let content = self.browse.editor.read(cx).text().to_string();
+        let files = self.browse.all_files.clone();
+        let root = self.repo_root.clone();
+        cx.spawn(async move |this, cx| {
+            let map = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut map: std::collections::HashMap<
+                        String,
+                        (PathBuf, std::ops::Range<usize>),
+                    > = std::collections::HashMap::new();
+                    let mut seen: std::collections::HashSet<PathBuf> =
+                        std::collections::HashSet::new();
+                    for link in highlight::import_links(&content, lang) {
+                        let Some(target) = highlight::resolve_import(&link, lang, &cur, &files)
+                        else {
+                            continue;
+                        };
+                        if !seen.insert(target.clone()) {
+                            continue;
+                        }
+                        let abs = match (&root, target.is_absolute()) {
+                            (_, true) => target.clone(),
+                            (Some(r), false) => r.join(&target),
+                            (None, false) => continue,
+                        };
+                        let Ok(text) = std::fs::read_to_string(&abs) else {
+                            continue;
+                        };
+                        // Index under the TARGET file's own language (same
+                        // grammar family in practice for TS/JS mixes).
+                        let tl = Lang::from_path(&target);
+                        for (name, r) in highlight::definition_sites(&text, tl) {
+                            // First definition wins (files in import order).
+                            map.entry(name).or_insert((target.clone(), r));
+                        }
+                    }
+                    map
+                })
+                .await;
+            this.update(cx, |k, cx| {
+                if k.browse.ext_defs_gen == gen {
+                    k.browse
+                        .editor
+                        .update(cx, |e, cx| e.set_external_defs(map, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// ⌘-click on a USE of an imported symbol: open the import's file (a new

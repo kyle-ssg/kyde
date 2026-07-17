@@ -898,6 +898,12 @@ struct BrowseView {
     /// Cmd-clicked FILE rows (ordered). Exactly two → the right-click menu
     /// offers "Compare Selected" (issue #42). Cleared by any plain click.
     multi_selected: Vec<PathBuf>,
+    /// Import targets the external-defs index was last computed for — the
+    /// cheap change gate (recompute only when the buffer's import set changes).
+    ext_defs_targets: Vec<String>,
+    /// Generation counter for the external-defs background job (stale results
+    /// from a superseded compute are dropped).
+    ext_defs_gen: u64,
     /// Scroll position of the tree, so "Select Opened File in Tree" can scroll an
     /// off-screen row into view.
     tree_scroll: ScrollHandle,
@@ -932,6 +938,9 @@ impl BrowseView {
                     this.browse.preview_tab = None;
                 }
                 this.autosave(cx);
+                // Import lines changed → re-index the imported files' definitions
+                // (cheap target-set comparison; the compute itself is background).
+                this.refresh_external_defs(cx);
             }
             // ⌘-click on an import link → resolve against the project file list
             // and open the target (issue #26).
@@ -940,6 +949,11 @@ impl BrowseView {
             // on the definition.
             EditorEvent::OpenSymbol { link, name } => {
                 this.open_import_symbol(link.clone(), name.clone(), cx);
+            }
+            // ⌘-click on a pre-resolved external definition (imported-files
+            // index) → open the file at the definition.
+            EditorEvent::OpenDefinition { path, range } => {
+                this.open_definition_at(path.clone(), range.clone(), cx);
             }
             EditorEvent::Changed => {}
         })
@@ -958,6 +972,8 @@ impl BrowseView {
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
             multi_selected: Vec::new(),
+            ext_defs_targets: Vec::new(),
+            ext_defs_gen: 0,
             tree_scroll: ScrollHandle::new(),
             editor,
             editor_scroll: ScrollHandle::new(),
@@ -3126,6 +3142,50 @@ mod gpui_smoke_tests {
                 assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
                 let sel = k.browse.editor.read(cx).selection();
                 assert_eq!(&lib[sel], "answer", "selection lands on the definition");
+            })
+            .unwrap();
+    }
+
+    /// ⌘-click on a METHOD of an imported class resolves through the
+    /// external-defs index: the imported file's definitions are indexed in the
+    /// background, and clicking the method name opens that file at the method.
+    #[gpui::test]
+    fn cmd_click_method_resolves_via_imported_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let lib = "export class Cat {\n  meow() { return 1; }\n}\n";
+        std::fs::write(dir.join("lib.ts"), lib).unwrap();
+        let main = "import { Cat } from './lib';\nnew Cat().meow();\n";
+        std::fs::write(dir.join("main.ts"), main).unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.plugins.install("typescript");
+                k.open_file(PathBuf::from("main.ts"), cx);
+                k.browse.editor.update(cx, |e, cx| {
+                    e.set_link_navigation(true, cx);
+                });
+                // open_file may have skipped the index (pack installed just
+                // now) — force a fresh compute with links enabled.
+                k.browse.ext_defs_targets.clear();
+                k.refresh_external_defs(cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // background index lands
+        handle
+            .update(cx, |k, _w, cx| {
+                // The editor's external index must now know `meow` → lib.ts.
+                let (path, range) = k
+                    .browse
+                    .editor
+                    .read(cx)
+                    .external_def_for("meow")
+                    .expect("method of the imported class is indexed");
+                assert_eq!(path, PathBuf::from("lib.ts"));
+                k.open_definition_at(path, range, cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
+                let sel = k.browse.editor.read(cx).selection();
+                assert_eq!(&lib[sel], "meow", "selection lands on the method");
             })
             .unwrap();
     }

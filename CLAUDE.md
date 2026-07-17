@@ -538,6 +538,14 @@ Three targets (classified by `CodeEditor::symbol_at`, in priority order):
    `from` names/aliases) → `EditorEvent::OpenSymbol{link,name}` →
    `Kyde::open_import_symbol`: resolve the import's file, open it (new tab), find
    `name` in ITS definition_sites, select it.
+4. **METHODS/symbols defined in imported files** (`obj.method()` where the class came
+   from an import): `Kyde::refresh_external_defs` resolves every import target and
+   indexes those files' `definition_sites` in the BACKGROUND (name → path+range,
+   pushed via `CodeEditor::set_external_defs`; recomputed only when the buffer's
+   import TARGET SET changes — `import_targets()` comparison — and generation-guarded
+   against stale results; cleared by `set_content`). Lowest lookup priority; click →
+   `EditorEvent::OpenDefinition{path,range}` → `Kyde::open_definition_at`. No type
+   inference — a name defined in several imported files resolves to the first.
 ON by default for every installed pack that supports it (Rust, TS/TSX, JS, Python);
 per-pack opt-OUT via the "⌘-click imports" checkbox (persisted `links_disabled`,
 `Plugins::links_on/set_links` — the error-highlighting model). Editor caches

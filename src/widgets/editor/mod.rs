@@ -130,6 +130,15 @@ pub enum EditorEvent {
         /// The symbol to land on in that file.
         name: String,
     },
+    /// ⌘-click landed on a symbol pre-resolved to a definition in another file
+    /// (the external-defs index — e.g. a method on an imported class): the app
+    /// opens `path` and selects `range`.
+    OpenDefinition {
+        /// Target file (repo-relative / absolute-scratch, like open paths).
+        path: std::path::PathBuf,
+        /// The definition name's byte range in that file.
+        range: Range<usize>,
+    },
 }
 
 /// What a ⌘-click at some offset targets (see `CodeEditor::symbol_at`).
@@ -140,6 +149,9 @@ enum SymbolTarget {
     LocalDef(Range<usize>),
     /// A use of an imported symbol → open its file, land on the definition.
     ImportedSymbol(highlight::ImportLink, String),
+    /// A symbol defined in a file this buffer imports (method on an imported
+    /// class, helper next to it, …) → open that file at the definition.
+    ExternalDef(std::path::PathBuf, Range<usize>),
 }
 
 /// The ⌘-click navigation caches, computed together on one parse-adjacent pass:
@@ -249,6 +261,12 @@ pub struct CodeEditor {
     /// Definition sites (name → sorted name-ranges), for same-file
     /// go-to-definition. Recomputed with `import_links`.
     defs: std::collections::HashMap<String, Vec<Range<usize>>>,
+    /// Definitions found in the files THIS buffer imports (name → target file +
+    /// the name's byte range there) — resolves `obj.method()` when the method
+    /// lives with an imported class. Pushed by the app (`set_external_defs`,
+    /// computed in the background); lowest lookup priority, so local
+    /// definitions and direct import bindings always win.
+    external_defs: std::collections::HashMap<String, (std::path::PathBuf, Range<usize>)>,
     /// ⌘-click navigation (imports + definitions) for this editor's language
     /// (same push model as `errors_on`: per-pack toggle, default on).
     links_on: bool,
@@ -383,6 +401,7 @@ impl CodeEditor {
             errors_on: false,
             import_links: Vec::new(),
             import_bound: std::collections::HashMap::new(),
+            external_defs: std::collections::HashMap::new(),
             defs: std::collections::HashMap::new(),
             links_on: false,
             cmd_held: false,
@@ -450,6 +469,9 @@ impl CodeEditor {
         self.redo_stack.clear();
         self.last_edit = EditKind::Other;
         self.folded.clear();
+        // A different buffer's imported-files index would resolve names to the
+        // WRONG files — drop it; the app pushes a fresh one after opening.
+        self.external_defs.clear();
         self.recompute_folds(cx);
         cx.notify();
         cx.emit(EditorEvent::Changed);
@@ -457,6 +479,12 @@ impl CodeEditor {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// The current import specifiers (targets), for the app's cheap "did the
+    /// import set change?" check that gates recomputing the external-defs index.
+    pub fn import_targets(&self) -> Vec<String> {
+        self.import_links.iter().map(|l| l.target.clone()).collect()
     }
 
     /// Tell the editor which scroll container currently holds it, so caret-follow and
@@ -713,7 +741,31 @@ impl CodeEditor {
                 SymbolTarget::ImportedSymbol(link.clone(), name.to_string()),
             ));
         }
+        // Lowest priority: a definition in one of the files this buffer
+        // imports (methods on imported classes land here).
+        if let Some((path, r)) = self.external_defs.get(name) {
+            return Some((word, SymbolTarget::ExternalDef(path.clone(), r.clone())));
+        }
         None
+    }
+
+    /// Test-only read view of the external index (the app never reads it back;
+    /// clicks resolve inside the editor).
+    #[cfg(test)]
+    pub fn external_def_for(&self, name: &str) -> Option<(std::path::PathBuf, Range<usize>)> {
+        self.external_defs.get(name).cloned()
+    }
+
+    /// Replace the imported-files definition index (see `external_defs`).
+    /// Pushed by the app whenever the buffer's import set resolves to a new
+    /// set of files; cleared automatically when a different file loads.
+    pub fn set_external_defs(
+        &mut self,
+        map: std::collections::HashMap<String, (std::path::PathBuf, Range<usize>)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.external_defs = map;
+        cx.notify();
     }
 
     /// Recompute what the pointer sits on (from `last_mouse`), honoring the ⌘ +
@@ -1153,6 +1205,11 @@ impl CodeEditor {
                 }
                 Some((_, SymbolTarget::ImportedSymbol(link, name))) => {
                     cx.emit(EditorEvent::OpenSymbol { link, name });
+                    cx.stop_propagation();
+                    return;
+                }
+                Some((_, SymbolTarget::ExternalDef(path, range))) => {
+                    cx.emit(EditorEvent::OpenDefinition { path, range });
                     cx.stop_propagation();
                     return;
                 }
