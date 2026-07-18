@@ -11,6 +11,7 @@ impl Kyde {
         &self,
         ui: &'static str,
         fs: gpui::Pixels,
+        island_w: f32,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
@@ -122,6 +123,17 @@ impl Kyde {
             .flex_row()
             .items_center()
             .flex_none()
+            // Pin the bar to the ISLAND's measured width (the editor-scrollbar
+            // trick). Flex alone (`w_full`/`flex_1`/`min_w_0` up the chain)
+            // never constrained it: taffy sizes the bar to its tab content
+            // (diagnosed 1633px in a 1280px window; the island merely clips
+            // it), so the inner overflow_x_scroll never actually overflows,
+            // max_offset stays 0, and every scroll — wheel or scroll_to_item —
+            // is clamped back to zero. An explicit width makes the scroll
+            // container viewport-sized, which is what makes tab scrolling
+            // (and scroll-active-tab-into-view) work at all.
+            .w(px(island_w))
+            .min_w_0()
             .h(px(38.0))
             .bg(t.panel_bg)
             // Match the editor island's top corners (gpui clips rectangular, so the

@@ -94,6 +94,8 @@ actions!(
         NewScratch,
         SortLines,
         SortKeys,
+        NavBack,
+        NavForward,
         EscapeKey,
         ToggleTerminal,
         NewTerminalTab,
@@ -226,6 +228,8 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "new_scratch", NewScratch);
     bind_app(cx, km, "sort_lines", SortLines);
     bind_app(cx, km, "sort_keys", SortKeys);
+    bind_app(cx, km, "nav_back", NavBack);
+    bind_app(cx, km, "nav_forward", NavForward);
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
     // Backspace: delete the selected Browse-tree file/folder (fixed key). Bound to the
@@ -399,6 +403,8 @@ enum PaletteAction {
     Fonts,
     SortLines,
     SortKeys,
+    NavBack,
+    NavForward,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -409,6 +415,12 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ("Reveal in Terminal", PaletteAction::RevealInTerminal, ""),
     ("Sort Lines", PaletteAction::SortLines, "sort_lines"),
     ("Sort Object Keys", PaletteAction::SortKeys, "sort_keys"),
+    ("Back (previous file)", PaletteAction::NavBack, "nav_back"),
+    (
+        "Forward (next file)",
+        PaletteAction::NavForward,
+        "nav_forward",
+    ),
     ("Go to File", PaletteAction::GoToFile, "go_to_file"),
     ("Find in Files", PaletteAction::FindInFiles, "find_in_files"),
     ("New Scratch File", PaletteAction::NewScratch, "new_scratch"),
@@ -898,6 +910,13 @@ struct BrowseView {
     /// Cmd-clicked FILE rows (ordered). Exactly two → the right-click menu
     /// offers "Compare Selected" (issue #42). Cleared by any plain click.
     multi_selected: Vec<PathBuf>,
+    /// Visited-file history for ⌘⌥←/⌘⌥→ back/forward navigation.
+    nav_history: Vec<PathBuf>,
+    /// Current position in `nav_history` (points at the open file's entry).
+    nav_index: usize,
+    /// True while back/forward itself opens a file, so the open doesn't record
+    /// a new history entry (which would truncate the forward branch).
+    nav_suppress: bool,
     /// Import targets the external-defs index was last computed for — the
     /// cheap change gate (recompute only when the buffer's import set changes).
     ext_defs_targets: Vec<String>,
@@ -972,6 +991,9 @@ impl BrowseView {
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
             multi_selected: Vec::new(),
+            nav_history: Vec::new(),
+            nav_index: 0,
+            nav_suppress: false,
             ext_defs_targets: Vec::new(),
             ext_defs_gen: 0,
             tree_scroll: ScrollHandle::new(),
@@ -2456,6 +2478,28 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 cx.notify();
             });
         }
+        // The tab strip with more tabs than fit — the active tab must be
+        // scrolled into view (strip overflows + scrolls; regression: the bar
+        // sized itself to content and no scroll ever applied).
+        "tab-scroll" => {
+            set_packs(view, &["rust"]);
+            for f in [
+                "src/main.rs",
+                "src/app.rs",
+                "src/render.rs",
+                "src/divider.rs",
+                "src/views/browse.rs",
+                "src/views/commit.rs",
+                "src/views/diff_view.rs",
+                "src/views/history.rs",
+                "src/views/merge.rs",
+                "src/views/compare.rs",
+                "src/views/finder.rs",
+                "src/views/tabs.rs",
+            ] {
+                view.open_file(PathBuf::from(f), cx);
+            }
+        }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
         "history" => {
@@ -3186,6 +3230,41 @@ mod gpui_smoke_tests {
                 assert_eq!(k.browse.open_path, Some(PathBuf::from("lib.ts")));
                 let sel = k.browse.editor.read(cx).selection();
                 assert_eq!(&lib[sel], "meow", "selection lands on the method");
+            })
+            .unwrap();
+    }
+
+    /// ⌘⌥←/⌘⌥→ file navigation: visits record, back/forward walk them without
+    /// recording, and opening a new file after going back discards the forward
+    /// branch.
+    #[gpui::test]
+    fn nav_back_and_forward_walk_the_visit_history(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(dir.join(n), n).unwrap();
+        }
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                for n in ["a.txt", "b.txt", "c.txt"] {
+                    k.open_file(PathBuf::from(n), cx);
+                }
+                k.nav_back(cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("b.txt")));
+                k.nav_back(cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("a.txt")));
+                k.nav_back(cx); // start of history — no-op
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("a.txt")));
+                k.nav_forward(cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("b.txt")));
+                // New open from the middle discards the forward branch (c.txt).
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.nav_forward(cx); // nothing forward anymore
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
+                k.nav_back(cx);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("b.txt")));
+                assert_eq!(k.browse.nav_history.len(), 3, "a, b, app.tsx (c discarded)");
             })
             .unwrap();
     }
