@@ -42,6 +42,23 @@ use std::sync::Arc;
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
 
+#[cfg(target_os = "windows")]
+fn default_shell() -> String {
+    windows_shell_from_comspec(std::env::var("COMSPEC").ok())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shell_from_comspec(comspec: Option<String>) -> String {
+    comspec
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
 /// Forwards alacritty IO-thread events to the gpui foreground over an unbounded channel.
 /// `Clone` because both the `Term` and the `EventLoop` need a handle to the same sink.
 #[derive(Clone)]
@@ -85,7 +102,7 @@ impl TerminalView {
         let (tx, mut rx) = unbounded::<AlacEvent>();
         let proxy = EventProxy(tx);
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        let shell = default_shell();
         let options = PtyOptions {
             shell: Some(Shell::new(shell, Vec::new())),
             working_directory: working_dir,
@@ -1065,6 +1082,20 @@ const ANSI_PALETTE: [Rgb; 16] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_uses_comspec_with_cmd_fallback() {
+        assert_eq!(
+            windows_shell_from_comspec(Some(r"C:\Windows\System32\cmd.exe".to_string())),
+            r"C:\Windows\System32\cmd.exe"
+        );
+        assert_eq!(windows_shell_from_comspec(None), "cmd.exe");
+        assert_eq!(
+            windows_shell_from_comspec(Some("  ".to_string())),
+            "cmd.exe"
+        );
+    }
 
     #[test]
     fn indexed_palette_covers_all_256_without_panicking() {
