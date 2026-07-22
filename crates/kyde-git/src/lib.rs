@@ -378,11 +378,7 @@ impl Repo {
     /// The entry's mode follows the working file's executable bit.
     pub fn stage_content(&self, rel: &Path, content: &str) -> Result<()> {
         let oid = git_stdin(&self.root, &["hash-object", "-w", "--stdin"], content)?;
-        let mode = if is_executable(&self.root.join(rel)) {
-            "100755"
-        } else {
-            "100644"
-        };
+        let mode = stage_content_mode(&self.root, rel)?;
         let info = format!("{mode},{},{}", oid.trim(), rel.to_string_lossy());
         git(&self.root, &["update-index", "--add", "--cacheinfo", &info]).map(|_| ())
     }
@@ -1065,17 +1061,21 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Whether the on-disk file has any executable bit set (false when absent).
+/// Select the index mode for partially staged content from the working file's executable bit.
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+fn stage_content_mode(root: &Path, rel: &Path) -> Result<&'static str> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+    let executable = std::fs::metadata(root.join(rel))
+        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0);
+    Ok(if executable { "100755" } else { "100644" })
 }
 
-/// Whether the on-disk file has any executable bit set (always false off-unix).
+/// Windows has no Unix executable permission, so preserve the mode already stored by Git.
 #[cfg(not(unix))]
-fn is_executable(_path: &Path) -> bool {
-    false
+fn stage_content_mode(root: &Path, rel: &Path) -> Result<&'static str> {
+    let entry = git(root, &["ls-files", "--stage", "--", &rel.to_string_lossy()])?;
+    let executable = entry.lines().any(|line| line.starts_with("100755 "));
+    Ok(if executable { "100755" } else { "100644" })
 }
 
 fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
@@ -1320,6 +1320,7 @@ mod tests {
         g(&work, &["config", "user.email", "t@example.com"]);
         g(&work, &["config", "user.name", "Test"]);
         g(&work, &["config", "commit.gpgsign", "false"]);
+        g(&work, &["config", "core.autocrlf", "false"]);
         fs::write(work.join("f.txt"), "one\ntwo\nthree\n").unwrap();
         g(&work, &["add", "-A"]);
         g(&work, &["commit", "-m", "init"]);
@@ -1420,6 +1421,7 @@ mod tests {
         g(&work, &["config", "user.email", "t@example.com"]);
         g(&work, &["config", "user.name", "Test"]);
         g(&work, &["config", "commit.gpgsign", "false"]);
+        g(&work, &["config", "core.autocrlf", "false"]);
         fs::write(work.join("f.txt"), "one\ntwo\nthree\n").unwrap();
         fs::write(work.join("other.txt"), "x\n").unwrap();
         g(&work, &["add", "-A"]);

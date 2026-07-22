@@ -3065,6 +3065,7 @@ name = "kyde-update"
 version = "2.5.0"
 dependencies = [
  "serde_json",
+ "sha2",
  "thiserror 2.0.19",
 ]
 

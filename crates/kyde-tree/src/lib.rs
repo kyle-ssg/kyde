@@ -149,23 +149,23 @@ mod tests {
         let mut exp = HashSet::new();
         // Collapsed: only top-level entries, folders first.
         let rows = t.visible(&exp);
-        let names: Vec<_> = rows
-            .iter()
-            .map(|r| r.path.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["a", "src", "README.md"]);
+        let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(paths, vec![p("a"), p("src"), p("README.md")]);
         assert!(rows[0].is_dir && rows[1].is_dir && !rows[2].is_dir);
 
         // Expand src → its files appear under it at depth 1.
         exp.insert(p("src"));
         let rows = t.visible(&exp);
-        let names: Vec<_> = rows
-            .iter()
-            .map(|r| r.path.to_string_lossy().into_owned())
-            .collect();
+        let paths: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();
         assert_eq!(
-            names,
-            vec!["a", "src", "src/git.rs", "src/main.rs", "README.md"]
+            paths,
+            vec![
+                p("a"),
+                p("src"),
+                p("src").join("git.rs"),
+                p("src").join("main.rs"),
+                p("README.md")
+            ]
         );
         assert_eq!(rows[2].depth, 1);
     }
