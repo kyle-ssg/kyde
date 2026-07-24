@@ -426,9 +426,9 @@ impl Render for Kyde {
         if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
-        // Rollback/Push file menus belong to their own modal windows (rendered in those
-        // bodies), not the main window.
-        if matches!(self.context_menu.as_ref().map(|m| &m.target), Some(t) if !matches!(t, MenuTarget::RollbackFile(_) | MenuTarget::PushFile(_)))
+        // Rollback/Push/Local-History menus belong to their own modal windows (rendered
+        // in those bodies), not the main window.
+        if matches!(self.context_menu.as_ref().map(|m| &m.target), Some(t) if !matches!(t, MenuTarget::RollbackFile(_) | MenuTarget::PushFile(_) | MenuTarget::LhRow | MenuTarget::LhPath(..)))
         {
             root = root.child(self.render_context_menu(cx));
         }
@@ -901,6 +901,11 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| this.push_show_diff(idx, cx)),
                 ))
+            }
+            // Local History menus (timeline row / changed-files row) — the feature
+            // module owns its items (`lh_menu_items`), this match only dispatches.
+            t @ (MenuTarget::LhRow | MenuTarget::LhPath(..)) => {
+                self.lh_menu_items(panel, t, &item, cx)
             }
             MenuTarget::TabList => {
                 if self.browse.open_tabs.is_empty() {

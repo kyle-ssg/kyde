@@ -373,9 +373,13 @@ impl Kyde {
                                     | PaletteAction::LocalHistory
                             )
                     })
-                    // Local History additionally needs its store (enabled + project open).
+                    // Local History actions additionally need its store (enabled +
+                    // project open); Clear works project-wide, no file required.
                     .filter(|(_, (_, a, _))| {
-                        !matches!(a, PaletteAction::LocalHistory) || self.lh.store.is_some()
+                        !matches!(
+                            a,
+                            PaletteAction::LocalHistory | PaletteAction::ClearLocalHistory
+                        ) || self.lh.store.is_some()
                     })
                     .filter_map(|(i, (label, _, _))| {
                         if q.is_empty() {
@@ -585,6 +589,10 @@ impl Kyde {
                 {
                     self.open_local_history(p, cx);
                 }
+            }
+            PaletteAction::ClearLocalHistory => {
+                window.focus(&self.focus_handle);
+                self.open_clear_local_history(cx);
             }
         }
     }

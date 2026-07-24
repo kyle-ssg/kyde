@@ -323,6 +323,36 @@ impl Store {
             .map_err(|_| HistoryError::MissingBlob(hash.to_string()))
     }
 
+    /// Delete ALL history in this store — the journal and every blob — and reset the
+    /// in-memory index. The store stays open and usable (recording continues from
+    /// empty).
+    ///
+    /// ```
+    /// # use kyde_local_history::{Store, EventKind};
+    /// # let dir = std::env::temp_dir().join(format!("kyde-lh-clear-doc-{}", std::process::id()));
+    /// # let _ = std::fs::remove_dir_all(&dir);
+    /// let mut store = Store::open(dir)?;
+    /// store.record(std::path::Path::new("a.rs"), "v1", EventKind::Change, None, 1_000)?;
+    /// store.clear()?;
+    /// assert_eq!(store.event_count(), 0);
+    /// # Ok::<(), kyde_local_history::HistoryError>(())
+    /// ```
+    pub fn clear(&mut self) -> Result<()> {
+        let journal = self.dir.join("events.jsonl");
+        if journal.exists() {
+            std::fs::remove_file(&journal)
+                .map_err(io_err(format!("clearing journal {journal:?}")))?;
+        }
+        let blobs = self.dir.join("blobs");
+        if blobs.exists() {
+            std::fs::remove_dir_all(&blobs).map_err(io_err(format!("clearing blobs {blobs:?}")))?;
+        }
+        std::fs::create_dir_all(&blobs).map_err(io_err(format!("recreating blobs {blobs:?}")))?;
+        self.events.clear();
+        self.last_by_path.clear();
+        Ok(())
+    }
+
     /// Drop events older than `retention_ms` (relative to `now_ms`), rewrite the
     /// journal atomically, and delete blobs no kept event references. Skipped
     /// (returning zeros) when another instance holds the prune lock.
@@ -486,6 +516,28 @@ mod tests {
         assert_eq!(s.content(&ev[0].hash).unwrap(), "v2 — unicode ✓");
         assert_eq!(s.content(&ev[1].hash).unwrap(), "v1");
         assert!(s.events_for(Path::new("other")).is_empty());
+    }
+
+    #[test]
+    fn clear_wipes_journal_blobs_and_memory_but_stays_usable() {
+        let mut s = tmp_store("clear");
+        let p = Path::new("a.rs");
+        s.record(p, "v1", EventKind::Change, None, 1_000).unwrap();
+        s.record(p, "v2", EventKind::Change, None, 2_000).unwrap();
+        let hash = s.events_for(p)[0].hash.clone();
+        s.clear().unwrap();
+        assert_eq!(s.event_count(), 0);
+        assert!(s.events_for(p).is_empty());
+        assert!(s.last_hash(p).is_none());
+        assert!(s.content(&hash).is_err(), "blobs are gone");
+        // A reopened store sees nothing either (the journal really was deleted)…
+        let dir = s.dir.clone();
+        let reopened = Store::open(dir.clone()).unwrap();
+        assert_eq!(reopened.event_count(), 0);
+        // …and recording still works from empty.
+        assert!(s.record(p, "v3", EventKind::Change, None, 3_000).unwrap());
+        assert_eq!(s.event_count(), 1);
+        assert_eq!(s.content(&s.events_for(p)[0].hash).unwrap(), "v3");
     }
 
     #[test]

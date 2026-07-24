@@ -3,9 +3,9 @@
 //! apply live via `theme::update` (font sizes, row height) / `choose_preset` (keymap).
 
 use crate::{
-    div, px, theme, ui, Context, FluentBuilder, InteractiveElement, IntoElement, Kyde, ModalKind,
-    MouseButton, ParentElement, Preset, SettingsSection, SharedString, StatefulInteractiveElement,
-    Styled,
+    btn_secondary, div, px, theme, ui, Context, FluentBuilder, InteractiveElement, IntoElement,
+    Kyde, ModalKind, MouseButton, ParentElement, Preset, SettingsSection, SharedString,
+    StatefulInteractiveElement, Styled,
 };
 use gpui::FontWeight;
 
@@ -342,6 +342,22 @@ impl Kyde {
                     apply_secs,
                     cx,
                 ))
+            })
+            // Destructive: wipes the OPEN project's snapshot store, behind its own
+            // native confirmation window. Needs a store (project open + enabled).
+            .when(self.lh.store.is_some(), |d| {
+                // flex_row wrapper: keep the button at its natural width (a bare
+                // flex_col child would stretch full-width).
+                d.child(
+                    div().flex().flex_row().child(
+                        btn_secondary("lh-clear", "Clear Local History…")
+                            .py_1()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _e, _w, cx| this.open_clear_local_history(cx)),
+                            ),
+                    ),
+                )
             })
             .into_any_element()
     }

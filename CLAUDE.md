@@ -394,24 +394,46 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   "Before merge resolve" / "Before revert", plus "Commit: <subject>" stamped on committed
   files. Label events always append (timeline markers) even at unchanged content.
   `lh_sync_store` (called from `refresh`) keeps the store pointed at the open project.
-- **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left = snapshot
-  timeline (title + `format_ts · relative_ts`), right = snapshot ↔ current read-only aligned
-  panes (the compare-view pattern: `diff_line_bgs`/`diff_word_bgs`/`diff_fillers`, shared
-  `ScrollHandle`), center gutter `»` = restore ONE hunk of the snapshot into the file
-  (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = whole
-  snapshot. Every restore snapshots the pre-write state first, reloads a clean open Browse
-  buffer, re-diffs, refreshes git status. Entry points: right-click file/FOLDER/tab →
-  **Local History**, ⌘⇧A palette. A folder (or repo-root) scope lists every file's events
-  under it (`Store::events_under`, component-wise prefix); the selected ROW's file drives
-  the diff + restore target, and rows/header carry the file name.
+- **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left column =
+  snapshot timeline (title + `format_ts · relative_ts`) over a **changed-since panel**
+  (WebStorm-style): the distinct files of `events[0..=selected]` as a fully-expanded tree
+  (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
+  current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
+  `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
+  **base event** (its newest event at-or-before the selected row — `lh_base_event_for`); a
+  file first seen after the snapshot has no base → diff vs empty, header "No snapshot at
+  this point", no Revert. Center gutter `»` = restore ONE hunk
+  (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = the
+  targeted file. **Right-click menus** (`MenuTarget::LhRow`/`LhPath`, rendered in THIS
+  window like the rollback modal; items live in `lh_menu_items` — `render_context_menu`
+  only dispatches): a timeline row offers **Revert This Change and After** (every
+  changed-since file back to its state at the snapshot), a file row **Revert This File**
+  (JUST it), a folder row **Revert This Folder** (its subtree). Every revert labels the
+  pre-write state "Before revert" INLINE (`lh_label_sync` — not the background
+  `lh_snapshot_now`, so the immediately-reloaded timeline shows the marker), reloads a
+  clean open Browse buffer, re-diffs, refreshes git status; baseless files are skipped,
+  never deleted (their pre-snapshot state is unknown). Entry points: right-click
+  file/FOLDER/tab → **Local History**, ⌘⇧A palette. A folder (or repo-root) scope lists
+  every file's events under it (`Store::events_under`, component-wise prefix); rows/header
+  carry the file name.
 - **Config** (`kyde-config::history::HistoryCfg` → `history.json`): `enabled` (default ON —
   dedup + debounce make steady-state cost ≈0), `retention_days` (7, clamp 1..=90),
   `throttle_secs` (10, clamp 1..=300). Settings → **Local History** section (toggle +
   steppers; toggling opens/drops the store live). Off = zero work: no store, no reads, no
   writes.
+- **Clear Local History** (destructive): Settings → Local History button + ⌘⇧A palette →
+  `open_clear_local_history` → a native confirmation window (`ModalKind::ClearLocalHistory`,
+  Enter confirms / Escape cancels like the other confirm dialogs) → `do_clear_local_history`
+  → `Store::clear()` (deletes the journal + every blob, resets the in-memory index; the
+  store stays open and recording continues from empty) + empties any open timeline. Both
+  entry points need a store (project open + enabled).
 - Smoke tests: `local_history_records_opens_and_saves`, `local_history_revert_restores_the_
-  snapshot`, `local_history_disabled_records_nothing`. Debug shot: `KYDE_SHOT=local-history`
-  + `KYDE_SHOT_FILE=<json>` (seeds two snapshots synchronously, then opens the window).
+  snapshot`, `local_history_disabled_records_nothing`,
+  `local_history_changed_since_panel_and_reverts`, `local_history_clear_confirms_and_wipes`.
+  Debug shot: `KYDE_SHOT=local-history` + `KYDE_SHOT_FILE=<json>` (seeds two snapshots
+  synchronously, then opens the window) — in the README set (`scripts/screenshots.sh
+  local-history`, region mode, 2 windows; the script exports a throwaway `XDG_DATA_HOME` so
+  shot seeding never writes into the user's real history store).
 
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {

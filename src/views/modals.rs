@@ -463,6 +463,7 @@ impl Kyde {
             ModalKind::Merge => &mut self.merge_win,
             ModalKind::Compare => &mut self.compare_win,
             ModalKind::LocalHistory => &mut self.local_history_win,
+            ModalKind::ClearLocalHistory => &mut self.clear_lh_win,
         }
     }
 

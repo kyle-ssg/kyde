@@ -238,6 +238,7 @@ impl Kyde {
             plugins_query,
             fonts_win: None,
             clear_data_win: None,
+            clear_lh_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme_open: false,

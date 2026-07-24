@@ -420,6 +420,7 @@ enum PaletteAction {
     NavBack,
     NavForward,
     LocalHistory,
+    ClearLocalHistory,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -451,6 +452,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ),
     ("Rollback changes", PaletteAction::Rollback, ""),
     ("Local History", PaletteAction::LocalHistory, ""),
+    ("Clear Local History", PaletteAction::ClearLocalHistory, ""),
     ("Settings / Keymap", PaletteAction::Settings, "open_keymap"),
     ("Manage Plugins", PaletteAction::Plugins, ""),
     ("Preview Fonts", PaletteAction::Fonts, ""),
@@ -482,6 +484,12 @@ enum MenuTarget {
     /// A file row in the History changed-files tree (by index into `history.files`) — same
     /// compare modes, applied with that file kept selected.
     HistoryFile(usize),
+    /// A timeline row in the Local History window — Revert This Change and After
+    /// (acts on the selected row; right-click selects before opening the menu).
+    LhRow,
+    /// A row in the Local History changed-files panel (`bool` = `is_dir`) — revert just
+    /// that file / that folder's files to their state at the selected snapshot.
+    LhPath(PathBuf, bool),
     /// A branch leaf in the branch popup — offers Checkout + Merge into current.
     Branch(String),
 }
@@ -1431,6 +1439,8 @@ struct Kyde {
     fonts_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Data & Restart" confirmation — a native modal window (native-menu action).
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// "Clear Local History" confirmation — wipes the open project's snapshot store.
+    clear_lh_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Settings — a native modal window with a category sidebar (Appearance/Keymap/…).
     settings_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Which Settings category the sidebar has selected.
@@ -1548,6 +1558,8 @@ enum ModalKind {
     Compare,
     /// Per-file local-history timeline + snapshot ↔ current diff (issue #7).
     LocalHistory,
+    /// "Clear Local History" confirmation (destructive — wipes the project's store).
+    ClearLocalHistory,
 }
 
 /// Compare-two-files state (issue #42): the chosen paths, the computed diff, and
@@ -1610,6 +1622,16 @@ struct LocalHistoryView {
     events: Vec<kyde_local_history::Event>,
     /// Selected timeline row.
     selected: usize,
+    /// Files changed at or since the selected snapshot (distinct paths of
+    /// `events[0..=selected]`, sorted) — the bottom "changed files" panel.
+    files: Vec<PathBuf>,
+    /// `files` as a tree (folders + files, the Browse-tree model).
+    files_tree: tree::Tree,
+    /// Expanded dirs in the changed-files panel (reset to all-expanded on recompute).
+    files_expanded: std::collections::HashSet<PathBuf>,
+    /// The changed-files panel's selection — the file the diff panes + restores target.
+    /// `None` falls back to the selected event's own file.
+    file_selected: Option<PathBuf>,
     /// Snapshot (old) → current (new) diff for the selected row.
     diff: Option<FileDiff>,
     /// Left pane — the snapshot (read-only).
@@ -1638,6 +1660,10 @@ impl LocalHistoryView {
             path: None,
             events: Vec::new(),
             selected: 0,
+            files: Vec::new(),
+            files_tree: tree::Tree::default(),
+            files_expanded: std::collections::HashSet::new(),
+            file_selected: None,
             diff: None,
             left: mk(cx),
             right: mk(cx),
@@ -1723,6 +1749,7 @@ impl Render for ModalWindow {
             ModalKind::Merge => k.render_merge_body(kcx),
             ModalKind::Compare => k.render_compare_body(kcx),
             ModalKind::LocalHistory => k.render_local_history_body(kcx),
+            ModalKind::ClearLocalHistory => k.render_clear_local_history_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -1748,6 +1775,9 @@ impl Render for ModalWindow {
                         }
                         "enter" if kind == ModalKind::ClearData => {
                             this.kyde.update(cx, Kyde::do_clear_data);
+                        }
+                        "enter" if kind == ModalKind::ClearLocalHistory => {
+                            this.kyde.update(cx, Kyde::do_clear_local_history);
                         }
                         _ => {}
                     }
@@ -3749,6 +3779,154 @@ mod gpui_smoke_tests {
                 assert_eq!(k.lh.events.len(), 2);
                 assert_eq!(k.lh.events[0].path, PathBuf::from("sub/lib.rs"));
                 assert_eq!(k.lh.events[1].path, PathBuf::from("app.tsx"));
+            })
+            .unwrap();
+    }
+
+    /// The Local History changed-files panel + its reverts (issue #7 follow-up): a
+    /// selected snapshot lists every file changed at-or-since it; right-click reverts
+    /// JUST that file (or folder), the timeline row's menu reverts them all; a file
+    /// first seen after the snapshot has no base (nothing safe to restore); and every
+    /// revert records a "Before revert" label that shows in the reloaded timeline.
+    #[gpui::test]
+    fn local_history_changed_since_panel_and_reverts(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("app.tsx"), "now-a\n").unwrap();
+        std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                let store = k.lh.store.clone().unwrap();
+                {
+                    use kyde_local_history::EventKind;
+                    let mut s = store.lock().unwrap();
+                    let rec = |s: &mut kyde_local_history::Store, p: &str, c: &str, ts: u64| {
+                        s.record(std::path::Path::new(p), c, EventKind::Change, None, ts)
+                            .unwrap();
+                    };
+                    rec(&mut s, "app.tsx", "a1\n", 1_000);
+                    rec(&mut s, "sub/lib.rs", "l1\n", 1_500);
+                    rec(&mut s, "app.tsx", "a2\n", 2_000);
+                    rec(&mut s, "sub/lib.rs", "l2\n", 2_500);
+                }
+                k.lh.path = Some(PathBuf::new()); // whole-project scope
+                k.lh.selected = 0;
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 4);
+                let row = |k: &Kyde, p: &str, ts: u64| {
+                    k.lh.events
+                        .iter()
+                        .position(|e| e.path == std::path::Path::new(p) && e.ts_ms == ts)
+                        .unwrap()
+                };
+
+                // Oldest snapshot selected → both files changed since; lib.rs was first
+                // seen AFTER it, so it has no base to revert to.
+                let i = row(k, "app.tsx", 1_000);
+                k.lh_select(i, cx);
+                assert_eq!(
+                    k.lh.files,
+                    vec![PathBuf::from("app.tsx"), PathBuf::from("sub/lib.rs")]
+                );
+                assert!(k.lh_has_base_under(std::path::Path::new("app.tsx")));
+                assert!(!k.lh_has_base_under(std::path::Path::new("sub/lib.rs")));
+                assert!(!k.lh_has_base_under(std::path::Path::new("sub")));
+
+                // Right-click a FILE row → revert just that file: app.tsx returns to its
+                // state at the selected point, lib.rs is untouched, and the timeline
+                // immediately shows the "Before revert" marker.
+                let i = row(k, "sub/lib.rs", 1_500);
+                k.lh_select(i, cx);
+                k.lh_revert_path(PathBuf::from("app.tsx"), cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+                    "a1\n"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
+                    "now-l\n"
+                );
+                use kyde_local_history::EventKind;
+                assert_eq!(k.lh.events[0].kind, EventKind::Label);
+                assert_eq!(k.lh.events[0].label.as_deref(), Some("Before revert"));
+                assert_eq!(k.lh.events[0].path, PathBuf::from("app.tsx"));
+
+                // Right-click a FOLDER row → revert just that folder's files.
+                let i = row(k, "sub/lib.rs", 1_500);
+                k.lh_select(i, cx);
+                k.lh_revert_path(PathBuf::from("sub"), cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
+                    "l1\n"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+                    "a1\n"
+                );
+
+                // Timeline right-click → Revert This Change and After: every changed-
+                // since file returns to its state at the selected snapshot.
+                std::fs::write(dir.join("app.tsx"), "zz\n").unwrap();
+                std::fs::write(dir.join("sub/lib.rs"), "zz\n").unwrap();
+                let i = row(k, "sub/lib.rs", 1_500);
+                k.lh_select(i, cx);
+                k.lh_revert_since(cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+                    "a1\n"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
+                    "l1\n"
+                );
+                // The pre-revert "zz" states were labeled — recoverable like anything else.
+                let labels =
+                    k.lh.events
+                        .iter()
+                        .filter(|e| e.label.as_deref() == Some("Before revert"))
+                        .count();
+                assert!(labels >= 4, "every revert target got a label, got {labels}");
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
+    /// Clear Local History: the action opens a native confirmation window; confirming
+    /// wipes the project's store (journal + blobs) and empties any open timeline.
+    #[gpui::test]
+    fn local_history_clear_confirms_and_wipes(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                let store = k.lh.store.clone().unwrap();
+                {
+                    use kyde_local_history::EventKind;
+                    let mut s = store.lock().unwrap();
+                    s.record(
+                        std::path::Path::new("app.tsx"),
+                        "v1",
+                        EventKind::Change,
+                        None,
+                        1_000,
+                    )
+                    .unwrap();
+                }
+                k.lh.path = Some(PathBuf::from("app.tsx"));
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 1);
+                k.open_clear_local_history(cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // the native window opens on a spawned task
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.clear_lh_win.is_some(), "confirmation window opens");
+                k.do_clear_local_history(cx);
+                assert!(k.lh.events.is_empty(), "any open timeline empties");
+                let store = k.lh.store.clone().unwrap();
+                assert_eq!(store.lock().unwrap().event_count(), 0, "store wiped");
             })
             .unwrap();
     }
