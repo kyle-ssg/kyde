@@ -299,8 +299,12 @@ impl Kyde {
     }
 
     /// Rebuild the "changed since this snapshot" panel: the distinct files of
-    /// `events[0..=selected]` (this change + everything newer), as a fully-expanded
-    /// tree. The panel selection survives if its file is still listed.
+    /// `events[0..=selected]` (this change + everything newer) that still DIFFER
+    /// from their state at the snapshot, as a fully-expanded tree. A file that was
+    /// touched but changed BACK (e.g. deleted then restored) is dropped — listing a
+    /// "No differences" file reads as a bug. The panel selection survives if its
+    /// file is still listed. Runs on selection change only (one content-hash read
+    /// per candidate file — never on the render path).
     fn lh_recompute_files(&mut self) {
         let upto = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
         let mut seen = std::collections::HashSet::new();
@@ -313,6 +317,16 @@ impl Kyde {
             .filter(|e| seen.insert(e.path.clone()))
             .map(|e| e.path.clone())
             .collect();
+        files.retain(|f| {
+            let base = self.lh_base_event_for(f).map(|e| e.hash.clone());
+            let current = self.lh_abs(f).and_then(|a| std::fs::read_to_string(a).ok());
+            match (base, current) {
+                (Some(h), Some(c)) => kyde_local_history::content_hash(&c) != h,
+                (Some(_), None) => true, // deleted since the snapshot — restorable
+                (None, Some(c)) => !c.is_empty(), // appeared since — shows as all-added
+                (None, None) => false,   // nothing on either side, nothing to show
+            }
+        });
         files.sort();
         self.lh.files_tree = tree::Tree::build(&files);
         // Default fully expanded (the WebStorm presentation) — every ancestor dir.

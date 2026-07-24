@@ -29,7 +29,7 @@ feel. No web, no Electron, no React.
 
 ## Stack & why
 - **gpui** + **gpui_platform** (Apache-2.0) — Zed's GUI framework. Chosen over Tauri+Monaco
-  because the user wants beyond-WebStorm latency, which only a native GPU stack gives.
+  because the user wants lower latency than JVM/Swing IDEs give, which needs a native GPU stack.
   Decision was: build FRESH on the gpui crate, STUDY Zed for patterns — do NOT fork Zed
   (Zed editor is GPL-3.0, huge, tightly coupled).
 - **git binary, shelled out** — same as Zed's `crates/git`. No libgit2/git2 dependency.
@@ -278,7 +278,7 @@ Clicking → `toggle_branch_popup`: loads `branch_list` via `Repo::branches`
 box, **+ New Branch** (`create_branch` = `git checkout -b`, name from the query), **Recent**
 (top 5 by recency, current excluded), **All Branches** (alphabetical, current marked `✓`).
 Clicking (or right-clicking) a branch row opens the branch ACTIONS menu at the cursor
-(`MenuTarget::Branch`, WebStorm-style — no instant checkout): **Checkout** (`checkout_branch`
+(`MenuTarget::Branch`, IDE-style — no instant checkout): **Checkout** (`checkout_branch`
 → `git checkout` + `refresh`; worktree-aware — jumps when checked out elsewhere, hidden in a
 pinned linked worktree) and **Merge “X” into “Y”** (`menu_merge_branch` — see Merge view).
 Rows carry `↑a ↓b` ahead/behind badges vs current (background gather on open). Debug shot:
@@ -396,8 +396,10 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   `lh_sync_store` (called from `refresh`) keeps the store pointed at the open project.
 - **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left column =
   snapshot timeline (title + `format_ts · relative_ts`) over a **changed-since panel**
-  (WebStorm-style): the distinct files of `events[0..=selected]` as a fully-expanded tree
-  (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
+  (IDE-style): the distinct files of `events[0..=selected]` that still DIFFER from
+  their state at the snapshot (a touched-but-changed-back file — deleted then restored —
+  is dropped; content-hash check per candidate, on selection change only), as a
+  fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
   current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
   `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
   **base event** (its newest event at-or-before the selected row — `lh_base_event_for`); a
@@ -508,7 +510,7 @@ Remaining: undo/redo, soft-wrap, caret-follow scrolling, rope buffer for huge fi
 ## Keymap / finder / onboarding (src/keymap.rs + main.rs)
 - `keymap.rs`: `Keymap { preset, overrides }` serialized to `~/.config/kyde/keymap.json`
   (XDG_CONFIG_HOME respected). `ACTIONS` table holds each configurable action's name +
-  WebStorm/VSCode default keystroke + label. `key_for(name)` = override else preset default.
+  per-preset default keystroke + label. `key_for(name)` = override else preset default.
   `Keymap::load()` returns `(km, first_run)`; first_run drives onboarding.
 - `main::apply_keymap(cx, &km)` clears ALL bindings then rebinds: editor keys
   (`editor::bind_keys`), finder nav (context "FileFinder", fixed), and the configurable
@@ -558,7 +560,7 @@ Syntax highlighting is a **plugin**: nothing is parsed by default (speed). Each
 `Kyde::effective_lang` highlights with the real grammar only if the pack is
 installed, else falls back to `PlainText` (no tree-sitter) and shows a top-of-editor
 "Install <name> support?" banner (`render_install_banner`, primary button
-`theme::ui::ACCENT` = WebStorm blue `#3473EE`). Installed packs persist to
+`theme::ui::ACCENT` = accent blue `#3473EE`). Installed packs persist to
 `~/.config/kyde/plugins.json` (`plugins::Plugins`, XDG-respecting like keymap).
 Shipped packs: JSON, TypeScript (ts+tsx), JavaScript, Rust, Markdown (block-only),
 Shell (bash), CSS, SCSS (reuses CSS grammar), `.env`, `.gitignore`. `.env`/`.gitignore`

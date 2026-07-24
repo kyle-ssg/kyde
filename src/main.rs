@@ -3852,9 +3852,17 @@ mod gpui_smoke_tests {
                 assert_eq!(k.lh.events[0].label.as_deref(), Some("Before revert"));
                 assert_eq!(k.lh.events[0].path, PathBuf::from("app.tsx"));
 
-                // Right-click a FOLDER row → revert just that folder's files.
+                // app.tsx now matches its state at this snapshot (changed BACK), so
+                // the changed-since panel drops it — "No differences" rows are noise.
                 let i = row(k, "sub/lib.rs", 1_500);
                 k.lh_select(i, cx);
+                assert_eq!(
+                    k.lh.files,
+                    vec![PathBuf::from("sub/lib.rs")],
+                    "changed-back files leave the panel"
+                );
+
+                // Right-click a FOLDER row → revert just that folder's files.
                 k.lh_revert_path(PathBuf::from("sub"), cx);
                 assert_eq!(
                     std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
