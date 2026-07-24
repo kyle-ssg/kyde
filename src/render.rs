@@ -731,12 +731,20 @@ impl Kyde {
                         .map(std::path::Path::to_path_buf)
                         .unwrap_or_default()
                 };
-                panel = panel.child(item("New File…").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _e, window, cx| {
-                        this.start_new_file(new_dir.clone(), window, cx);
-                    }),
-                ));
+                let new_dir_f = new_dir.clone();
+                panel = panel
+                    .child(item("New File…").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| {
+                            this.start_new_file(new_dir.clone(), window, cx);
+                        }),
+                    ))
+                    .child(item("New Folder…").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| {
+                            this.start_new_folder(new_dir_f.clone(), window, cx);
+                        }),
+                    ));
                 // Rename applies to files (not folders, for now).
                 if !is_dir {
                     let pn = p.clone();

@@ -312,6 +312,10 @@ impl Kyde {
                     this.close_terminal_tab(idx, cx);
                 }
             }
+            // Shell output = files may have changed (mkdir/touch/git/…). Debounced:
+            // each burst keeps postponing the one refresh until the output settles,
+            // so the tree/status pick up terminal-made changes without refocusing.
+            crate::terminal::TerminalEvent::Output => this.schedule_status_refresh(cx),
         })
         .detach();
         self.term.tabs.push(view);

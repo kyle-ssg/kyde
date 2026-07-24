@@ -327,6 +327,7 @@ impl Kyde {
             self.sync.behind = None;
             self.op_error = None;
             self.browse.all_files.clear();
+            self.browse.extra_dirs.clear();
             self.browse.tree = tree::Tree::default();
             self.browse.scratches.clear();
             self.rebuild_commit_view(false);
@@ -373,7 +374,19 @@ impl Kyde {
             .into_iter()
             .filter(|p| !deleted.contains(p))
             .collect();
-        self.browse.tree = tree::Tree::build(&self.browse.all_files);
+        // User-created folders stay visible while still empty (file-derived trees
+        // can't see them); pruned once a file exists under them or they're gone.
+        if let Some(root) = self.repo_root.clone() {
+            let has_file_under =
+                |d: &PathBuf| self.browse.all_files.iter().any(|f| f.starts_with(d));
+            self.browse
+                .extra_dirs
+                .retain(|d| root.join(d).is_dir() && !has_file_under(d));
+        } else {
+            self.browse.extra_dirs.clear();
+        }
+        self.browse.tree =
+            tree::Tree::build_with_dirs(&self.browse.all_files, &self.browse.extra_dirs);
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;
         // Merge-in-progress state (drives the banner). Covers merges we started AND ones

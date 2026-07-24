@@ -491,6 +491,15 @@ The divider (`browse-divider`, `cursor_col_resize`) sets `tree_resizing`; the ro
 `apply_snapshot` drops Deleted-status paths from `all_files` — `git ls-files` keeps
 listing a tracked file whose working copy was deleted, and a nonexistent file in the
 tree/⌘P reads as a bug (the deletion still shows in the Commit view).
+**New File / New Folder / Rename are pure fs ops** (`fs_create_file`/`fs_create_folder`/
+`fs_rename` in file_ops.rs, rooted at `repo_root`, exists-guarded — never through `Repo`),
+so they work in plain non-git folders too. A created-but-still-EMPTY folder can't appear in
+a file-derived tree (git + the fs walk list files), so it rides in
+`BrowseView.extra_dirs` → `tree::Tree::build_with_dirs` until its first file exists
+(pruned in `apply_snapshot` once non-empty/gone; cleared on project switch). **Terminal
+output triggers a debounced refresh** (`TerminalEvent::Output` on every PTY wakeup →
+`schedule_status_refresh`), so files created in the built-in terminal appear without
+refocusing the window (refresh otherwise only fires on activation + ops).
 
 ## Editor tabs (render_tab_bar)
 Opening a file appends to `open_tabs: Vec<PathBuf>` (deduped, open order); `open_path` is the

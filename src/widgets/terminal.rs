@@ -155,7 +155,15 @@ impl TerminalView {
     /// Handle one event from the IO thread. Returns `false` once the pump should stop.
     fn on_event(&mut self, ev: AlacEvent, cx: &mut Context<Self>) -> bool {
         match ev {
-            AlacEvent::Wakeup | AlacEvent::MouseCursorDirty => cx.notify(),
+            AlacEvent::Wakeup => {
+                // Shell output may mean files changed (touch/mkdir/git …) — let the
+                // app schedule a debounced git/tree refresh. Emitted per output
+                // batch; the subscriber debounces, so a build's stream of wakeups
+                // costs one refresh after it quiets down.
+                cx.emit(TerminalEvent::Output);
+                cx.notify();
+            }
+            AlacEvent::MouseCursorDirty => cx.notify(),
             // The emulator wants bytes written back to the PTY (query replies, etc.).
             AlacEvent::PtyWrite(text) => self.notifier.notify(text.into_bytes()),
             AlacEvent::Title(t) => {
@@ -458,6 +466,8 @@ impl Drop for TerminalView {
 pub enum TerminalEvent {
     TitleChanged,
     CloseRequested,
+    /// The shell produced output — files may have changed (subscriber debounces).
+    Output,
 }
 impl EventEmitter<TerminalEvent> for TerminalView {}
 

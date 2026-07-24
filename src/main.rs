@@ -530,6 +530,8 @@ pub(crate) enum SbView {
 enum NamePrompt {
     /// Create a new file inside this directory (rel path; `""` = repo root).
     NewFile(PathBuf),
+    /// Create a new folder inside this directory (rel path; `""` = repo root).
+    NewFolder(PathBuf),
     /// Rename this existing file (rel path) to the typed name in its own folder.
     Rename(PathBuf),
 }
@@ -907,6 +909,10 @@ impl TermState {
 struct BrowseView {
     /// All tracked+untracked files (git) or the filesystem walk (non-git) — the tree's data.
     all_files: Vec<PathBuf>,
+    /// User-created folders still EMPTY on disk — file-derived trees can't see them,
+    /// so they're merged into the tree explicitly (pruned once they gain a file or
+    /// disappear; cleared on project switch).
+    extra_dirs: Vec<PathBuf>,
     /// The lazy dir→children folder-tree model built from `all_files`.
     tree: tree::Tree,
     /// Directories currently expanded in the tree.
@@ -1003,6 +1009,7 @@ impl BrowseView {
         .detach();
         Self {
             all_files: Vec::new(),
+            extra_dirs: Vec::new(),
             tree: tree::Tree::default(),
             // Root folder starts expanded so the tree shows on open.
             expanded: std::collections::HashSet::from([PathBuf::new()]),
@@ -2953,6 +2960,60 @@ mod gpui_smoke_tests {
         let handle = cx.add_window(move |_w, cx| Kyde::new(root.clone(), km.clone(), false, cx));
         cx.run_until_parked();
         (handle, dir)
+    }
+
+    /// New File / New Folder must work in a plain folder with NO git repo (they're pure
+    /// filesystem ops), and a created-but-still-empty folder must show in the Browse
+    /// tree (file-derived trees can't see empty dirs — `extra_dirs` carries them).
+    #[gpui::test]
+    fn new_file_and_folder_work_in_a_plain_non_git_folder(cx: &mut TestAppContext) {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kyde-plain-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("readme.md"), "hi\n").unwrap();
+
+        let km = Keymap::default();
+        let root = Some(dir.clone());
+        let handle = cx.add_window(move |_w, cx| Kyde::new(root.clone(), km.clone(), false, cx));
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                // The non-git filesystem walk populated the tree.
+                assert!(k.browse.all_files.contains(&PathBuf::from("readme.md")));
+
+                // New File at the project root.
+                k.name_prompt = Some(NamePrompt::NewFile(PathBuf::new()));
+                k.name_input.update(cx, |e, cx| {
+                    e.set_content("hello.ts".into(), Lang::PlainText, cx);
+                });
+                k.confirm_name_prompt(w, cx);
+                assert_eq!(std::fs::read_to_string(dir.join("hello.ts")).unwrap(), "");
+
+                // New Folder at the project root.
+                k.name_prompt = Some(NamePrompt::NewFolder(PathBuf::new()));
+                k.name_input.update(cx, |e, cx| {
+                    e.set_content("docs".into(), Lang::PlainText, cx);
+                });
+                k.confirm_name_prompt(w, cx);
+                assert!(dir.join("docs").is_dir());
+                assert!(k.browse.extra_dirs.contains(&PathBuf::from("docs")));
+            })
+            .unwrap();
+        cx.run_until_parked(); // the refreshes' snapshots land
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.browse.all_files.contains(&PathBuf::from("hello.ts")));
+                // The EMPTY folder is a visible tree row.
+                let rows = k.browse.tree.visible(&k.browse.expanded);
+                assert!(
+                    rows.iter()
+                        .any(|r| r.path.as_os_str() == "docs" && r.is_dir),
+                    "empty new folder shows in the tree"
+                );
+            })
+            .unwrap();
     }
 
     /// The Create-New-Branch dialog (type a name → Create) must create + switch to the branch,
