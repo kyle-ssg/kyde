@@ -745,11 +745,19 @@ impl Kyde {
             // Timeline row: undo this change and everything newer — every file in the
             // changed-since panel returns to its state at this snapshot. On the
             // virtual Start-of-history row that means undoing every recorded change.
+            // Say so when that includes DELETING files created since the snapshot.
             MenuTarget::LhRow => {
-                let label = if self.lh.selected == self.lh.events.len() {
-                    "Revert Everything Since"
-                } else {
-                    "Revert This Change and After"
+                let deletes = self
+                    .lh
+                    .files
+                    .iter()
+                    .any(|f| self.lh_base_event_for(f).is_none());
+                let at_start = self.lh.selected == self.lh.events.len();
+                let label = match (at_start, deletes) {
+                    (true, true) => "Revert Everything Since (deletes created files)",
+                    (true, false) => "Revert Everything Since",
+                    (false, true) => "Revert This Change and After (deletes created files)",
+                    (false, false) => "Revert This Change and After",
                 };
                 panel.child(item(label).on_mouse_down(
                     MouseButton::Left,
@@ -1173,11 +1181,17 @@ impl Kyde {
                     .child(SharedString::from(count)),
             );
         // Only offer Revert when it would change something (the targeted file is in
-        // the revertable set) — a no-op button is noise.
+        // the changed-files panel) — a no-op button is noise. A file with no snapshot
+        // at this point reverts by DELETION; the button says so.
         let can_revert = sel_path.as_ref().is_some_and(|p| self.lh.files.contains(p));
         if can_revert {
+            let revert_label = if base.is_some() {
+                "Revert to This Version"
+            } else {
+                "Revert: Delete This File"
+            };
             header = header.child(
-                btn_secondary("lh-revert", "Revert to This Version")
+                btn_secondary("lh-revert", revert_label)
                     .py_1()
                     .on_mouse_down(
                         MouseButton::Left,
