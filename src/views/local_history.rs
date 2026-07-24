@@ -317,15 +317,16 @@ impl Kyde {
             .filter(|e| seen.insert(e.path.clone()))
             .map(|e| e.path.clone())
             .collect();
-        // One rule: keep a file iff its content at the snapshot differs from its
+        // One rule: keep a file iff its effective snapshot (state at the selected
+        // point, or earliest-known for first-seen-after files) differs from its
         // content now, treating "no snapshot" / "no file" as empty — so a file that
         // changed back, or whose empty snapshot was deleted, never shows as a
         // "No differences" row.
         let empty_hash = kyde_local_history::content_hash("");
         files.retain(|f| {
             let base_hash = self
-                .lh_base_event_for(f)
-                .map_or_else(|| empty_hash.clone(), |e| e.hash.clone());
+                .lh_effective_base_for(f)
+                .map_or_else(|| empty_hash.clone(), |(e, _)| e.hash.clone());
             let current_hash = self
                 .lh_abs(f)
                 .and_then(|a| std::fs::read_to_string(a).ok())
@@ -362,7 +363,7 @@ impl Kyde {
     }
 
     /// `path`'s snapshot AT the selected point in time — its newest event at or before
-    /// the selected row (`None` = first seen after it; its earlier state is unknown).
+    /// the selected row (`None` = first seen after it).
     fn lh_base_event_for(&self, path: &std::path::Path) -> Option<&kyde_local_history::Event> {
         self.lh
             .events
@@ -372,21 +373,43 @@ impl Kyde {
             .find(|e| e.path == path)
     }
 
-    /// The base snapshot's text for the currently-targeted file.
+    /// `path`'s EFFECTIVE snapshot for the selected point: its state at that time, or —
+    /// for a file first seen after it — its OLDEST later event (usually the open
+    /// baseline), the earliest state we know and the closest thing to "before its
+    /// changes". So every file in the changed-since panel has a working diff + revert.
+    /// `bool` = the fallback was used.
+    fn lh_effective_base_for(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(&kyde_local_history::Event, bool)> {
+        if let Some(e) = self.lh_base_event_for(path) {
+            return Some((e, false));
+        }
+        self.lh
+            .events
+            .get(..self.lh.selected)
+            .unwrap_or_default()
+            .iter()
+            .rev() // newest-first list → reverse = oldest of the newer events first
+            .find(|e| e.path == path)
+            .map(|e| (e, true))
+    }
+
+    /// The effective base snapshot's text for the currently-targeted file.
     fn lh_selected_content(&self) -> Option<String> {
-        let ev = self.lh_base_event_for(&self.lh_selected_path()?)?;
+        let (ev, _) = self.lh_effective_base_for(&self.lh_selected_path()?)?;
         let store = self.lh.store.as_ref()?;
         store.lock().ok()?.content(&ev.hash).ok()
     }
 
     /// Whether anything under `p` (a file or folder from the changed-files panel) has a
-    /// snapshot at the selected point — i.e. whether a revert has something to restore.
+    /// snapshot to restore — i.e. whether a revert has something to do.
     pub(crate) fn lh_has_base_under(&self, p: &std::path::Path) -> bool {
         self.lh
             .files
             .iter()
             .filter(|f| f.starts_with(p))
-            .any(|f| self.lh_base_event_for(f).is_some())
+            .any(|f| self.lh_effective_base_for(f).is_some())
     }
 
     /// Load snapshot (left) vs current file (right) into the aligned panes — the
@@ -400,8 +423,8 @@ impl Kyde {
             cx.notify();
             return;
         };
-        // No snapshot at this point (the file was first seen after it) → diff against
-        // empty, so the whole file reads as added-since.
+        // Effective base: state at the selected point, or earliest-known for a file
+        // first seen after it. No event at all → diff against empty.
         let snapshot = self.lh_selected_content().unwrap_or_default();
         let current = self
             .lh_abs(&path)
@@ -488,16 +511,16 @@ impl Kyde {
         self.lh_revert_files(targets, cx);
     }
 
-    /// Restore each of `paths` to its snapshot at the selected point. Files first seen
-    /// AFTER the snapshot are skipped (their earlier state is unknown — deleting them
-    /// would be guessing). Reverting is itself history: every pre-revert state is
-    /// labeled "Before revert" first, so the timeline gains a marker and the undone
-    /// state stays recoverable.
+    /// Restore each of `paths` to its effective snapshot at the selected point (a
+    /// file first seen AFTER the snapshot goes back to its earliest-known state —
+    /// never deleted; guessing a deletion would be worse). Reverting is itself
+    /// history: every pre-revert state is labeled "Before revert" first, so the
+    /// timeline gains a marker and the undone state stays recoverable.
     fn lh_revert_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let restores: Vec<(PathBuf, String)> = paths
             .into_iter()
             .filter_map(|p| {
-                let ev = self.lh_base_event_for(&p)?;
+                let (ev, _) = self.lh_effective_base_for(&p)?;
                 let store = self.lh.store.as_ref()?;
                 let text = store.lock().ok()?.content(&ev.hash).ok()?;
                 Some((p, text))
@@ -1023,18 +1046,26 @@ impl Kyde {
             format!("{n} difference{}", if n == 1 { "" } else { "s" })
         };
         // Under a folder scope, name the file both sides are showing. The snapshot side
-        // is the file's state AT the selected point (its base event) — a file first
-        // seen after the snapshot has no base, so no timestamp and no Revert button.
+        // is the file's EFFECTIVE state at the selected point — for a file first seen
+        // after the snapshot that's its earliest later event, labeled "First seen"
+        // to be honest about it.
         let sel_file = sel_path
             .as_ref()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let base = sel_path
             .as_ref()
-            .and_then(|p| self.lh_base_event_for(p).cloned());
+            .and_then(|p| self.lh_effective_base_for(p).map(|(e, fb)| (e.clone(), fb)));
         let snap_label: SharedString = match &base {
-            Some(ev) if scoped_to_file => format!("Snapshot · {}", format_ts(ev.ts_ms, tz)),
-            Some(ev) => format!("{sel_file} · Snapshot · {}", format_ts(ev.ts_ms, tz)),
+            Some((ev, fallback)) => {
+                let word = if *fallback { "First seen" } else { "Snapshot" };
+                let ts = format_ts(ev.ts_ms, tz);
+                if scoped_to_file {
+                    format!("{word} · {ts}")
+                } else {
+                    format!("{sel_file} · {word} · {ts}")
+                }
+            }
             None if scoped_to_file => "No snapshot at this point".to_string(),
             None => format!("{sel_file} · No snapshot at this point"),
         }

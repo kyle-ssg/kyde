@@ -402,9 +402,9 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
   current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
   `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
-  **base event** (its newest event at-or-before the selected row — `lh_base_event_for`); a
-  file first seen after the snapshot has no base → diff vs empty, header "No snapshot at
-  this point", no Revert. Center gutter `»` = restore ONE hunk
+  **effective base** (`lh_effective_base_for`: newest event at-or-before the selected row,
+  else — first seen after it — its OLDEST later event, usually the open baseline; header
+  says "First seen · ts" then). Every panel file therefore has a working diff + revert. Center gutter `»` = restore ONE hunk
   (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = the
   targeted file. **Right-click menus** (`MenuTarget::LhRow`/`LhPath`, rendered in THIS
   window like the rollback modal; items live in `lh_menu_items` — `render_context_menu`
@@ -413,8 +413,8 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   (JUST it), a folder row **Revert This Folder** (its subtree). Every revert labels the
   pre-write state "Before revert" INLINE (`lh_label_sync` — not the background
   `lh_snapshot_now`, so the immediately-reloaded timeline shows the marker), reloads a
-  clean open Browse buffer, re-diffs, refreshes git status; baseless files are skipped,
-  never deleted (their pre-snapshot state is unknown). Entry points: right-click
+  clean open Browse buffer, re-diffs, refreshes git status; a first-seen-after file
+  reverts to its earliest-known state, never deleted (guessing a deletion would be worse). Entry points: right-click
   file/FOLDER/tab → **Local History**, ⌘⇧A palette. A folder (or repo-root) scope lists
   every file's events under it (`Store::events_under`, component-wise prefix); rows/header
   carry the file name.

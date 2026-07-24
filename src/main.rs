@@ -3824,8 +3824,9 @@ mod gpui_smoke_tests {
                         .unwrap()
                 };
 
-                // Oldest snapshot selected → both files changed since; lib.rs was first
-                // seen AFTER it, so it has no base to revert to.
+                // Oldest snapshot selected → both files changed since. lib.rs was first
+                // seen AFTER it, so its effective base falls back to its earliest-known
+                // state — every listed file has something to revert to.
                 let i = row(k, "app.tsx", 1_000);
                 k.lh_select(i, cx);
                 assert_eq!(
@@ -3833,8 +3834,19 @@ mod gpui_smoke_tests {
                     vec![PathBuf::from("app.tsx"), PathBuf::from("sub/lib.rs")]
                 );
                 assert!(k.lh_has_base_under(std::path::Path::new("app.tsx")));
-                assert!(!k.lh_has_base_under(std::path::Path::new("sub/lib.rs")));
-                assert!(!k.lh_has_base_under(std::path::Path::new("sub")));
+                assert!(
+                    k.lh_has_base_under(std::path::Path::new("sub/lib.rs")),
+                    "first-seen-after files fall back to their earliest snapshot"
+                );
+                assert!(k.lh_has_base_under(std::path::Path::new("sub")));
+                // Reverting that first-seen-after file restores the earliest state we
+                // know (its @1500 snapshot), never deletes it.
+                k.lh_revert_path(PathBuf::from("sub/lib.rs"), cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
+                    "l1\n"
+                );
+                std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap(); // restore fixture
 
                 // Right-click a FILE row → revert just that file: app.tsx returns to its
                 // state at the selected point, lib.rs is untouched, and the timeline
