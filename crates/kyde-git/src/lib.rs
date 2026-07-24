@@ -381,11 +381,31 @@ impl Repo {
 
     /// Unstage a file (`git restore --staged -- <rel>`).
     pub fn unstage(&self, rel: &Path) -> Result<()> {
-        git(
+        match git(
             &self.root,
             &["restore", "--staged", "--", &rel.to_string_lossy()],
-        )
-        .map(|_| ())
+        ) {
+            Ok(_) => Ok(()),
+            // A repo with no commits yet (unborn HEAD): `restore --staged` needs HEAD to
+            // restore FROM and dies with "could not resolve HEAD". Everything staged there
+            // is by definition newly added, so dropping the index entry — keeping the
+            // working-tree file — is the exact same unstage.
+            Err(GitError::Command { stderr, .. }) if stderr.contains("could not resolve HEAD") => {
+                git(
+                    &self.root,
+                    &[
+                        "rm",
+                        "--cached",
+                        "--force",
+                        "--quiet",
+                        "--",
+                        &rel.to_string_lossy(),
+                    ],
+                )
+                .map(|_| ())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Discard all changes to a tracked file (index + worktree → HEAD).
@@ -1571,6 +1591,50 @@ mod tests {
         let files = repo.push_files();
         assert_eq!(files.len(), 1, "only the new commit's file is unpushed");
         assert_eq!(files[0].path, PathBuf::from("b.txt"));
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// `unstage` on a newly-added file must drop it back to untracked — both in a normal
+    /// repo (`restore --staged`) and on an unborn HEAD, where `restore --staged` can't
+    /// resolve HEAD and the `git rm --cached` fallback must kick in (issue #59).
+    #[test]
+    fn unstage_added_file_works_with_and_without_head() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let base = std::env::temp_dir().join(format!("kyde-unstage-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        g(&base, &["init", "-b", "main"]);
+        g(&base, &["config", "user.email", "t@example.com"]);
+        g(&base, &["config", "user.name", "Test"]);
+        g(&base, &["config", "commit.gpgsign", "false"]);
+        let repo = Repo::discover(&base).unwrap();
+
+        // Unborn HEAD: no commits yet, stage a new file, unstage it.
+        fs::write(base.join("first.txt"), "1\n").unwrap();
+        repo.stage(Path::new("first.txt")).unwrap();
+        assert_eq!(repo.status().unwrap()[0].status, FileStatus::Added);
+        repo.unstage(Path::new("first.txt"))
+            .expect("unstage must survive an unborn HEAD");
+        let st = repo.status().unwrap();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].status, FileStatus::Untracked, "back to untracked");
+        assert!(base.join("first.txt").exists(), "working copy untouched");
+
+        // Normal repo (HEAD exists): same flow through `restore --staged`.
+        g(&base, &["add", "-A"]);
+        g(&base, &["commit", "-m", "init"]);
+        fs::write(base.join("second.txt"), "2\n").unwrap();
+        repo.stage(Path::new("second.txt")).unwrap();
+        assert_eq!(repo.status().unwrap()[0].status, FileStatus::Added);
+        repo.unstage(Path::new("second.txt")).unwrap();
+        let st = repo.status().unwrap();
+        assert_eq!(st.len(), 1);
+        assert_eq!(st[0].status, FileStatus::Untracked);
+        assert!(base.join("second.txt").exists());
 
         let _ = fs::remove_dir_all(&base);
     }
