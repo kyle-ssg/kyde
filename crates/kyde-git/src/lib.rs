@@ -387,23 +387,22 @@ impl Repo {
         ) {
             Ok(_) => Ok(()),
             // A repo with no commits yet (unborn HEAD): `restore --staged` needs HEAD to
-            // restore FROM and dies with "could not resolve HEAD". Everything staged there
-            // is by definition newly added, so dropping the index entry — keeping the
+            // restore FROM and dies with "could not resolve HEAD" (newer gits quote it:
+            // "could not resolve 'HEAD'" — match the stable prefix only). Everything staged
+            // there is by definition newly added, so dropping the index entry — keeping the
             // working-tree file — is the exact same unstage.
-            Err(GitError::Command { stderr, .. }) if stderr.contains("could not resolve HEAD") => {
-                git(
-                    &self.root,
-                    &[
-                        "rm",
-                        "--cached",
-                        "--force",
-                        "--quiet",
-                        "--",
-                        &rel.to_string_lossy(),
-                    ],
-                )
-                .map(|_| ())
-            }
+            Err(GitError::Command { stderr, .. }) if stderr.contains("could not resolve") => git(
+                &self.root,
+                &[
+                    "rm",
+                    "--cached",
+                    "--force",
+                    "--quiet",
+                    "--",
+                    &rel.to_string_lossy(),
+                ],
+            )
+            .map(|_| ()),
             Err(e) => Err(e),
         }
     }
