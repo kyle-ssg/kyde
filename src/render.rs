@@ -317,6 +317,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_diff_prev))
             .on_action(cx.listener(Self::act_toggle_fps))
             .on_action(cx.listener(Self::act_escape))
+            .on_action(cx.listener(Self::act_confirm))
             .on_action(cx.listener(Self::act_clear_data))
             .on_action(cx.listener(Self::act_open_plugins))
             .on_action(cx.listener(Self::act_find))

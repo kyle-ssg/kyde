@@ -689,6 +689,16 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Enter at the app root: confirm the open confirmation dialog (currently the
+    /// Delete overlay — its Escape-cancel twin lives in `act_escape`). The native
+    /// confirm windows (New Branch / Rollback / Clear Data) handle Enter themselves
+    /// in `ModalWindow::render`. No dialog open → no-op.
+    pub(crate) fn act_confirm(&mut self, _: &ConfirmKey, _: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_target.is_some() {
+            self.do_delete(cx);
+        }
+    }
+
     // ── configurable action handlers ──────────────────────────────
     pub(crate) fn act_save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
         self.save_open(cx);

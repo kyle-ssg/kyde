@@ -97,6 +97,7 @@ actions!(
         NavBack,
         NavForward,
         EscapeKey,
+        ConfirmKey,
         ToggleTerminal,
         NewTerminalTab,
         CloseTerminalTab,
@@ -232,6 +233,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "nav_forward", NavForward);
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
+    // Enter: confirm the open confirmation dialog (currently the Delete overlay) —
+    // IDE default-button behavior. No dialog open → no-op. "Kyde" context, so the
+    // editors/finder/terminal keep their own Enter.
+    cx.bind_keys([KeyBinding::new("enter", ConfirmKey, Some("Kyde"))]);
     // Backspace: delete the selected Browse-tree file/folder (fixed key). Bound to the
     // "Kyde" context, NOT globally, so the deeper editor/commit-box/terminal Backspace
     // bindings win whenever one of those is focused — this only fires at the app root.
@@ -1727,13 +1732,22 @@ impl Render for ModalWindow {
             .text_color(theme::get().text)
             .font_family(theme::font::UI_FAMILY)
             .text_size(px(theme::get().ui_font_size))
-            // Escape closes the window; Enter on the New Branch dialog confirms.
+            // Escape closes (cancels) the window; Enter triggers the confirm-style
+            // dialogs' primary action (New Branch / Rollback / Clear Data), IDE
+            // default-button style. Non-confirm windows (Settings, Plugins, Merge, …)
+            // deliberately ignore Enter.
             .on_key_down(
                 cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
                     match ev.keystroke.key.as_str() {
                         "escape" => window.remove_window(),
                         "enter" if kind == ModalKind::NewBranch => {
                             this.kyde.update(cx, Kyde::do_create_branch);
+                        }
+                        "enter" if kind == ModalKind::Rollback => {
+                            this.kyde.update(cx, Kyde::do_rollback);
+                        }
+                        "enter" if kind == ModalKind::ClearData => {
+                            this.kyde.update(cx, Kyde::do_clear_data);
                         }
                         _ => {}
                     }
@@ -3689,6 +3703,31 @@ mod gpui_smoke_tests {
                     !k.files.iter().any(|f| f.path.ends_with("new.txt")),
                     "the added file left the changes list"
                 );
+            })
+            .unwrap();
+    }
+
+    /// The Delete confirmation dialog answers the keyboard: Enter = the primary
+    /// (destructive) action, Escape = cancel — IDE default-button behavior.
+    #[gpui::test]
+    fn delete_dialog_enter_confirms_and_escape_cancels(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                // Escape cancels — the file survives.
+                k.open_delete(dir.join("new.txt"), cx);
+                assert!(k.delete_target.is_some());
+                k.act_escape(&EscapeKey, w, cx);
+                assert!(k.delete_target.is_none(), "Escape cancels the dialog");
+                assert!(dir.join("new.txt").exists(), "cancel leaves the file");
+                // Enter confirms — the file is deleted.
+                k.open_delete(dir.join("new.txt"), cx);
+                k.act_confirm(&ConfirmKey, w, cx);
+                assert!(k.delete_target.is_none(), "confirm consumes the dialog");
+                assert!(!dir.join("new.txt").exists(), "Enter deletes the file");
+                // No dialog open → Enter is a no-op (doesn't panic, deletes nothing).
+                k.act_confirm(&ConfirmKey, w, cx);
+                assert!(dir.join("app.tsx").exists());
             })
             .unwrap();
     }
