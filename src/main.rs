@@ -3806,6 +3806,9 @@ mod gpui_smoke_tests {
                             .unwrap();
                     };
                     rec(&mut s, "app.tsx", "a1\n", 1_000);
+                    // An EMPTY snapshot of a file that no longer exists on disk —
+                    // both sides are effectively empty, so it must never be listed.
+                    rec(&mut s, "ghost.txt", "", 1_200);
                     rec(&mut s, "sub/lib.rs", "l1\n", 1_500);
                     rec(&mut s, "app.tsx", "a2\n", 2_000);
                     rec(&mut s, "sub/lib.rs", "l2\n", 2_500);
@@ -3813,7 +3816,7 @@ mod gpui_smoke_tests {
                 k.lh.path = Some(PathBuf::new()); // whole-project scope
                 k.lh.selected = 0;
                 k.lh_reload(cx);
-                assert_eq!(k.lh.events.len(), 4);
+                assert_eq!(k.lh.events.len(), 5);
                 let row = |k: &Kyde, p: &str, ts: u64| {
                     k.lh.events
                         .iter()
@@ -3859,7 +3862,7 @@ mod gpui_smoke_tests {
                 assert_eq!(
                     k.lh.files,
                     vec![PathBuf::from("sub/lib.rs")],
-                    "changed-back files leave the panel"
+                    "changed-back + empty-deleted files leave the panel"
                 );
 
                 // Right-click a FOLDER row → revert just that folder's files.

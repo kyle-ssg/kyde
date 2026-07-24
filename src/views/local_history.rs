@@ -317,15 +317,23 @@ impl Kyde {
             .filter(|e| seen.insert(e.path.clone()))
             .map(|e| e.path.clone())
             .collect();
+        // One rule: keep a file iff its content at the snapshot differs from its
+        // content now, treating "no snapshot" / "no file" as empty — so a file that
+        // changed back, or whose empty snapshot was deleted, never shows as a
+        // "No differences" row.
+        let empty_hash = kyde_local_history::content_hash("");
         files.retain(|f| {
-            let base = self.lh_base_event_for(f).map(|e| e.hash.clone());
-            let current = self.lh_abs(f).and_then(|a| std::fs::read_to_string(a).ok());
-            match (base, current) {
-                (Some(h), Some(c)) => kyde_local_history::content_hash(&c) != h,
-                (Some(_), None) => true, // deleted since the snapshot — restorable
-                (None, Some(c)) => !c.is_empty(), // appeared since — shows as all-added
-                (None, None) => false,   // nothing on either side, nothing to show
-            }
+            let base_hash = self
+                .lh_base_event_for(f)
+                .map_or_else(|| empty_hash.clone(), |e| e.hash.clone());
+            let current_hash = self
+                .lh_abs(f)
+                .and_then(|a| std::fs::read_to_string(a).ok())
+                .map_or_else(
+                    || empty_hash.clone(),
+                    |c| kyde_local_history::content_hash(&c),
+                );
+            base_hash != current_hash
         });
         files.sort();
         self.lh.files_tree = tree::Tree::build(&files);
