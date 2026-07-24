@@ -1640,6 +1640,9 @@ struct LocalHistoryView {
     /// The changed-files panel's selection — the file the diff panes + restores target.
     /// `None` falls back to the selected event's own file.
     file_selected: Option<PathBuf>,
+    /// The targeted file is missing from disk (deleted since the snapshot) — the
+    /// header says "Deleted" instead of an empty "Current" pane.
+    current_missing: bool,
     /// Snapshot (old) → current (new) diff for the selected row.
     diff: Option<FileDiff>,
     /// Left pane — the snapshot (read-only).
@@ -1672,6 +1675,7 @@ impl LocalHistoryView {
             files_tree: tree::Tree::default(),
             files_expanded: std::collections::HashSet::new(),
             file_selected: None,
+            current_missing: false,
             diff: None,
             left: mk(cx),
             right: mk(cx),
@@ -3857,6 +3861,7 @@ mod gpui_smoke_tests {
         std::fs::write(dir.join("app.tsx"), "now-a\n").unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap();
         std::fs::write(dir.join("new.txt"), "n1\n").unwrap();
+        std::fs::write(dir.join("empty-new.txt"), "").unwrap();
         handle
             .update(cx, |k, _w, cx| {
                 lh_test_store(k, &dir);
@@ -3874,15 +3879,18 @@ mod gpui_smoke_tests {
                     rec(&mut s, "ghost.txt", "", 1_200);
                     rec(&mut s, "sub/lib.rs", "l1\n", 1_500);
                     // Created since the older snapshots, unchanged since creation:
-                    // listed as added-since, but nothing to revert to.
+                    // listed as added-since; revert deletes them.
                     rec(&mut s, "new.txt", "n1\n", 1_800);
+                    // Created EMPTY (the New File flow's baseline): existence-aware
+                    // listing — empty content must not read as "doesn't exist".
+                    rec(&mut s, "empty-new.txt", "", 1_900);
                     rec(&mut s, "app.tsx", "a2\n", 2_000);
                     rec(&mut s, "sub/lib.rs", "l2\n", 2_500);
                 }
                 k.lh.path = Some(PathBuf::new()); // whole-project scope
                 k.lh.selected = 0;
                 k.lh_reload(cx);
-                assert_eq!(k.lh.events.len(), 6);
+                assert_eq!(k.lh.events.len(), 7);
                 let row = |k: &Kyde, p: &str, ts: u64| {
                     k.lh.events
                         .iter()
@@ -3900,6 +3908,7 @@ mod gpui_smoke_tests {
                     k.lh.files,
                     vec![
                         PathBuf::from("app.tsx"),
+                        PathBuf::from("empty-new.txt"),
                         PathBuf::from("new.txt"),
                         PathBuf::from("sub/lib.rs")
                     ]
@@ -3956,8 +3965,12 @@ mod gpui_smoke_tests {
                 k.lh_select(i, cx);
                 assert_eq!(
                     k.lh.files,
-                    vec![PathBuf::from("new.txt"), PathBuf::from("sub/lib.rs")],
-                    "changed-back + empty-deleted files leave the panel"
+                    vec![
+                        PathBuf::from("empty-new.txt"),
+                        PathBuf::from("new.txt"),
+                        PathBuf::from("sub/lib.rs")
+                    ],
+                    "changed-back files leave the panel; created-since (even empty) stay"
                 );
 
                 // Right-click a FOLDER row → revert just that folder's files.
@@ -3990,6 +4003,10 @@ mod gpui_smoke_tests {
                 assert!(
                     !dir.join("new.txt").exists(),
                     "revert-since deletes files created after the snapshot"
+                );
+                assert!(
+                    !dir.join("empty-new.txt").exists(),
+                    "an empty created file is deleted too — existence is the change"
                 );
                 {
                     let store = k.lh.store.clone().unwrap();

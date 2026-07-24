@@ -319,19 +319,20 @@ impl Kyde {
             .filter(|e| seen.insert(e.path.clone()))
             .map(|e| e.path.clone())
             .collect();
-        let empty_hash = kyde_local_history::content_hash("");
         files.retain(|f| {
-            let current_hash = self
+            // Existence-aware: `None` = no snapshot then / no file now. A pure
+            // existence flip (created since — even as an EMPTY file — or deleted
+            // since) is a real change, listed and revertable.
+            let base = self.lh_base_event_for(f).map(|e| e.hash.clone());
+            let current = self
                 .lh_abs(f)
                 .and_then(|a| std::fs::read_to_string(a).ok())
-                .map_or_else(
-                    || empty_hash.clone(),
-                    |c| kyde_local_history::content_hash(&c),
-                );
-            let strict_hash = self
-                .lh_base_event_for(f)
-                .map_or_else(|| empty_hash.clone(), |e| e.hash.clone());
-            strict_hash != current_hash
+                .map(|c| kyde_local_history::content_hash(&c));
+            match (base, current) {
+                (Some(b), Some(c)) => b != c,
+                (None, None) => false,
+                _ => true,
+            }
         });
         files.sort();
         self.lh.files_tree = tree::Tree::build(&files);
@@ -397,13 +398,14 @@ impl Kyde {
             cx.notify();
             return;
         };
-        // Effective base: state at the selected point, or earliest-known for a file
-        // first seen after it. No event at all → diff against empty.
+        // State at the selected point; no event → diff against empty (added-since).
         let snapshot = self.lh_selected_content().unwrap_or_default();
-        let current = self
+        let current_opt = self
             .lh_abs(&path)
-            .and_then(|a| std::fs::read_to_string(a).ok())
-            .unwrap_or_default();
+            .and_then(|a| std::fs::read_to_string(a).ok());
+        // Remember existence for the header ("Deleted" beats an empty pane).
+        self.lh.current_missing = current_opt.is_none();
+        let current = current_opt.unwrap_or_default();
         let d = FileDiff::compute(&snapshot, &current);
         let first = d.hunks.first().map(|h| h.old_range.start);
         let (lbg, rbg) = diff_line_bgs(&d);
@@ -1080,10 +1082,15 @@ impl Kyde {
             None => format!("{sel_file} · Added since this point"),
         }
         .into();
-        let current_label: SharedString = if scoped_to_file {
-            "Current".into()
+        let current_word = if self.lh.current_missing {
+            "Deleted"
         } else {
-            format!("{sel_file} · Current").into()
+            "Current"
+        };
+        let current_label: SharedString = if scoped_to_file {
+            current_word.into()
+        } else {
+            format!("{sel_file} · {current_word}").into()
         };
         let mut header = div()
             .flex()

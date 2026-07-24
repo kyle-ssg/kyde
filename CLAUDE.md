@@ -396,11 +396,15 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   `lh_sync_store` (called from `refresh`) keeps the store pointed at the open project.
 - **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left column =
   snapshot timeline (title + `format_ts · relative_ts`) over a **changed-since panel**
-  (IDE-style): the distinct files of `events[0..=selected]` whose CURRENT content differs
-  from their state AT the snapshot — "not tracked yet"/"no file" count as empty, so a
-  created-since file lists as all-added and a touched-but-changed-back file (deleted then
-  restored) is dropped (content-hash check per candidate, on selection change only) — as a
-  fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
+  (IDE-style): the distinct files of `events[0..=selected]` whose CURRENT state differs
+  from their state AT the snapshot. The check is **existence-aware**: an existence flip
+  (created since — even as an EMPTY file, the New File baseline — or deleted since) is a
+  real, listed, revertable change; only content-identical both-exist (changed-back) and
+  neither-exists files are dropped (hash check per candidate, on selection change only).
+  Rendered as a fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file
+  shows ITS diff; a missing current file shows "Deleted" in the header
+  (`lh.current_missing`). Folders themselves carry no history — their FILES do (recording
+  is file-based; a revert deletes/recreates the files, the dir shell stays). Right = snapshot ↔
   current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
   `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
   state AT the selected point (`lh_base_event_for`; none → diff vs empty, header "Added
