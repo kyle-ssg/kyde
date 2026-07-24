@@ -230,7 +230,8 @@ impl Kyde {
 
     // ── the Local History window ──────────────────────────────────
 
-    /// Open the Local History window for `rel`.
+    /// Open the Local History window for `rel` — a file, a folder (its timeline is
+    /// every file's events under it), or the empty path (whole project).
     pub(crate) fn open_local_history(&mut self, rel: PathBuf, cx: &mut Context<Self>) {
         self.context_menu = None;
         if self.lh.store.is_none() {
@@ -238,10 +239,10 @@ impl Kyde {
         }
         // Capture any pending edits first so "Current vs latest" starts in sync.
         self.lh_flush(cx);
-        let name = rel
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = rel.file_name().map_or_else(
+            || "Project".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         self.lh.path = Some(rel);
         self.lh.selected = 0;
         self.lh_reload(cx);
@@ -254,14 +255,16 @@ impl Kyde {
         );
     }
 
-    /// (Re)read the timeline for the open path and load the selected snapshot's diff.
+    /// (Re)read the timeline for the open scope and load the selected snapshot's diff.
+    /// `events_under` scopes component-wise, so a file shows its own events and a
+    /// folder shows every file's under it.
     pub(crate) fn lh_reload(&mut self, cx: &mut Context<Self>) {
         let (Some(path), Some(store)) = (self.lh.path.clone(), self.lh.store.clone()) else {
             return;
         };
         self.lh.events = store
             .lock()
-            .map(|s| s.events_for(&path))
+            .map(|s| s.events_under(&path))
             .unwrap_or_default();
         self.lh.selected = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
         self.lh_load_diff(true, cx);
@@ -275,6 +278,11 @@ impl Kyde {
         }
     }
 
+    /// The file the selected timeline row belongs to (== the scope for a file view).
+    fn lh_selected_path(&self) -> Option<PathBuf> {
+        self.lh.events.get(self.lh.selected).map(|e| e.path.clone())
+    }
+
     /// The selected snapshot's text, read back from the blob store.
     fn lh_selected_content(&self) -> Option<String> {
         let ev = self.lh.events.get(self.lh.selected)?;
@@ -283,9 +291,13 @@ impl Kyde {
     }
 
     /// Load snapshot (left) vs current file (right) into the aligned panes — the
-    /// compare-view decoration pipeline. `park` scrolls to just above the first hunk.
+    /// compare-view decoration pipeline. The file is the selected EVENT's (under a
+    /// folder scope each row can belong to a different file). `park` scrolls to just
+    /// above the first hunk.
     fn lh_load_diff(&mut self, park: bool, cx: &mut Context<Self>) {
-        let Some(path) = self.lh.path.clone() else {
+        let Some(path) = self.lh_selected_path() else {
+            self.lh.diff = None;
+            cx.notify();
             return;
         };
         let Some(snapshot) = self.lh_selected_content() else {
@@ -357,10 +369,11 @@ impl Kyde {
         self.lh_write_current("Before revert", &snapshot, cx);
     }
 
-    /// Persist `text` as the current file: snapshot the pre-write state under `label`,
-    /// write, reload a clean open editor showing the file, re-diff, refresh git status.
+    /// Persist `text` as the selected event's file: snapshot the pre-write state under
+    /// `label`, write, reload a clean open editor showing the file, re-diff, refresh
+    /// git status. (Under a folder scope the target is the selected ROW's file.)
     fn lh_write_current(&mut self, label: &str, text: &str, cx: &mut Context<Self>) {
-        let Some(path) = self.lh.path.clone() else {
+        let Some(path) = self.lh_selected_path() else {
             return;
         };
         self.lh_snapshot_now(vec![path.clone()], label, cx);
@@ -395,6 +408,12 @@ impl Kyde {
         let tz = tz_offset_min();
 
         // ── left: the snapshot timeline ──
+        // Folder/project scope → rows span several files, so each carries its file name.
+        let scoped_to_file = self
+            .lh
+            .events
+            .iter()
+            .all(|e| Some(e.path.as_path()) == self.lh.path.as_deref());
         let timeline_rows: Vec<gpui::AnyElement> = self
             .lh
             .events
@@ -402,11 +421,20 @@ impl Kyde {
             .enumerate()
             .map(|(i, ev)| {
                 let sel = i == self.lh.selected;
-                let title: SharedString = match (&ev.kind, &ev.label) {
-                    (EventKind::Label, Some(l)) => l.clone().into(),
-                    (EventKind::External, _) => "External change".into(),
-                    _ => "Change".into(),
+                let mut title_text = match (&ev.kind, &ev.label) {
+                    (EventKind::Label, Some(l)) => l.clone(),
+                    (EventKind::External, _) => "External change".to_string(),
+                    _ => "Change".to_string(),
                 };
+                if !scoped_to_file {
+                    let file = ev
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    title_text = format!("{file} — {title_text}");
+                }
+                let title: SharedString = title_text.into();
                 let when: SharedString = format!(
                     "{} · {}",
                     format_ts(ev.ts_ms, tz),
@@ -567,13 +595,29 @@ impl Kyde {
         } else {
             format!("{n} difference{}", if n == 1 { "" } else { "s" })
         };
+        // Under a folder scope, name the file both sides are showing.
+        let sel_file = self
+            .lh_selected_path()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         let snap_label: SharedString = self
             .lh
             .events
             .get(self.lh.selected)
-            .map(|ev| format!("Snapshot · {}", format_ts(ev.ts_ms, tz)))
+            .map(|ev| {
+                if scoped_to_file {
+                    format!("Snapshot · {}", format_ts(ev.ts_ms, tz))
+                } else {
+                    format!("{sel_file} · Snapshot · {}", format_ts(ev.ts_ms, tz))
+                }
+            })
             .unwrap_or_default()
             .into();
+        let current_label: SharedString = if scoped_to_file {
+            "Current".into()
+        } else {
+            format!("{sel_file} · Current").into()
+        };
         let header = div()
             .flex()
             .flex_row()
@@ -614,7 +658,7 @@ impl Kyde {
                     .truncate()
                     .text_right()
                     .text_color(t.text)
-                    .child("Current"),
+                    .child(current_label),
             );
 
         let panes = div()

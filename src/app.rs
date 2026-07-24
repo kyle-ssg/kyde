@@ -358,7 +358,20 @@ impl Kyde {
     /// Write a background [`RepoSnapshot`] into `self` and rebuild the derived UI state
     /// (commit tree + current selection). Runs on the foreground (needs `&mut self`).
     fn apply_snapshot(&mut self, snap: RepoSnapshot, cx: &mut Context<Self>) {
-        self.browse.all_files = snap.all_files;
+        // `git ls-files` keeps listing a tracked file whose working copy was deleted —
+        // showing a nonexistent file in the Browse tree (and ⌘P) reads as a bug. Drop
+        // Deleted-status paths; they still show in the Commit view (the change itself).
+        let deleted: std::collections::HashSet<&PathBuf> = snap
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::Deleted)
+            .map(|f| &f.path)
+            .collect();
+        self.browse.all_files = snap
+            .all_files
+            .into_iter()
+            .filter(|p| !deleted.contains(p))
+            .collect();
         self.browse.tree = tree::Tree::build(&self.browse.all_files);
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;

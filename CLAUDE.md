@@ -400,8 +400,10 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   `ScrollHandle`), center gutter `»` = restore ONE hunk of the snapshot into the file
   (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = whole
   snapshot. Every restore snapshots the pre-write state first, reloads a clean open Browse
-  buffer, re-diffs, refreshes git status. Entry points: right-click file/tab → **Local
-  History**, ⌘⇧A palette. Not offered for folders (subtree snapshots deliberately skipped).
+  buffer, re-diffs, refreshes git status. Entry points: right-click file/FOLDER/tab →
+  **Local History**, ⌘⇧A palette. A folder (or repo-root) scope lists every file's events
+  under it (`Store::events_under`, component-wise prefix); the selected ROW's file drives
+  the diff + restore target, and rows/header carry the file name.
 - **Config** (`kyde-config::history::HistoryCfg` → `history.json`): `enabled` (default ON —
   dedup + debounce make steady-state cost ≈0), `retention_days` (7, clamp 1..=90),
   `throttle_secs` (10, clamp 1..=300). Settings → **Local History** section (toggle +
@@ -458,6 +460,9 @@ The divider (`browse-divider`, `cursor_col_resize`) sets `tree_resizing`; the ro
 `on_mouse_move`/`on_mouse_up` update `tree_width` (cursor x, clamped 180–900) accounting for
 `RAIL_W + FRAME_GAP`. Right-click a row always opens the menu: Commit/Rollback only when
 `has_changes_under`, plus **Reveal in Finder** (`reveal_in_os` → `open -R`) always.
+`apply_snapshot` drops Deleted-status paths from `all_files` — `git ls-files` keeps
+listing a tracked file whose working copy was deleted, and a nonexistent file in the
+tree/⌘P reads as a bug (the deletion still shows in the Commit view).
 
 ## Editor tabs (render_tab_bar)
 Opening a file appends to `open_tabs: Vec<PathBuf>` (deduped, open order); `open_path` is the

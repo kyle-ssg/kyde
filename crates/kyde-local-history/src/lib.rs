@@ -289,6 +289,22 @@ impl Store {
         v
     }
 
+    /// All events for files under `scope` (component-wise prefix — `src/app` never
+    /// matches `src/app.rs`), newest first. A file path scopes to itself and the
+    /// empty path scopes to everything, so this powers the file, folder, and
+    /// project-root Local History views alike.
+    #[must_use]
+    pub fn events_under(&self, scope: &Path) -> Vec<Event> {
+        let mut v: Vec<Event> = self
+            .events
+            .iter()
+            .filter(|e| e.path.starts_with(scope))
+            .cloned()
+            .collect();
+        v.reverse();
+        v
+    }
+
     /// Hash of the latest snapshot of `path`, if any — the external-change check.
     #[must_use]
     pub fn last_hash(&self, path: &Path) -> Option<&str> {
@@ -612,6 +628,27 @@ mod tests {
                 .all(|c| c.is_alphanumeric() || "-_.".contains(c)),
             "dir name must be filesystem-safe, got {name}"
         );
+    }
+
+    #[test]
+    fn events_under_scopes_by_component_prefix() {
+        let mut s = tmp_store("under");
+        s.record(Path::new("src/app.rs"), "a", EventKind::Change, None, 1)
+            .unwrap();
+        s.record(Path::new("src/views/x.rs"), "b", EventKind::Change, None, 2)
+            .unwrap();
+        s.record(Path::new("src-old/y.rs"), "c", EventKind::Change, None, 3)
+            .unwrap();
+        let under_src = s.events_under(Path::new("src"));
+        assert_eq!(under_src.len(), 2, "src-old must NOT match the src scope");
+        assert_eq!(under_src[0].ts_ms, 2, "newest first");
+        assert_eq!(
+            s.events_under(Path::new("src/app.rs")).len(),
+            1,
+            "a file path scopes to itself"
+        );
+        assert_eq!(s.events_under(Path::new("")).len(), 3, "empty scope = all");
+        assert!(s.events_under(Path::new("nope")).is_empty());
     }
 
     #[test]

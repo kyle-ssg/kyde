@@ -782,8 +782,8 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
                 ));
-                // Local History (issue #7) — per-file timeline; hidden when disabled.
-                if !is_dir && self.lh.store.is_some() {
+                // Local History (issue #7) — file OR folder scope; hidden when disabled.
+                if self.lh.store.is_some() {
                     let pl = p.clone();
                     panel = panel.child(item("Local History").on_mouse_down(
                         MouseButton::Left,

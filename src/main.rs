@@ -3707,6 +3707,83 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A folder (or project-root) scope shows every file's events under it, and the
+    /// selected row's own file drives the diff/restore target.
+    #[gpui::test]
+    fn local_history_folder_scope_lists_files_under_it(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                let store = k.lh.store.clone().unwrap();
+                {
+                    use kyde_local_history::EventKind;
+                    let mut s = store.lock().unwrap();
+                    s.record(
+                        std::path::Path::new("app.tsx"),
+                        "root",
+                        EventKind::Change,
+                        None,
+                        1_000,
+                    )
+                    .unwrap();
+                    s.record(
+                        std::path::Path::new("sub/lib.rs"),
+                        "nested",
+                        EventKind::Change,
+                        None,
+                        2_000,
+                    )
+                    .unwrap();
+                }
+                // Folder scope: only the file under `sub` shows.
+                k.lh.path = Some(PathBuf::from("sub"));
+                k.lh.selected = 0;
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 1);
+                assert_eq!(k.lh.events[0].path, PathBuf::from("sub/lib.rs"));
+                // Project-root scope: everything shows, newest first.
+                k.lh.path = Some(PathBuf::new());
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 2);
+                assert_eq!(k.lh.events[0].path, PathBuf::from("sub/lib.rs"));
+                assert_eq!(k.lh.events[1].path, PathBuf::from("app.tsx"));
+            })
+            .unwrap();
+    }
+
+    /// A tracked file deleted from the working tree must leave the Browse tree (and so
+    /// ⌘P): `git ls-files` still lists it, but showing a nonexistent file reads as a
+    /// bug. The deletion itself still shows in the changed-files list.
+    #[gpui::test]
+    fn deleted_files_leave_the_browse_tree(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.browse.all_files.contains(&PathBuf::from("app.tsx")));
+            })
+            .unwrap();
+        std::fs::remove_file(dir.join("app.tsx")).unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    !k.browse.all_files.contains(&PathBuf::from("app.tsx")),
+                    "the deleted file left the Browse tree"
+                );
+                assert!(
+                    k.files
+                        .iter()
+                        .any(|f| f.path.as_os_str() == "app.tsx"
+                            && f.status == FileStatus::Deleted),
+                    "the deletion still shows as a change"
+                );
+            })
+            .unwrap();
+    }
+
     /// The Delete confirmation dialog answers the keyboard: Enter = the primary
     /// (destructive) action, Escape = cancel — IDE default-button behavior.
     #[gpui::test]
