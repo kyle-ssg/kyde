@@ -227,6 +227,10 @@ impl Kyde {
                 };
                 match self.fs_create_file(&rel) {
                     Ok(()) => {
+                        // Stamp the creation in local history (inline, before the
+                        // open records a bare baseline) — the timeline row reads
+                        // "Created" and the pre-creation state is one revert away.
+                        self.lh_label_sync(std::slice::from_ref(&rel), "Created");
                         self.refresh(cx);
                         self.open_file(rel, cx);
                     }

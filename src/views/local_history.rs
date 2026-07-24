@@ -258,7 +258,9 @@ impl Kyde {
 
     /// (Re)read the timeline for the open scope and load the selected snapshot's diff.
     /// `events_under` scopes component-wise, so a file shows its own events and a
-    /// folder shows every file's under it.
+    /// folder shows every file's under it. `selected == events.len()` is the virtual
+    /// **Start of history** row — "before anything was recorded": every base lookup
+    /// returns `None`, so creations list as added-since and revert by deletion.
     pub(crate) fn lh_reload(&mut self, cx: &mut Context<Self>) {
         let (Some(path), Some(store)) = (self.lh.path.clone(), self.lh.store.clone()) else {
             return;
@@ -267,20 +269,29 @@ impl Kyde {
             .lock()
             .map(|s| s.events_under(&path))
             .unwrap_or_default();
-        self.lh.selected = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
+        self.lh.selected = self.lh.selected.min(self.lh.events.len());
         self.lh_recompute_files();
-        self.lh_load_diff(true, cx);
+        self.lh_after_select(cx);
     }
 
-    /// Select timeline row `i` and re-diff (the changed-files panel + its selection
-    /// follow the row's file).
+    /// Select timeline row `i` (`events.len()` = the virtual Start-of-history row)
+    /// and re-diff; the changed-files panel + its selection follow.
     pub(crate) fn lh_select(&mut self, i: usize, cx: &mut Context<Self>) {
-        if i < self.lh.events.len() {
+        if i <= self.lh.events.len() {
             self.lh.selected = i;
             self.lh.file_selected = None; // back to the row's own file
             self.lh_recompute_files();
-            self.lh_load_diff(true, cx);
+            self.lh_after_select(cx);
         }
+    }
+
+    /// Post-selection fixup: the virtual row has no event to fall back on, so target
+    /// the first changed file; then load the diff.
+    fn lh_after_select(&mut self, cx: &mut Context<Self>) {
+        if self.lh.file_selected.is_none() && self.lh.events.get(self.lh.selected).is_none() {
+            self.lh.file_selected = self.lh.files.first().cloned();
+        }
+        self.lh_load_diff(true, cx);
     }
 
     /// Select file `p` in the changed-files panel — the diff panes (and any restore)
@@ -568,10 +579,10 @@ impl Kyde {
     }
 
     /// Record `paths`' current on-disk content as `label` events INLINE (on the UI
-    /// thread) — the window's own restores use this instead of the background
-    /// [`Kyde::lh_snapshot_now`] so the immediately-following `lh_reload` is
-    /// guaranteed to show the new marker. Small, explicit user actions only.
-    fn lh_label_sync(&mut self, paths: &[PathBuf], label: &str) {
+    /// thread) — used instead of the background [`Kyde::lh_snapshot_now`] where the
+    /// very next read must see the marker (the window's restores, the New File
+    /// "Created" stamp). Small, explicit user actions only.
+    pub(crate) fn lh_label_sync(&mut self, paths: &[PathBuf], label: &str) {
         if !self.lh.cfg.enabled {
             return;
         }
@@ -732,11 +743,19 @@ impl Kyde {
         let t = theme::get();
         match target {
             // Timeline row: undo this change and everything newer — every file in the
-            // changed-since panel returns to its state at this snapshot.
-            MenuTarget::LhRow => panel.child(item("Revert This Change and After").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.lh_revert_since(cx)),
-            )),
+            // changed-since panel returns to its state at this snapshot. On the
+            // virtual Start-of-history row that means undoing every recorded change.
+            MenuTarget::LhRow => {
+                let label = if self.lh.selected == self.lh.events.len() {
+                    "Revert Everything Since"
+                } else {
+                    "Revert This Change and After"
+                };
+                panel.child(item(label).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.lh_revert_since(cx)),
+                ))
+            }
             // Changed-files row: revert JUST this file (or this folder's files). A
             // file that didn't exist at the snapshot is deleted by the revert — say
             // so in the label (it stays recoverable from the timeline).
@@ -844,6 +863,42 @@ impl Kyde {
                     .into_any_element()
             })
             .collect();
+        let mut timeline_rows = timeline_rows;
+        // The virtual **Start of history** row — "before anything was recorded".
+        // Selecting it lists every creation as added-since, revertable by deletion
+        // ("revert to before it was created").
+        if !self.lh.events.is_empty() {
+            let i = self.lh.events.len();
+            let sel = self.lh.selected == i;
+            timeline_rows.push(
+                ui::picker::row(("lh-row", i), sel, t.bg_light)
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .mx(px(4.0))
+                    .px_3()
+                    .py_1p5()
+                    .child(div().text_color(t.text).child("Start of history"))
+                    .child(
+                        div()
+                            .text_size(px(t.ui_font_size - 1.0))
+                            .text_color(t.line_number)
+                            .child("before the first snapshot"),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| this.lh_select(i, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                            this.lh_select(i, cx);
+                            this.open_menu(e.position, MenuTarget::LhRow, cx);
+                        }),
+                    )
+                    .into_any_element(),
+            );
+        }
         let timeline = div()
             .id("lh-timeline")
             .flex_1()

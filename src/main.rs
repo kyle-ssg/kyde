@@ -4027,6 +4027,56 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
     }
 
+    /// The virtual "Start of history" timeline row: even when a file's ONLY event is
+    /// its creation, selecting the row below it ("before the first snapshot") lists
+    /// the creation as a revertable change — reverting deletes the file ("revert to
+    /// before it was created"), recoverable via the pre-revert label.
+    #[gpui::test]
+    fn local_history_start_row_undoes_creation(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                let store = k.lh.store.clone().unwrap();
+                {
+                    use kyde_local_history::EventKind;
+                    let mut s = store.lock().unwrap();
+                    s.record(
+                        std::path::Path::new("solo.txt"),
+                        "",
+                        EventKind::Label,
+                        Some("Created".into()),
+                        1_000,
+                    )
+                    .unwrap();
+                }
+                std::fs::write(dir.join("solo.txt"), "").unwrap();
+                k.lh.path = Some(PathBuf::from("solo.txt"));
+                k.lh.selected = 0;
+                k.lh.file_selected = None;
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 1);
+                // At the creation row itself nothing differs…
+                assert!(k.lh.files.is_empty());
+                // …but the virtual Start-of-history row shows the creation.
+                k.lh_select(1, cx);
+                assert_eq!(k.lh.files, vec![PathBuf::from("solo.txt")]);
+                assert!(k.lh_has_base_under(std::path::Path::new("solo.txt")));
+                k.lh_revert_since(cx);
+                assert!(
+                    !dir.join("solo.txt").exists(),
+                    "undoing the creation deletes the file"
+                );
+                // Recoverable: the pre-revert (empty) content was labeled first.
+                let store = k.lh.store.clone().unwrap();
+                let s = store.lock().unwrap();
+                let ev = s.events_for(std::path::Path::new("solo.txt"));
+                assert_eq!(ev[0].label.as_deref(), Some("Before revert"));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    }
+
     /// Clear Local History: the action opens a native confirmation window; confirming
     /// wipes the project's store (journal + blobs) and empties any open timeline.
     #[gpui::test]

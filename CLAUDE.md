@@ -404,7 +404,12 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   Rendered as a fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file
   shows ITS diff; a missing current file shows "Deleted" in the header
   (`lh.current_missing`). Folders themselves carry no history — their FILES do (recording
-  is file-based; a revert deletes/recreates the files, the dir shell stays). Right = snapshot ↔
+  is file-based; a revert deletes/recreates the files, the dir shell stays). The timeline
+  ends with a virtual **"Start of history"** row (`selected == events.len()` — every base
+  lookup returns `None`): "before anything was recorded", so a file whose ONLY event is
+  its creation still offers "revert to before it was created" (menu: "Revert Everything
+  Since"). New File stamps a "Created" label inline (`lh_label_sync`, before the open's
+  baseline would dedupe it) so creation rows read as such. Right = snapshot ↔
   current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
   `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
   state AT the selected point (`lh_base_event_for`; none → diff vs empty, header "Added
