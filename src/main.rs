@@ -235,7 +235,13 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     // Backspace: delete the selected Browse-tree file/folder (fixed key). Bound to the
     // "Kyde" context, NOT globally, so the deeper editor/commit-box/terminal Backspace
     // bindings win whenever one of those is focused — this only fires at the app root.
-    cx.bind_keys([KeyBinding::new("backspace", DeleteFile, Some("Kyde"))]);
+    // ⌘⌫ deletes too (issue #61 — Finder's delete shortcut; muscle memory says both work).
+    // Safe at the root: the editor binds cmd-backspace to DeleteToHome in its own deeper
+    // context, so this only fires when no editor/terminal is focused.
+    cx.bind_keys([
+        KeyBinding::new("backspace", DeleteFile, Some("Kyde")),
+        KeyBinding::new("cmd-backspace", DeleteFile, Some("Kyde")),
+    ]);
     // Jump between diff changes (Alt+↓ / Alt+↑). Global so they fire while the diff editor is
     // focused; no-op when no diff is showing.
     cx.bind_keys([
@@ -265,6 +271,9 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         // (on TerminalView) write the raw byte to the shell, exactly like the editor binds
         // backspace to its own buffer action. The "Terminal" context (depth) shadows "Kyde".
         KeyBinding::new("backspace", TerminalBackspace, Some("Terminal")),
+        // ⌘⌫ is DeleteFile in "Kyde" (issue #61); in the terminal it must act as a plain
+        // backspace, not delete the tree-selected file out from under a typing user.
+        KeyBinding::new("cmd-backspace", TerminalBackspace, Some("Terminal")),
         KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys).
@@ -3620,8 +3629,15 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, _cx| assert!(k.rollback_win.is_some()))
             .unwrap();
-        // Simulate the Rollback button.
-        handle.update(cx, |k, _w, cx| k.do_rollback(cx)).unwrap();
+        // Simulate the Rollback button, with "delete local copies" UNticked — the untracked
+        // file must survive on disk (the pre-checked default is covered by
+        // `rollback_deletes_newly_added_files`).
+        handle
+            .update(cx, |k, _w, cx| {
+                k.rollback_delete_added = false;
+                k.do_rollback(cx);
+            })
+            .unwrap();
         cx.run_until_parked(); // let the deferred remove_window run
         handle
             .update(cx, |k, _w, _cx| {
@@ -3630,6 +3646,48 @@ mod gpui_smoke_tests {
                 assert!(
                     !k.files.iter().any(|f| f.path.ends_with("app.tsx")),
                     "the modified file should have been rolled back"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Rolling back a newly `git add`ed file must actually remove it (issue #59): the
+    /// delete-local-copies toggle is pre-checked, so the default rollback unstages the
+    /// Added file AND deletes it — instead of leaving it untracked (same green, still in
+    /// the changes list) which read as "rollback did nothing".
+    #[gpui::test]
+    fn rollback_deletes_newly_added_files(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        // Stage the new file so it shows as Added, and pick up the new status.
+        git(&dir, &["add", "new.txt"]);
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(
+                    k.files
+                        .iter()
+                        .any(|f| f.path.ends_with("new.txt") && f.status == FileStatus::Added),
+                    "staged new file should be Added"
+                );
+                k.open_rollback_path(PathBuf::from("new.txt"), cx);
+                assert!(
+                    k.rollback_delete_added,
+                    "delete-local-copies defaults to checked"
+                );
+                k.do_rollback(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    !dir.join("new.txt").exists(),
+                    "the added file is deleted from disk"
+                );
+                assert!(
+                    !k.files.iter().any(|f| f.path.ends_with("new.txt")),
+                    "the added file left the changes list"
                 );
             })
             .unwrap();

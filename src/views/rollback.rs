@@ -213,7 +213,11 @@ impl Kyde {
             return;
         }
         self.rollback_checked = checked;
-        self.rollback_delete_added = false;
+        // Pre-checked (IntelliJ default): rolling back a newly-added file should return to
+        // the pre-change state — the file GONE, not merely unstaged. Unstage-only leaves it
+        // untracked, which renders the same green and still sits in the changes list, so the
+        // rollback looks like a no-op (issue #59). Unticking keeps local copies.
+        self.rollback_delete_added = true;
         self.open_modal_window(ModalKind::Rollback, "Rollback Changes", 560.0, 640.0, cx);
         cx.notify();
     }

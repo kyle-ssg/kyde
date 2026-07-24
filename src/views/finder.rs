@@ -27,6 +27,10 @@ impl Kyde {
                 .py_1()
                 .text_color(t.text)
         };
+        // Color changed files by their git status, matching the Browse tree / commit view
+        // (issue #60). O(1) lookup per row — same map the tree builds per frame.
+        let status_by_path: std::collections::HashMap<&PathBuf, FileStatus> =
+            self.files.iter().map(|f| (&f.path, f.status)).collect();
         let rows: Vec<gpui::AnyElement> = match self.finder.mode {
             FinderMode::Files => self
                 .finder
@@ -36,6 +40,7 @@ impl Kyde {
                 .map(|(i, p)| {
                     let sel = i == self.finder.selected;
                     let name: SharedString = p.to_string_lossy().into_owned().into();
+                    let name_color = status_by_path.get(p).map_or(t.text, |&s| status_color(s));
                     let pc = p.clone();
                     let icon = div()
                         .w(px(20.0))
@@ -48,7 +53,13 @@ impl Kyde {
                         .child(badge_inner(file_badge(p), 0.0));
                     row_base(i, sel)
                         .child(icon)
-                        .child(div().min_w_0().truncate().child(name))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(name_color)
+                                .child(name),
+                        )
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, window, cx| {
