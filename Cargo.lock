@@ -2900,6 +2900,7 @@ dependencies = [
  "kyde-config",
  "kyde-diff",
  "kyde-git",
+ "kyde-local-history",
  "kyde-markdown",
  "kyde-syntax",
  "kyde-theme",
@@ -2943,6 +2944,16 @@ dependencies = [
 name = "kyde-git"
 version = "2.3.0"
 dependencies = [
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "kyde-local-history"
+version = "2.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 2.0.19",
 ]
 

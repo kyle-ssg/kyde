@@ -405,6 +405,7 @@ enum PaletteAction {
     SortKeys,
     NavBack,
     NavForward,
+    LocalHistory,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -435,6 +436,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
         "mode_browse",
     ),
     ("Rollback changes", PaletteAction::Rollback, ""),
+    ("Local History", PaletteAction::LocalHistory, ""),
     ("Settings / Keymap", PaletteAction::Settings, "open_keymap"),
     ("Manage Plugins", PaletteAction::Plugins, ""),
     ("Preview Fonts", PaletteAction::Fonts, ""),
@@ -1504,6 +1506,11 @@ struct Kyde {
     /// Compare state (paths + aligned panes — see `CompareView`).
     compare: CompareView,
 
+    /// Local History — its own native window (`ModalKind::LocalHistory`).
+    local_history_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Local-history state: config + the project store + the window (see `LocalHistoryView`).
+    lh: LocalHistoryView,
+
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
     term: TermState,
@@ -1525,6 +1532,8 @@ enum ModalKind {
     Merge,
     /// Two-file side-by-side compare with an apply gutter (issue #42).
     Compare,
+    /// Per-file local-history timeline + snapshot ↔ current diff (issue #7).
+    LocalHistory,
 }
 
 /// Compare-two-files state (issue #42): the chosen paths, the computed diff, and
@@ -1565,6 +1574,64 @@ impl CompareView {
     }
 }
 
+/// Local-history state (issue #7): the persisted config, the open project's snapshot
+/// store (shared with background record tasks), the save-burst flush state, and the
+/// Local History window (timeline + snapshot ↔ current aligned panes — the compare
+/// pattern). See `views/local_history.rs` for all the logic.
+struct LocalHistoryView {
+    /// Persisted settings (enabled / retention / throttle — `history.json`).
+    cfg: kyde_config::history::HistoryCfg,
+    /// The open project's snapshot store. `None` = disabled or no project. Shared with
+    /// background record tasks (all disk writes happen off the UI thread).
+    store: Option<std::sync::Arc<std::sync::Mutex<kyde_local_history::Store>>>,
+    /// The project `store` belongs to — a mismatch with `repo_root` triggers a re-open.
+    store_root: Option<PathBuf>,
+    /// Paths saved since the last flush; snapshotted together when the throttle fires.
+    pending: std::collections::HashSet<PathBuf>,
+    /// Whether a throttle flush timer is already armed.
+    flush_scheduled: bool,
+    /// The file the Local History window is showing.
+    path: Option<PathBuf>,
+    /// Its timeline, newest first.
+    events: Vec<kyde_local_history::Event>,
+    /// Selected timeline row.
+    selected: usize,
+    /// Snapshot (old) → current (new) diff for the selected row.
+    diff: Option<FileDiff>,
+    /// Left pane — the snapshot (read-only).
+    left: Entity<CodeEditor>,
+    /// Right pane — the current file (read-only; restores write the file and re-diff).
+    right: Entity<CodeEditor>,
+    /// Shared scroll for both panes + the gutter.
+    scroll: ScrollHandle,
+}
+
+impl LocalHistoryView {
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let mk = |cx: &mut Context<Kyde>| {
+            cx.new(|cx| {
+                let mut e = CodeEditor::read_only(cx, String::new(), Lang::PlainText);
+                e.line_numbers = true;
+                e
+            })
+        };
+        Self {
+            cfg: kyde_config::history::HistoryCfg::load(),
+            store: None,
+            store_root: None,
+            pending: std::collections::HashSet::new(),
+            flush_scheduled: false,
+            path: None,
+            events: Vec::new(),
+            selected: 0,
+            diff: None,
+            left: mk(cx),
+            right: mk(cx),
+            scroll: ScrollHandle::new(),
+        }
+    }
+}
+
 /// Which category the Settings window's sidebar has selected. Drives `render_settings_body`'s
 /// content pane.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1572,6 +1639,7 @@ pub(crate) enum SettingsSection {
     Appearance,
     Keymap,
     LanguagePacks,
+    LocalHistory,
 }
 
 impl SettingsSection {
@@ -1580,6 +1648,7 @@ impl SettingsSection {
         (SettingsSection::Appearance, "Appearance"),
         (SettingsSection::Keymap, "Keymap"),
         (SettingsSection::LanguagePacks, "Language Packs"),
+        (SettingsSection::LocalHistory, "Local History"),
     ];
 }
 
@@ -1639,6 +1708,7 @@ impl Render for ModalWindow {
             ModalKind::Settings => k.render_settings_body(kcx),
             ModalKind::Merge => k.render_merge_body(kcx),
             ModalKind::Compare => k.render_compare_body(kcx),
+            ModalKind::LocalHistory => k.render_local_history_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -2455,6 +2525,47 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     MenuTarget::EditorGit(p, true, true),
                     cx,
                 );
+            }
+        }
+        // The Local History window for KYDE_SHOT_FILE: seeds two snapshots (so the
+        // timeline + snapshot ↔ current diff populate), then opens the window.
+        "local-history" => {
+            set_packs(view, &["json"]);
+            if let Ok(f) = std::env::var("KYDE_SHOT_FILE") {
+                let rel = PathBuf::from(f);
+                // Open the store synchronously — the async `lh_sync_store` open would
+                // race the shot's seeding below.
+                if let Some(root) = view.repo_root.clone() {
+                    if let Ok(s) = kyde_local_history::Store::for_project(&root) {
+                        view.lh.store_root = Some(root);
+                        view.lh.store = Some(std::sync::Arc::new(std::sync::Mutex::new(s)));
+                    }
+                }
+                if let (Some(store), Some(root)) = (view.lh.store.clone(), view.repo_root.clone()) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+                    let current = std::fs::read_to_string(root.join(&rel)).unwrap_or_default();
+                    if let Ok(mut s) = store.lock() {
+                        let _ = s.record(
+                            &rel,
+                            &format!("{current}\n\"an: \\\"older\\\" revision\"\n"),
+                            kyde_local_history::EventKind::Change,
+                            None,
+                            now.saturating_sub(3_600_000),
+                        );
+                        let _ = s.record(
+                            &rel,
+                            &current,
+                            kyde_local_history::EventKind::Label,
+                            Some("Before rollback".into()),
+                            now.saturating_sub(600_000),
+                        );
+                    }
+                }
+                view.open_local_history(rel, cx);
+                // Show the older snapshot so the diff has visible hunks.
+                view.lh_select(1, cx);
             }
         }
         // The Compare window over two fixture files (KYDE_SHOT_FILE ↔ KYDE_SHOT_FILE_B):
@@ -3538,6 +3649,173 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, _cx| {
                 assert!(k.rollback_win.is_some(), "rollback window should be open");
+            })
+            .unwrap();
+    }
+
+    /// Point `k` at a private local-history store inside the smoke repo (never the real
+    /// XDG data dir) with a fixed enabled config — tests must not depend on, or pollute,
+    /// the developer's own history/config.
+    fn lh_test_store(k: &mut Kyde, dir: &std::path::Path) {
+        k.lh.cfg = kyde_config::history::HistoryCfg {
+            enabled: true,
+            retention_days: 7,
+            throttle_secs: 1,
+        };
+        let store = kyde_local_history::Store::open(dir.join(".lh-test-store")).unwrap();
+        k.lh.store = Some(std::sync::Arc::new(std::sync::Mutex::new(store)));
+        k.lh.store_root = k.repo_root.clone();
+    }
+
+    /// Local history (issue #7), the record pipeline: opening a file records its baseline;
+    /// a save marks the path pending and the flush snapshots the on-disk state (deduped —
+    /// an unchanged flush adds nothing); the Local History window opens for the file.
+    #[gpui::test]
+    fn local_history_records_opens_and_saves(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                k.open_file(PathBuf::from("app.tsx"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // the background baseline record lands
+        handle
+            .update(cx, |k, _w, cx| {
+                let store = k.lh.store.clone().unwrap();
+                {
+                    let s = store.lock().unwrap();
+                    let ev = s.events_for(std::path::Path::new("app.tsx"));
+                    assert_eq!(ev.len(), 1, "opening records the baseline once");
+                    assert_eq!(s.content(&ev[0].hash).unwrap(), "const a = 2;\n");
+                }
+                // A save: the file changes on disk, the save path marks it pending…
+                std::fs::write(dir.join("app.tsx"), "const a = 3;\n").unwrap();
+                k.lh_note_save(std::path::Path::new("app.tsx"), cx);
+                assert!(k.lh.pending.contains(std::path::Path::new("app.tsx")));
+                // …and the flush snapshots the final on-disk state.
+                k.lh_flush(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let store = k.lh.store.clone().unwrap();
+                {
+                    let s = store.lock().unwrap();
+                    let ev = s.events_for(std::path::Path::new("app.tsx"));
+                    assert_eq!(ev.len(), 2, "the save burst flushed one snapshot");
+                    assert_eq!(s.content(&ev[0].hash).unwrap(), "const a = 3;\n");
+                }
+                // Re-opening the unchanged file records nothing (content dedup).
+                k.open_file(PathBuf::from("app.tsx"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let store = k.lh.store.clone().unwrap();
+                assert_eq!(
+                    store.lock().unwrap().event_count(),
+                    2,
+                    "unchanged reopen adds no event"
+                );
+                // The window opens for the file.
+                k.open_local_history(PathBuf::from("app.tsx"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // the native window opens on a spawned task
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.local_history_win.is_some(), "Local History window opens");
+                assert_eq!(k.lh.events.len(), 2, "the timeline shows both snapshots");
+            })
+            .unwrap();
+    }
+
+    /// Local history revert: selecting an older snapshot and reverting rewrites the file
+    /// on disk, stamps a "Before revert" label (the pre-revert state stays recoverable),
+    /// and reloads the timeline.
+    #[gpui::test]
+    fn local_history_revert_restores_the_snapshot(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                // Seed an older snapshot, then the current state.
+                let store = k.lh.store.clone().unwrap();
+                {
+                    let mut s = store.lock().unwrap();
+                    use kyde_local_history::EventKind;
+                    s.record(
+                        std::path::Path::new("app.tsx"),
+                        "const a = 1;\n",
+                        EventKind::Change,
+                        None,
+                        1_000,
+                    )
+                    .unwrap();
+                    s.record(
+                        std::path::Path::new("app.tsx"),
+                        "const a = 2;\n",
+                        EventKind::Change,
+                        None,
+                        2_000,
+                    )
+                    .unwrap();
+                }
+                k.lh.path = Some(PathBuf::from("app.tsx"));
+                k.lh_reload(cx);
+                assert_eq!(k.lh.events.len(), 2);
+                // Select the OLDER snapshot (rows are newest-first) and revert to it.
+                k.lh_select(1, cx);
+                k.lh_revert_to_selected(cx);
+            })
+            .unwrap();
+        cx.run_until_parked(); // background "Before revert" record + refresh land
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+                    "const a = 1;\n",
+                    "the file becomes the selected snapshot"
+                );
+                let store = k.lh.store.clone().unwrap();
+                let s = store.lock().unwrap();
+                let ev = s.events_for(std::path::Path::new("app.tsx"));
+                assert!(
+                    ev.iter()
+                        .any(|e| e.label.as_deref() == Some("Before revert")),
+                    "the pre-revert state is stamped into the timeline"
+                );
+            })
+            .unwrap();
+    }
+
+    /// The master switch: with local history disabled nothing is recorded — no store is
+    /// opened, and every note/flush call is a no-op.
+    #[gpui::test]
+    fn local_history_disabled_records_nothing(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.lh.cfg = kyde_config::history::HistoryCfg {
+                    enabled: false,
+                    retention_days: 7,
+                    throttle_secs: 1,
+                };
+                k.lh_sync_store(cx);
+                assert!(k.lh.store.is_none(), "disabled → no store");
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.lh_note_save(std::path::Path::new("app.tsx"), cx);
+                assert!(k.lh.pending.is_empty(), "disabled → nothing pending");
+                assert!(!k.lh.flush_scheduled);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.lh.store.is_none(), "still no store after settling");
             })
             .unwrap();
     }

@@ -56,6 +56,7 @@ impl Kyde {
             SettingsSection::Appearance => self.settings_appearance(cx),
             SettingsSection::Keymap => self.settings_keymap(cx),
             SettingsSection::LanguagePacks => self.render_plugins_body(cx),
+            SettingsSection::LocalHistory => self.settings_local_history(cx),
         };
 
         div()
@@ -219,6 +220,129 @@ impl Kyde {
                     .child(SharedString::from(format!("{value:.0}"))),
             )
             .child(step_btn(format!("{id}-inc").into(), "+", step, cx))
+            .into_any_element()
+    }
+
+    /// Local History section (issue #7): the master switch + retention/throttle steppers.
+    /// Every change persists to `history.json` immediately; toggling the switch opens or
+    /// drops the project store on the spot (`lh_sync_store`).
+    fn settings_local_history(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let cfg = self.lh.cfg;
+        let toggle = div()
+            .id("lh-enabled")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .text_color(t.text)
+            .child(crate::checkbox_box(cfg.enabled))
+            .child("Enable local history")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.lh.cfg.enabled = !this.lh.cfg.enabled;
+                    this.lh.cfg.save();
+                    this.lh_sync_store(cx);
+                    cx.notify();
+                }),
+            );
+        // A labelled `[−] value [+]` stepper writing (clamped) into the persisted config.
+        let num_row = |id: &'static str,
+                       label: &'static str,
+                       value: u32,
+                       step: u32,
+                       apply: fn(&mut kyde_config::history::HistoryCfg, i64),
+                       cx: &mut Context<Self>| {
+            let step_btn =
+                |bid: SharedString, sym: &'static str, delta: i64, cx: &mut Context<Self>| {
+                    div()
+                        .id(bid)
+                        .size(px(24.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(t.divider)
+                        .text_color(t.text)
+                        .cursor_pointer()
+                        .hover(|d| d.bg(t.bg_mid))
+                        .child(sym)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                apply(&mut this.lh.cfg, delta);
+                                this.lh.cfg = this.lh.cfg.clamped();
+                                this.lh.cfg.save();
+                                cx.notify();
+                            }),
+                        )
+                };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(160.0)).text_color(t.secondary_text).child(label))
+                .child(step_btn(
+                    format!("{id}-dec").into(),
+                    "−",
+                    -i64::from(step),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .w(px(40.0))
+                        .flex()
+                        .justify_center()
+                        .text_color(t.text)
+                        .child(SharedString::from(format!("{value}"))),
+                )
+                .child(step_btn(
+                    format!("{id}-inc").into(),
+                    "+",
+                    i64::from(step),
+                    cx,
+                ))
+        };
+        let apply_days = |c: &mut kyde_config::history::HistoryCfg, d: i64| {
+            c.retention_days = u32::try_from(i64::from(c.retention_days) + d).unwrap_or(1);
+        };
+        let apply_secs = |c: &mut kyde_config::history::HistoryCfg, d: i64| {
+            c.throttle_secs = u32::try_from(i64::from(c.throttle_secs) + d).unwrap_or(1);
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child(settings_heading("Local History"))
+            .child(
+                div()
+                    .text_color(t.line_number)
+                    .child("Snapshots of files as you work, independent of git. Right-click a file → Local History."),
+            )
+            .child(toggle)
+            .when(cfg.enabled, |d| {
+                d.child(num_row(
+                    "lh-retention",
+                    "Keep history (days)",
+                    cfg.retention_days,
+                    1,
+                    apply_days,
+                    cx,
+                ))
+                .child(num_row(
+                    "lh-throttle",
+                    "Snapshot throttle (seconds)",
+                    cfg.throttle_secs,
+                    5,
+                    apply_secs,
+                    cx,
+                ))
+            })
             .into_any_element()
     }
 

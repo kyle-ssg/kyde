@@ -765,6 +765,10 @@ impl Kyde {
         let Some(h) = d.hunks.get(hi) else {
             return;
         };
+        // Local history: the discarded hunk stays recoverable.
+        if let Some(rel) = self.diff.path.clone() {
+            self.lh_snapshot_now(vec![rel], "Before hunk revert", cx);
+        }
         let mut lines = d.new.clone();
         let replacement = d.old[h.old_range.clone()].to_vec();
         lines.splice(h.new_range.clone(), replacement);

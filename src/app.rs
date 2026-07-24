@@ -276,6 +276,8 @@ impl Kyde {
             merge: MergeView::new(cx),
             compare_win: None,
             compare: CompareView::new(cx),
+            local_history_win: None,
+            lh: LocalHistoryView::new(cx),
             term: TermState::new(),
         };
         me.refresh(cx);
@@ -309,6 +311,8 @@ impl Kyde {
     /// thread, then applied on the foreground; a monotonic `refresh_gen` drops any snapshot
     /// that a newer refresh has already superseded.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        // Keep the local-history store pointed at the open project (cheap when unchanged).
+        self.lh_sync_store(cx);
         let Some(root) = self.repo_root.clone() else {
             // Landing view / project closed: no repo to read — clear git-derived state so a
             // stale tree/branch never lingers behind the landing view.
@@ -607,6 +611,8 @@ impl Kyde {
             return;
         }
         self.browse.editor.update(cx, |e, _| e.dirty = false);
+        // Local history: the save is on disk — mark it for the throttled snapshot flush.
+        self.lh_note_save(&rel, cx);
         // Optimistic status: flip the tree/tab color to "modified" the instant we save,
         // rather than waiting ~0.4s for the debounced `git status`. Only when the file isn't
         // already a known change — so a real Added/Untracked/Deleted status (e.g. a new file
@@ -636,6 +642,7 @@ impl Kyde {
             return;
         }
         self.browse.editor.update(cx, |e, _| e.dirty = false);
+        self.lh_note_save(&rel, cx);
         self.refresh(cx);
     }
 

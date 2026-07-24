@@ -3,8 +3,11 @@
 //! Pure Rust, no GUI — three independent stores:
 //! - [`keymap`] — the keybinding preset + per-action overrides,
 //! - [`plugins`] — the installed language-pack list,
-//! - [`projects`] — the recent-projects list for the landing view.
+//! - [`projects`] — the recent-projects list for the landing view,
+//! - [`history`] — the local-history settings (enabled/retention/throttle).
 
+/// Local-history settings ([`history::HistoryCfg`]).
+pub mod history;
 /// Keybinding preset + overrides ([`keymap::Keymap`]).
 pub mod keymap;
 /// Installed language-pack list ([`plugins::Plugins`]).

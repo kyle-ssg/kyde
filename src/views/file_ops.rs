@@ -270,6 +270,11 @@ impl Kyde {
                 .as_ref()
                 .map_or_else(|| path.clone(), |r| r.join(&path))
         };
+        // Local history: a deleted file's content is recoverable from its timeline.
+        // (Folders are skipped — snapshotting a whole subtree could be huge.)
+        if !is_dir {
+            self.lh_snapshot_now(vec![path.clone()], "Before delete", cx);
+        }
         let r = if is_dir {
             std::fs::remove_dir_all(&abs)
         } else {

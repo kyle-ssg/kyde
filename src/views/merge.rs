@@ -588,6 +588,8 @@ impl Kyde {
         let Some(repo) = self.repo() else {
             return;
         };
+        // Local history: the conflicted working copy is recoverable after the resolve.
+        self.lh_snapshot_now(vec![entry.path.clone()], "Before merge resolve", cx);
         let side = if take_ours { entry.ours } else { entry.theirs };
         let result = if side == git::ConflictSide::Deleted {
             // That side deleted the file → accepting it deletes our copy too.
@@ -642,6 +644,8 @@ impl Kyde {
         let Some(repo) = self.repo() else {
             return;
         };
+        // Local history: the conflicted working copy is recoverable after the apply.
+        self.lh_snapshot_now(vec![entry.path.clone()], "Before merge resolve", cx);
         if let Err(e) = repo.save_file(&entry.path, &text) {
             self.fail("Applying merge result", e);
             return;

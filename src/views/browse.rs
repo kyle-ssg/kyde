@@ -847,6 +847,9 @@ impl Kyde {
             } else {
                 String::new()
             };
+            // Local history: baseline on first sight / "External change" when the disk
+            // moved under us — decided (and written) off the UI thread.
+            self.lh_note_open(&rel, &content, cx);
             let lang = self.effective_lang(&rel);
             let errs = self.errors_enabled_for(lang);
             let links = self.links_enabled_for(lang);

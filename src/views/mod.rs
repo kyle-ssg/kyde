@@ -10,6 +10,7 @@ mod file_ops;
 mod find;
 mod finder;
 mod history;
+mod local_history;
 mod merge;
 mod modals;
 mod notifications;

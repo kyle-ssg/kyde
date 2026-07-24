@@ -781,6 +781,16 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
                 ));
+                // Local History (issue #7) — per-file timeline; hidden when disabled.
+                if !is_dir && self.lh.store.is_some() {
+                    let pl = p.clone();
+                    panel = panel.child(item("Local History").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.open_local_history(pl.clone(), cx);
+                        }),
+                    ));
+                }
                 // Git remote ops, WebStorm-style: Fetch/Pull always, Push when ahead.
                 panel = panel
                     .child(item("Fetch").on_mouse_down(
@@ -837,6 +847,16 @@ impl Kyde {
                                 // Active tab on the left (the "current" baseline),
                                 // the clicked tab on the right.
                                 this.open_compare(active.clone(), tab.clone(), cx);
+                            }),
+                        ));
+                    }
+                }
+                if let Some(tab) = self.browse.open_tabs.get(idx).cloned() {
+                    if self.lh.store.is_some() {
+                        panel = panel.child(item("Local History").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.open_local_history(tab.clone(), cx);
                             }),
                         ));
                     }

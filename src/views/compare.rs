@@ -138,6 +138,8 @@ impl Kyde {
             self.compare.left_path.clone()
         };
         let Some(target) = target else { return };
+        // Local history: the overwritten side is recoverable.
+        self.lh_snapshot_now(vec![target.clone()], "Before compare apply", cx);
         if let Err(e) = self.write_open_file(&target, text) {
             self.fail("Compare apply", e);
             cx.notify();

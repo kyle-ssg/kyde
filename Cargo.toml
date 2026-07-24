@@ -93,6 +93,7 @@ kyde-tree = { path = "crates/kyde-tree" }
 kyde-markdown = { path = "crates/kyde-markdown" }
 kyde-update = { path = "crates/kyde-update" }
 kyde-config = { path = "crates/kyde-config" }
+kyde-local-history = { path = "crates/kyde-local-history" }
 kyde-theme = { path = "crates/kyde-theme" }
 kyde-ui = { path = "crates/kyde-ui" }
 # Theme/syntax colours are `kyde_color::Color`; the `gpui` feature gives `Color → gpui` so the

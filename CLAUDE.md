@@ -370,6 +370,47 @@ buffer showing it, re-diffs in place, and refreshes git status. Smoke test:
 `compare_applies_hunks_both_directions`. Debug shot: `KYDE_SHOT=compare` +
 `KYDE_SHOT_FILE`/`KYDE_SHOT_FILE_B`.
 
+## Local History (issue #7 — crates/kyde-local-history + src/views/local_history.rs)
+IntelliJ-style per-file snapshots, independent of git. **Model = `kyde-local-history`**
+(pure Rust, sha2 only — already transitively in-tree): per-project store under
+`$XDG_DATA_HOME/kyde/local-history/<name>-<fnv64(path)>/` with **content-addressed blobs**
+(`blobs/<aa>/<hash>`, SHA-256, temp+rename writes — identical content stored once, an
+unchanged save writes zero bytes) and an **append-only `events.jsonl` journal**
+(`Event { ts_ms, path, hash, kind: Change|External|Label, label }`; corrupt lines skipped on
+load, never fatal). `Store::prune` (run once per project-open, in the background) drops
+events past retention, rewrites the journal atomically, GCs unreferenced blobs, and is
+`prune.lock`-guarded against a second instance (stale >10min locks stolen). Timestamps are
+caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in — the app reads
+`date +%z` once) + `relative_ts` are pure. Perf guards: `perf_record_large_file_stays_fast`,
+`perf_load_10k_event_journal_stays_fast`.
+- **Recording** (`views/local_history.rs`, `LocalHistoryView` = `lh` on `Kyde`; ALL store IO
+  off the UI thread, everything gated on the master switch): saves funnel through
+  `lh_note_save` → pending set → ONE throttled flush (default 10s) reads each file's FINAL
+  on-disk state (`lh_flush`) — a burst's last save is never lost, dedup makes no-ops free.
+  `lh_note_open` records a **baseline** on a file's first sight and **External change** when
+  disk ≠ last snapshot. Destructive ops snapshot targets FIRST via `lh_snapshot_now` (inline
+  read — the caller is about to overwrite — background write): "Before rollback" /
+  "Before checkout X" / "Before delete" / "Before hunk revert" / "Before compare apply" /
+  "Before merge resolve" / "Before revert", plus "Commit: <subject>" stamped on committed
+  files. Label events always append (timeline markers) even at unchanged content.
+  `lh_sync_store` (called from `refresh`) keeps the store pointed at the open project.
+- **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left = snapshot
+  timeline (title + `format_ts · relative_ts`), right = snapshot ↔ current read-only aligned
+  panes (the compare-view pattern: `diff_line_bgs`/`diff_word_bgs`/`diff_fillers`, shared
+  `ScrollHandle`), center gutter `»` = restore ONE hunk of the snapshot into the file
+  (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = whole
+  snapshot. Every restore snapshots the pre-write state first, reloads a clean open Browse
+  buffer, re-diffs, refreshes git status. Entry points: right-click file/tab → **Local
+  History**, ⌘⇧A palette. Not offered for folders (subtree snapshots deliberately skipped).
+- **Config** (`kyde-config::history::HistoryCfg` → `history.json`): `enabled` (default ON —
+  dedup + debounce make steady-state cost ≈0), `retention_days` (7, clamp 1..=90),
+  `throttle_secs` (10, clamp 1..=300). Settings → **Local History** section (toggle +
+  steppers; toggling opens/drops the store live). Off = zero work: no store, no reads, no
+  writes.
+- Smoke tests: `local_history_records_opens_and_saves`, `local_history_revert_restores_the_
+  snapshot`, `local_history_disabled_records_nothing`. Debug shot: `KYDE_SHOT=local-history`
+  + `KYDE_SHOT_FILE=<json>` (seeds two snapshots synchronously, then opens the window).
+
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {
 appears_transparent: true, traffic_light_position: point(16,16) }`) so our `frame_bg` chrome
