@@ -396,15 +396,20 @@ caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in �
   `lh_sync_store` (called from `refresh`) keeps the store pointed at the open project.
 - **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds): left column =
   snapshot timeline (title + `format_ts · relative_ts`) over a **changed-since panel**
-  (IDE-style): the distinct files of `events[0..=selected]` that still DIFFER from
-  their state at the snapshot (a touched-but-changed-back file — deleted then restored —
-  is dropped; content-hash check per candidate, on selection change only), as a
-  fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff. Right = snapshot ↔
+  (IDE-style): the distinct files of `events[0..=selected]` whose CURRENT content differs
+  from their state AT the snapshot — "not tracked yet"/"no file" count as empty, so a
+  created-since file lists as all-added and a touched-but-changed-back file (deleted then
+  restored) is dropped (content-hash check per candidate, on selection change only; also
+  fills `files_revertable` = files whose earliest-known snapshot differs from current) —
+  as a fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS
+  diff. Right = snapshot ↔
   current read-only aligned panes (the compare-view pattern: `diff_line_bgs`/
   `diff_word_bgs`/`diff_fillers`, shared `ScrollHandle`); the snapshot side is the file's
-  **effective base** (`lh_effective_base_for`: newest event at-or-before the selected row,
-  else — first seen after it — its OLDEST later event, usually the open baseline; header
-  says "First seen · ts" then). Every panel file therefore has a working diff + revert. Center gutter `»` = restore ONE hunk
+  state AT the selected point (`lh_base_event_for`; none → diff vs empty, header "Added
+  since this point"). REVERTS use the **effective base** (`lh_effective_base_for`: that
+  state, else — first tracked after — the OLDEST later event, usually the open baseline)
+  and only where it differs from current (`files_revertable` gates the button + menu
+  items; "Nothing to revert to" otherwise; no-op writes skipped; never deletes). Center gutter `»` = restore ONE hunk
   (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to This Version** = the
   targeted file. **Right-click menus** (`MenuTarget::LhRow`/`LhPath`, rendered in THIS
   window like the rollback modal; items live in `lh_menu_items` — `render_context_menu`

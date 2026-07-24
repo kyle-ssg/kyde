@@ -1623,8 +1623,12 @@ struct LocalHistoryView {
     /// Selected timeline row.
     selected: usize,
     /// Files changed at or since the selected snapshot (distinct paths of
-    /// `events[0..=selected]`, sorted) — the bottom "changed files" panel.
+    /// `events[0..=selected]` still differing from their state at it, sorted) — the
+    /// bottom "changed files" panel.
     files: Vec<PathBuf>,
+    /// The subset of `files` a revert can actually improve (earliest-known snapshot
+    /// differs from current) — gates the revert menu items/button.
+    files_revertable: std::collections::HashSet<PathBuf>,
     /// `files` as a tree (folders + files, the Browse-tree model).
     files_tree: tree::Tree,
     /// Expanded dirs in the changed-files panel (reset to all-expanded on recompute).
@@ -1661,6 +1665,7 @@ impl LocalHistoryView {
             events: Vec::new(),
             selected: 0,
             files: Vec::new(),
+            files_revertable: std::collections::HashSet::new(),
             files_tree: tree::Tree::default(),
             files_expanded: std::collections::HashSet::new(),
             file_selected: None,
@@ -3794,6 +3799,7 @@ mod gpui_smoke_tests {
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("app.tsx"), "now-a\n").unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "n1\n").unwrap();
         handle
             .update(cx, |k, _w, cx| {
                 lh_test_store(k, &dir);
@@ -3810,13 +3816,16 @@ mod gpui_smoke_tests {
                     // both sides are effectively empty, so it must never be listed.
                     rec(&mut s, "ghost.txt", "", 1_200);
                     rec(&mut s, "sub/lib.rs", "l1\n", 1_500);
+                    // Created since the older snapshots, unchanged since creation:
+                    // listed as added-since, but nothing to revert to.
+                    rec(&mut s, "new.txt", "n1\n", 1_800);
                     rec(&mut s, "app.tsx", "a2\n", 2_000);
                     rec(&mut s, "sub/lib.rs", "l2\n", 2_500);
                 }
                 k.lh.path = Some(PathBuf::new()); // whole-project scope
                 k.lh.selected = 0;
                 k.lh_reload(cx);
-                assert_eq!(k.lh.events.len(), 5);
+                assert_eq!(k.lh.events.len(), 6);
                 let row = |k: &Kyde, p: &str, ts: u64| {
                     k.lh.events
                         .iter()
@@ -3824,14 +3833,19 @@ mod gpui_smoke_tests {
                         .unwrap()
                 };
 
-                // Oldest snapshot selected → both files changed since. lib.rs was first
-                // seen AFTER it, so its effective base falls back to its earliest-known
-                // state — every listed file has something to revert to.
+                // Oldest snapshot selected → everything changed-or-created since is
+                // listed. lib.rs (first tracked after, edited since) reverts to its
+                // earliest snapshot; new.txt (created since, unchanged) is listed as
+                // added but offers no revert — nothing it could restore.
                 let i = row(k, "app.tsx", 1_000);
                 k.lh_select(i, cx);
                 assert_eq!(
                     k.lh.files,
-                    vec![PathBuf::from("app.tsx"), PathBuf::from("sub/lib.rs")]
+                    vec![
+                        PathBuf::from("app.tsx"),
+                        PathBuf::from("new.txt"),
+                        PathBuf::from("sub/lib.rs")
+                    ]
                 );
                 assert!(k.lh_has_base_under(std::path::Path::new("app.tsx")));
                 assert!(
@@ -3839,6 +3853,10 @@ mod gpui_smoke_tests {
                     "first-seen-after files fall back to their earliest snapshot"
                 );
                 assert!(k.lh_has_base_under(std::path::Path::new("sub")));
+                assert!(
+                    !k.lh_has_base_under(std::path::Path::new("new.txt")),
+                    "created-since file at its only snapshot has nothing to revert to"
+                );
                 // Reverting that first-seen-after file restores the earliest state we
                 // know (its @1500 snapshot), never deletes it.
                 k.lh_revert_path(PathBuf::from("sub/lib.rs"), cx);
@@ -3873,7 +3891,7 @@ mod gpui_smoke_tests {
                 k.lh_select(i, cx);
                 assert_eq!(
                     k.lh.files,
-                    vec![PathBuf::from("sub/lib.rs")],
+                    vec![PathBuf::from("new.txt"), PathBuf::from("sub/lib.rs")],
                     "changed-back + empty-deleted files leave the panel"
                 );
 

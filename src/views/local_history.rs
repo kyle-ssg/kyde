@@ -299,12 +299,15 @@ impl Kyde {
     }
 
     /// Rebuild the "changed since this snapshot" panel: the distinct files of
-    /// `events[0..=selected]` (this change + everything newer) that still DIFFER
-    /// from their state at the snapshot, as a fully-expanded tree. A file that was
-    /// touched but changed BACK (e.g. deleted then restored) is dropped — listing a
-    /// "No differences" file reads as a bug. The panel selection survives if its
-    /// file is still listed. Runs on selection change only (one content-hash read
-    /// per candidate file — never on the render path).
+    /// `events[0..=selected]` (this change + everything newer) whose CURRENT content
+    /// differs from their state AT the snapshot — with "not tracked yet" and "no
+    /// file" both counting as empty. So a file created since shows (as all-added),
+    /// and a file touched but changed BACK (deleted then restored) is dropped — a
+    /// "No differences" row reads as a bug. Alongside, `files_revertable` marks the
+    /// files a revert can actually improve: their earliest-known snapshot differs
+    /// from current (drives the menu items — no dead entries, no no-op reverts).
+    /// The panel selection survives if its file is still listed. Runs on selection
+    /// change only (one content-hash read per candidate — never on the render path).
     fn lh_recompute_files(&mut self) {
         let upto = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
         let mut seen = std::collections::HashSet::new();
@@ -317,16 +320,9 @@ impl Kyde {
             .filter(|e| seen.insert(e.path.clone()))
             .map(|e| e.path.clone())
             .collect();
-        // One rule: keep a file iff its effective snapshot (state at the selected
-        // point, or earliest-known for first-seen-after files) differs from its
-        // content now, treating "no snapshot" / "no file" as empty — so a file that
-        // changed back, or whose empty snapshot was deleted, never shows as a
-        // "No differences" row.
         let empty_hash = kyde_local_history::content_hash("");
+        let mut revertable = std::collections::HashSet::new();
         files.retain(|f| {
-            let base_hash = self
-                .lh_effective_base_for(f)
-                .map_or_else(|| empty_hash.clone(), |(e, _)| e.hash.clone());
             let current_hash = self
                 .lh_abs(f)
                 .and_then(|a| std::fs::read_to_string(a).ok())
@@ -334,8 +330,21 @@ impl Kyde {
                     || empty_hash.clone(),
                     |c| kyde_local_history::content_hash(&c),
                 );
-            base_hash != current_hash
+            let strict_hash = self
+                .lh_base_event_for(f)
+                .map_or_else(|| empty_hash.clone(), |e| e.hash.clone());
+            if strict_hash == current_hash {
+                return false; // matches its state at the snapshot — nothing to show
+            }
+            if self
+                .lh_effective_base_for(f)
+                .is_some_and(|(e, _)| e.hash != current_hash)
+            {
+                revertable.insert(f.clone());
+            }
+            true
         });
+        self.lh.files_revertable = revertable;
         files.sort();
         self.lh.files_tree = tree::Tree::build(&files);
         // Default fully expanded (the WebStorm presentation) — every ancestor dir.
@@ -395,21 +404,19 @@ impl Kyde {
             .map(|e| (e, true))
     }
 
-    /// The effective base snapshot's text for the currently-targeted file.
+    /// The snapshot text the panes show for the currently-targeted file — its state
+    /// AT the selected point (`None` = not tracked then; the caller diffs against
+    /// empty, so a created-since file reads as all-added).
     fn lh_selected_content(&self) -> Option<String> {
-        let (ev, _) = self.lh_effective_base_for(&self.lh_selected_path()?)?;
+        let ev = self.lh_base_event_for(&self.lh_selected_path()?)?;
         let store = self.lh.store.as_ref()?;
         store.lock().ok()?.content(&ev.hash).ok()
     }
 
-    /// Whether anything under `p` (a file or folder from the changed-files panel) has a
-    /// snapshot to restore — i.e. whether a revert has something to do.
+    /// Whether anything under `p` (a file or folder from the changed-files panel) has
+    /// a revert that would actually change something (see `files_revertable`).
     pub(crate) fn lh_has_base_under(&self, p: &std::path::Path) -> bool {
-        self.lh
-            .files
-            .iter()
-            .filter(|f| f.starts_with(p))
-            .any(|f| self.lh_effective_base_for(f).is_some())
+        self.lh.files_revertable.iter().any(|f| f.starts_with(p))
     }
 
     /// Load snapshot (left) vs current file (right) into the aligned panes — the
@@ -513,9 +520,11 @@ impl Kyde {
 
     /// Restore each of `paths` to its effective snapshot at the selected point (a
     /// file first seen AFTER the snapshot goes back to its earliest-known state —
-    /// never deleted; guessing a deletion would be worse). Reverting is itself
-    /// history: every pre-revert state is labeled "Before revert" first, so the
-    /// timeline gains a marker and the undone state stays recoverable.
+    /// never deleted; guessing a deletion would be worse). No-op targets (already
+    /// matching, e.g. a created-since file at its only snapshot) are skipped.
+    /// Reverting is itself history: every pre-revert state is labeled
+    /// "Before revert" first, so the timeline gains a marker and the undone state
+    /// stays recoverable.
     fn lh_revert_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         let restores: Vec<(PathBuf, String)> = paths
             .into_iter()
@@ -523,6 +532,13 @@ impl Kyde {
                 let (ev, _) = self.lh_effective_base_for(&p)?;
                 let store = self.lh.store.as_ref()?;
                 let text = store.lock().ok()?.content(&ev.hash).ok()?;
+                let current = self
+                    .lh_abs(&p)
+                    .and_then(|a| std::fs::read_to_string(a).ok())
+                    .unwrap_or_default();
+                if current == text {
+                    return None; // already there — a write would only add noise
+                }
                 Some((p, text))
             })
             .collect();
@@ -643,6 +659,7 @@ impl Kyde {
         self.lh.pending.clear();
         self.lh.events.clear();
         self.lh.files.clear();
+        self.lh.files_revertable.clear();
         self.lh.files_tree = tree::Tree::default();
         self.lh.files_expanded.clear();
         self.lh.file_selected = None;
@@ -735,15 +752,15 @@ impl Kyde {
                         cx.listener(move |this, _e, _w, cx| this.lh_revert_path(p.clone(), cx)),
                     ))
                 } else {
-                    // First seen after this snapshot — its earlier state is unknown,
-                    // so there is nothing safe to restore.
+                    // Every known snapshot already matches the current content — a
+                    // revert would change nothing.
                     panel.child(
                         div()
                             .px_3()
                             .py_1()
                             .cursor(gpui::CursorStyle::Arrow)
                             .text_color(t.line_number)
-                            .child("No snapshot at this point"),
+                            .child("Nothing to revert to"),
                     )
                 }
             }
@@ -1045,29 +1062,21 @@ impl Kyde {
         } else {
             format!("{n} difference{}", if n == 1 { "" } else { "s" })
         };
-        // Under a folder scope, name the file both sides are showing. The snapshot side
-        // is the file's EFFECTIVE state at the selected point — for a file first seen
-        // after the snapshot that's its earliest later event, labeled "First seen"
-        // to be honest about it.
+        // Under a folder scope, name the file both sides are showing. The snapshot
+        // side is the file's state AT the selected point — a file not tracked then
+        // (created since) diffs against empty and says so.
         let sel_file = sel_path
             .as_ref()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
         let base = sel_path
             .as_ref()
-            .and_then(|p| self.lh_effective_base_for(p).map(|(e, fb)| (e.clone(), fb)));
+            .and_then(|p| self.lh_base_event_for(p).cloned());
         let snap_label: SharedString = match &base {
-            Some((ev, fallback)) => {
-                let word = if *fallback { "First seen" } else { "Snapshot" };
-                let ts = format_ts(ev.ts_ms, tz);
-                if scoped_to_file {
-                    format!("{word} · {ts}")
-                } else {
-                    format!("{sel_file} · {word} · {ts}")
-                }
-            }
-            None if scoped_to_file => "No snapshot at this point".to_string(),
-            None => format!("{sel_file} · No snapshot at this point"),
+            Some(ev) if scoped_to_file => format!("Snapshot · {}", format_ts(ev.ts_ms, tz)),
+            Some(ev) => format!("{sel_file} · Snapshot · {}", format_ts(ev.ts_ms, tz)),
+            None if scoped_to_file => "Added since this point".to_string(),
+            None => format!("{sel_file} · Added since this point"),
         }
         .into();
         let current_label: SharedString = if scoped_to_file {
@@ -1100,7 +1109,12 @@ impl Kyde {
                     .text_color(t.secondary_text)
                     .child(SharedString::from(count)),
             );
-        if base.is_some() {
+        // Only offer Revert when it would change something (the targeted file is in
+        // the revertable set) — a no-op button is noise.
+        let can_revert = sel_path
+            .as_ref()
+            .is_some_and(|p| self.lh.files_revertable.contains(p));
+        if can_revert {
             header = header.child(
                 btn_secondary("lh-revert", "Revert to This Version")
                     .py_1()
