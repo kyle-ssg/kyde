@@ -1624,11 +1624,8 @@ struct LocalHistoryView {
     selected: usize,
     /// Files changed at or since the selected snapshot (distinct paths of
     /// `events[0..=selected]` still differing from their state at it, sorted) — the
-    /// bottom "changed files" panel.
+    /// bottom "changed files" panel. Every listed file has a working revert.
     files: Vec<PathBuf>,
-    /// The subset of `files` a revert can actually improve (earliest-known snapshot
-    /// differs from current) — gates the revert menu items/button.
-    files_revertable: std::collections::HashSet<PathBuf>,
     /// `files` as a tree (folders + files, the Browse-tree model).
     files_tree: tree::Tree,
     /// Expanded dirs in the changed-files panel (reset to all-expanded on recompute).
@@ -1665,7 +1662,6 @@ impl LocalHistoryView {
             events: Vec::new(),
             selected: 0,
             files: Vec::new(),
-            files_revertable: std::collections::HashSet::new(),
             files_tree: tree::Tree::default(),
             files_expanded: std::collections::HashSet::new(),
             file_selected: None,
@@ -3834,9 +3830,9 @@ mod gpui_smoke_tests {
                 };
 
                 // Oldest snapshot selected → everything changed-or-created since is
-                // listed. lib.rs (first tracked after, edited since) reverts to its
-                // earliest snapshot; new.txt (created since, unchanged) is listed as
-                // added but offers no revert — nothing it could restore.
+                // listed, and every listed file has a revert: lib.rs (first tracked
+                // after) would be recreated at its snapshot, new.txt (created since)
+                // would be DELETED — recoverable either way.
                 let i = row(k, "app.tsx", 1_000);
                 k.lh_select(i, cx);
                 assert_eq!(
@@ -3848,22 +3844,30 @@ mod gpui_smoke_tests {
                     ]
                 );
                 assert!(k.lh_has_base_under(std::path::Path::new("app.tsx")));
-                assert!(
-                    k.lh_has_base_under(std::path::Path::new("sub/lib.rs")),
-                    "first-seen-after files fall back to their earliest snapshot"
-                );
+                assert!(k.lh_has_base_under(std::path::Path::new("sub/lib.rs")));
                 assert!(k.lh_has_base_under(std::path::Path::new("sub")));
                 assert!(
-                    !k.lh_has_base_under(std::path::Path::new("new.txt")),
-                    "created-since file at its only snapshot has nothing to revert to"
+                    k.lh_has_base_under(std::path::Path::new("new.txt")),
+                    "created-since file reverts by deletion"
                 );
-                // Reverting that first-seen-after file restores the earliest state we
-                // know (its @1500 snapshot), never deletes it.
+                // lib.rs did not exist at this point: reverting DELETES it — labeled
+                // first, so the deleted content stays recoverable from the timeline.
                 k.lh_revert_path(PathBuf::from("sub/lib.rs"), cx);
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
-                    "l1\n"
+                assert!(
+                    !dir.join("sub/lib.rs").exists(),
+                    "reverting a created-since file deletes it"
                 );
+                {
+                    let store = k.lh.store.clone().unwrap();
+                    let s = store.lock().unwrap();
+                    let ev = s.events_for(std::path::Path::new("sub/lib.rs"));
+                    assert_eq!(ev[0].label.as_deref(), Some("Before revert"));
+                    assert_eq!(
+                        s.content(&ev[0].hash).unwrap(),
+                        "now-l\n",
+                        "pre-delete content is recoverable"
+                    );
+                }
                 std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap(); // restore fixture
 
                 // Right-click a FILE row → revert just that file: app.tsx returns to its
@@ -3907,7 +3911,8 @@ mod gpui_smoke_tests {
                 );
 
                 // Timeline right-click → Revert This Change and After: every changed-
-                // since file returns to its state at the selected snapshot.
+                // since file returns to its state at the selected snapshot — rewrites
+                // for tracked files, deletion for the created-since new.txt.
                 std::fs::write(dir.join("app.tsx"), "zz\n").unwrap();
                 std::fs::write(dir.join("sub/lib.rs"), "zz\n").unwrap();
                 let i = row(k, "sub/lib.rs", 1_500);
@@ -3921,6 +3926,17 @@ mod gpui_smoke_tests {
                     std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
                     "l1\n"
                 );
+                assert!(
+                    !dir.join("new.txt").exists(),
+                    "revert-since deletes files created after the snapshot"
+                );
+                {
+                    let store = k.lh.store.clone().unwrap();
+                    let s = store.lock().unwrap();
+                    let ev = s.events_for(std::path::Path::new("new.txt"));
+                    assert_eq!(ev[0].label.as_deref(), Some("Before revert"));
+                    assert_eq!(s.content(&ev[0].hash).unwrap(), "n1\n");
+                }
                 // The pre-revert "zz" states were labeled — recoverable like anything else.
                 let labels =
                     k.lh.events

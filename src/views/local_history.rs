@@ -303,11 +303,10 @@ impl Kyde {
     /// differs from their state AT the snapshot — with "not tracked yet" and "no
     /// file" both counting as empty. So a file created since shows (as all-added),
     /// and a file touched but changed BACK (deleted then restored) is dropped — a
-    /// "No differences" row reads as a bug. Alongside, `files_revertable` marks the
-    /// files a revert can actually improve: their earliest-known snapshot differs
-    /// from current (drives the menu items — no dead entries, no no-op reverts).
-    /// The panel selection survives if its file is still listed. Runs on selection
-    /// change only (one content-hash read per candidate — never on the render path).
+    /// "No differences" row reads as a bug. Every listed file has a working revert
+    /// (rewrite / recreate / delete back to the snapshot state). The panel selection
+    /// survives if its file is still listed. Runs on selection change only (one
+    /// content-hash read per candidate — never on the render path).
     fn lh_recompute_files(&mut self) {
         let upto = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
         let mut seen = std::collections::HashSet::new();
@@ -321,7 +320,6 @@ impl Kyde {
             .map(|e| e.path.clone())
             .collect();
         let empty_hash = kyde_local_history::content_hash("");
-        let mut revertable = std::collections::HashSet::new();
         files.retain(|f| {
             let current_hash = self
                 .lh_abs(f)
@@ -333,18 +331,8 @@ impl Kyde {
             let strict_hash = self
                 .lh_base_event_for(f)
                 .map_or_else(|| empty_hash.clone(), |e| e.hash.clone());
-            if strict_hash == current_hash {
-                return false; // matches its state at the snapshot — nothing to show
-            }
-            if self
-                .lh_effective_base_for(f)
-                .is_some_and(|(e, _)| e.hash != current_hash)
-            {
-                revertable.insert(f.clone());
-            }
-            true
+            strict_hash != current_hash
         });
-        self.lh.files_revertable = revertable;
         files.sort();
         self.lh.files_tree = tree::Tree::build(&files);
         // Default fully expanded (the WebStorm presentation) — every ancestor dir.
@@ -382,28 +370,6 @@ impl Kyde {
             .find(|e| e.path == path)
     }
 
-    /// `path`'s EFFECTIVE snapshot for the selected point: its state at that time, or —
-    /// for a file first seen after it — its OLDEST later event (usually the open
-    /// baseline), the earliest state we know and the closest thing to "before its
-    /// changes". So every file in the changed-since panel has a working diff + revert.
-    /// `bool` = the fallback was used.
-    fn lh_effective_base_for(
-        &self,
-        path: &std::path::Path,
-    ) -> Option<(&kyde_local_history::Event, bool)> {
-        if let Some(e) = self.lh_base_event_for(path) {
-            return Some((e, false));
-        }
-        self.lh
-            .events
-            .get(..self.lh.selected)
-            .unwrap_or_default()
-            .iter()
-            .rev() // newest-first list → reverse = oldest of the newer events first
-            .find(|e| e.path == path)
-            .map(|e| (e, true))
-    }
-
     /// The snapshot text the panes show for the currently-targeted file — its state
     /// AT the selected point (`None` = not tracked then; the caller diffs against
     /// empty, so a created-since file reads as all-added).
@@ -414,9 +380,10 @@ impl Kyde {
     }
 
     /// Whether anything under `p` (a file or folder from the changed-files panel) has
-    /// a revert that would actually change something (see `files_revertable`).
+    /// a revert to offer. Every listed file does — it differs from its state at the
+    /// snapshot, so reverting rewrites, recreates, or deletes it.
     pub(crate) fn lh_has_base_under(&self, p: &std::path::Path) -> bool {
-        self.lh.files_revertable.iter().any(|f| f.starts_with(p))
+        self.lh.files.iter().any(|f| f.starts_with(p))
     }
 
     /// Load snapshot (left) vs current file (right) into the aligned panes — the
@@ -518,50 +485,81 @@ impl Kyde {
         self.lh_revert_files(targets, cx);
     }
 
-    /// Restore each of `paths` to its effective snapshot at the selected point (a
-    /// file first seen AFTER the snapshot goes back to its earliest-known state —
-    /// never deleted; guessing a deletion would be worse). No-op targets (already
-    /// matching, e.g. a created-since file at its only snapshot) are skipped.
-    /// Reverting is itself history: every pre-revert state is labeled
-    /// "Before revert" first, so the timeline gains a marker and the undone state
-    /// stays recoverable.
+    /// Restore each of `paths` to its state AT the selected snapshot: rewrite files
+    /// that differ, RECREATE files deleted since, and DELETE files that did not
+    /// exist then (created since). Every pre-revert state is labeled "Before revert"
+    /// first, so anything undone — including a deleted file's content — stays
+    /// recoverable from the timeline; a file whose current content can't be read
+    /// (and so can't be labeled) is never deleted. No-op targets are skipped.
     fn lh_revert_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
-        let restores: Vec<(PathBuf, String)> = paths
+        enum Restore {
+            Write(String),
+            Delete,
+        }
+        let plan: Vec<(PathBuf, Restore)> = paths
             .into_iter()
             .filter_map(|p| {
-                let (ev, _) = self.lh_effective_base_for(&p)?;
-                let store = self.lh.store.as_ref()?;
-                let text = store.lock().ok()?.content(&ev.hash).ok()?;
                 let current = self
                     .lh_abs(&p)
-                    .and_then(|a| std::fs::read_to_string(a).ok())
-                    .unwrap_or_default();
-                if current == text {
-                    return None; // already there — a write would only add noise
+                    .and_then(|a| std::fs::read_to_string(a).ok());
+                match self.lh_base_event_for(&p) {
+                    Some(ev) => {
+                        let store = self.lh.store.as_ref()?;
+                        let text = store.lock().ok()?.content(&ev.hash).ok()?;
+                        (current.as_deref() != Some(text.as_str()))
+                            .then_some((p, Restore::Write(text)))
+                    }
+                    // Didn't exist at the snapshot → reverting removes it (labeled
+                    // first, so it stays recoverable). Unreadable → skip, never
+                    // delete what we couldn't label.
+                    None => current.is_some().then_some((p, Restore::Delete)),
                 }
-                Some((p, text))
             })
             .collect();
-        if restores.is_empty() {
+        if plan.is_empty() {
             return;
         }
-        let targets: Vec<PathBuf> = restores.iter().map(|(p, _)| p.clone()).collect();
+        let targets: Vec<PathBuf> = plan.iter().map(|(p, _)| p.clone()).collect();
         self.lh_label_sync(&targets, "Before revert");
-        for (path, text) in restores {
-            if let Err(e) = self.write_open_file(&path, &text) {
-                self.fail("Local history revert", e);
-                continue;
+        for (path, action) in plan {
+            match action {
+                Restore::Write(text) => {
+                    if let Err(e) = self.write_open_file(&path, &text) {
+                        self.fail("Local history revert", e);
+                        continue;
+                    }
+                    // The restored file may be open in Browse — reload it unless it
+                    // has unsaved edits (the never-clobber rule).
+                    if self.browse.open_path.as_ref() == Some(&path)
+                        && !self.browse.editor.read(cx).dirty
+                    {
+                        let lang = self.effective_lang(&path);
+                        self.browse
+                            .editor
+                            .update(cx, |e, cx| e.set_content(text, lang, cx));
+                    }
+                    // The write itself is a change worth keeping (deduped if identical).
+                    self.lh_note_save(&path, cx);
+                }
+                Restore::Delete => {
+                    let Some(abs) = self.lh_abs(&path) else {
+                        continue;
+                    };
+                    if let Err(e) = std::fs::remove_file(&abs) {
+                        self.fail("Local history revert", e);
+                        continue;
+                    }
+                    // Drop any open tab / selection pointing at the deleted path
+                    // (the do_delete cleanup).
+                    self.browse.open_tabs.retain(|t| t != &path);
+                    if self.browse.open_path.as_ref() == Some(&path) {
+                        self.browse.open_path = self.browse.open_tabs.last().cloned();
+                    }
+                    if self.browse.selected_path.as_ref() == Some(&path) {
+                        self.browse.selected_path = None;
+                    }
+                }
             }
-            // The restored file may be open in Browse — reload it unless it has
-            // unsaved edits (the never-clobber rule).
-            if self.browse.open_path.as_ref() == Some(&path) && !self.browse.editor.read(cx).dirty {
-                let lang = self.effective_lang(&path);
-                self.browse
-                    .editor
-                    .update(cx, |e, cx| e.set_content(text, lang, cx));
-            }
-            // The write itself is a change worth keeping (deduped if identical).
-            self.lh_note_save(&path, cx);
         }
         self.lh_reload(cx);
         self.refresh(cx);
@@ -659,7 +657,6 @@ impl Kyde {
         self.lh.pending.clear();
         self.lh.events.clear();
         self.lh.files.clear();
-        self.lh.files_revertable.clear();
         self.lh.files_tree = tree::Tree::default();
         self.lh.files_expanded.clear();
         self.lh.file_selected = None;
@@ -738,10 +735,14 @@ impl Kyde {
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.lh_revert_since(cx)),
             )),
-            // Changed-files row: revert JUST this file (or this folder's files).
+            // Changed-files row: revert JUST this file (or this folder's files). A
+            // file that didn't exist at the snapshot is deleted by the revert — say
+            // so in the label (it stays recoverable from the timeline).
             MenuTarget::LhPath(p, is_dir) => {
                 let label = if *is_dir {
                     "Revert This Folder"
+                } else if self.lh_base_event_for(p).is_none() {
+                    "Revert This File (deletes it)"
                 } else {
                     "Revert This File"
                 };
@@ -1111,9 +1112,7 @@ impl Kyde {
             );
         // Only offer Revert when it would change something (the targeted file is in
         // the revertable set) — a no-op button is noise.
-        let can_revert = sel_path
-            .as_ref()
-            .is_some_and(|p| self.lh.files_revertable.contains(p));
+        let can_revert = sel_path.as_ref().is_some_and(|p| self.lh.files.contains(p));
         if can_revert {
             header = header.child(
                 btn_secondary("lh-revert", "Revert to This Version")
