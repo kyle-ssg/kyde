@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## [2.4.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.3.0...kyde-v2.4.0) (2026-07-25)
+
+
+### Features
+
+* ⌘⌥←/⌘⌥→ back-forward file navigation ([#54](https://github.com/kyle-ssg/kyde/issues/54)) ([2800c38](https://github.com/kyle-ssg/kyde/commit/2800c38ece6d2bf45ca81c395e55e7063a5e368e))
+* Local History — per-file snapshots independent of git ([#7](https://github.com/kyle-ssg/kyde/issues/7)) ([#63](https://github.com/kyle-ssg/kyde/issues/63)) ([972842b](https://github.com/kyle-ssg/kyde/commit/972842bd72076a3b873a0951b2178084ba1d8116))
+
+
+### Bug Fixes
+
+* rollback of added files, finder git-status colors, cmd+backspace delete ([#62](https://github.com/kyle-ssg/kyde/issues/62)) ([cf44415](https://github.com/kyle-ssg/kyde/commit/cf4441542d78b8f02e279f77c7450f9d04717d9f))
+
 ## [2.3.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.2.0...kyde-v2.3.0) (2026-07-17)
 
 
