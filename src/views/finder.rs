@@ -192,7 +192,9 @@ impl Kyde {
                         .child(SharedString::from(label))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| this.create_scratch(ext, cx)),
+                            cx.listener(move |this, _e, window, cx| {
+                                this.create_scratch(ext, window, cx);
+                            }),
                         )
                         .into_any_element()
                 })
@@ -672,7 +674,7 @@ impl Kyde {
                 self.finder.open = false;
                 window.focus(&self.focus_handle);
                 if let Some(ext) = ext {
-                    self.create_scratch(ext, cx);
+                    self.create_scratch(ext, window, cx);
                 } else {
                     cx.notify();
                 }

@@ -42,6 +42,9 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
+# Filesystem watcher (FSEvents on macOS) — live external-change detection so local
+# history + git status refresh without waiting for a window refocus.
+notify = "8"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
@@ -112,6 +115,11 @@ kyde-syntax = { path = "crates/kyde-syntax", default-features = false }
 # Fuzzy file search (Go to File)
 fuzzy-matcher = "0.3"
 
+# Live filesystem watching — external creates/edits refresh git status + feed local
+# history without a window refocus (see `Kyde::sync_fs_watcher`). Default features =
+# FSEvents on macOS.
+notify.workspace = true
+
 # Misc
 anyhow.workspace = true
 serde.workspace = true
@@ -123,7 +131,9 @@ ttf-parser = "0.25"
 # blocking HTTP+TLS stack (ureq → rustls), kept out of the default build to
 # protect the footprint (see CONTRIBUTING.md). Local-file images need neither.
 ureq = { version = "3", optional = true }
-futures = { workspace = true, optional = true }
+# Always compiled: the filesystem watcher's wakeup channel (see `Kyde::sync_fs_watcher`)
+# needs it unconditionally, on top of the terminal PTY + remote-image wakeups below.
+futures.workspace = true
 # Embedded terminal — alacritty's VTE/grid/PTY engine (Apache-2.0), same crate Zed uses.
 # Gated behind the `terminal` Cargo feature so a build can drop it entirely: an off
 # feature sheds the grammar-sized ~2MB of `.rodata` parse tables + the read-loop code,
@@ -164,11 +174,11 @@ full = [
 # Embedded multi-tab terminal panel. Pulls alacritty's engine + the futures channel
 # used to wake the UI on new PTY output. Drop with `--no-default-features` (or omit
 # `terminal`) to ship a build with no terminal — ~2MB lighter, faster compile.
-terminal = ["dep:alacritty_terminal", "dep:futures"]
+terminal = ["dep:alacritty_terminal"]
 # Remote http/https images in the Markdown preview. Deliberately NOT in `full` —
 # it's a networking concern, not a language pack, and adds a TLS stack. Local-file
 # images work without it. Build with: `cargo build --features remote-images`.
-remote-images = ["dep:ureq", "dep:futures"]
+remote-images = ["dep:ureq"]
 # Per-pack language features now forward to the `kyde-syntax` crate, which owns the
 # grammar crates + the `#[cfg(feature=…)]` arms. Same names + behaviour as before;
 # `typescript` still pulls `javascript` (TS inherits the base ECMAScript query).

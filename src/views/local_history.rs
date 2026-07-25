@@ -6,17 +6,24 @@
 //!   flush reads the file's final on-disk state, so a burst's last save is never lost —
 //!   throttling delays the write, it never drops it. Unchanged content dedupes to zero
 //!   bytes (content addressing in `kyde-local-history`).
-//! - **Baseline / External**: opening a file records its pristine content on first sight,
-//!   and an "External change" event when the disk differs from the last snapshot (the
-//!   file was edited outside Kyde).
+//! - **External**: [`Kyde::lh_scan_external`] (every refresh) records any change Kyde
+//!   itself didn't make — a file edited/created by another editor, a script, a checkout —
+//!   as an `External` event, and tombstones files git reports Deleted. Opening a file also
+//!   records a baseline on first sight.
+//! - **Deleted**: an in-app delete ([`Kyde::lh_note_delete`]) snapshots "Before delete"
+//!   content + a deletion tombstone, so a later re-creation reads as an addition.
 //! - **Labels**: destructive operations snapshot their targets FIRST — "Before rollback",
-//!   "Before checkout X", "Before delete", "Before hunk revert", "Before compare apply",
-//!   "Before revert" — and a commit stamps "Commit: <subject>" on its files.
+//!   "Before checkout X", "Before hunk revert", "Before compare apply", "Before revert" —
+//!   and a commit stamps "Commit: <subject>" on its files.
 //!
-//! The window (`ModalKind::LocalHistory`) is the compare-view pattern: a snapshot
-//! timeline on the left, snapshot ↔ current side-by-side panes on the right, a center
-//! gutter whose `»` restores one hunk of the snapshot into the file, and a header
-//! Revert button that restores the whole snapshot.
+//! The window (`ModalKind::LocalHistory`) is the compare-view pattern: a timeline on the
+//! left, before-vs-current side-by-side panes on the right, a center gutter whose `»`
+//! restores one hunk, and a header Revert button. Each timeline row represents a CHANGE:
+//! selecting it shows the diff that change (and everything after it) made — its left side
+//! is the file's state just BEFORE the change (empty for a creation, so a new file reads
+//! as all-added), its right side the current file. Reverting undoes the selected change
+//! and everything newer (deleting a file whose selected change was its creation). See
+//! [`Kyde::lh_base_event_for`].
 
 use crate::*;
 use kyde_local_history::{format_ts, relative_ts, EventKind};
@@ -190,6 +197,86 @@ impl Kyde {
             .detach();
     }
 
+    /// Record external (out-of-Kyde) creates/edits into the timeline. Called from every
+    /// `refresh` (via `apply_snapshot`), so a file changed by another editor, a branch
+    /// checkout, or a script lands in local history even if it's never (re)opened in
+    /// Browse — the gap that made external changes invisible before.
+    ///
+    /// Candidates are the git-changed files (create/edit/conflict — Deleted is skipped,
+    /// there's nothing to read) plus the open Browse file (so non-git projects still
+    /// capture the file being edited). Everything recorded here is an [`EventKind::External`]
+    /// change — the scan only ever sees edits Kyde itself did NOT make (our own saves go
+    /// through `lh_note_save` and are excluded via `pending`). Cheap by construction: the
+    /// candidate set is bounded to files git already flagged as changed, the reads happen off
+    /// the UI thread, and the store dedups identical content — so a re-scanned unchanged file
+    /// writes nothing.
+    pub(crate) fn lh_scan_external(&mut self, cx: &mut Context<Self>) {
+        if !self.lh.cfg.enabled || self.lh.store.is_none() {
+            return;
+        }
+        let mut candidates: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|f| f.status != FileStatus::Deleted)
+            .map(|f| f.path.clone())
+            .collect();
+        if let Some(p) = self.browse.open_path.clone() {
+            if !candidates.contains(&p) {
+                candidates.push(p);
+            }
+        }
+        // Files git reports DELETED in the working tree → tombstone them. Keyed off git
+        // status (not a blind disk sweep) so a branch checkout — which drops files without
+        // marking them "deleted" — never spams the timeline with delete/recreate churn.
+        let deleted: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::Deleted)
+            .map(|f| f.path.clone())
+            .collect();
+        // Our own unflushed saves flush as `Change` — don't also record them as external.
+        candidates.retain(|p| !self.lh.pending.contains(p));
+        let abs: Vec<(PathBuf, PathBuf)> = candidates
+            .into_iter()
+            .filter_map(|rel| self.lh_abs(&rel).map(|a| (rel, a)))
+            .collect();
+        if abs.is_empty() && deleted.is_empty() {
+            return;
+        }
+        let Some(store) = self.lh.store.clone() else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let now = lh_now_ms();
+                for (rel, abs) in abs {
+                    // Gone mid-scan or non-UTF-8 (binary) → nothing to snapshot.
+                    let Ok(content) = std::fs::read_to_string(&abs) else {
+                        continue;
+                    };
+                    if let Ok(mut s) = store.lock() {
+                        // Everything this scan catches is a change Kyde did NOT make (our
+                        // own saves go through `lh_note_save` and are excluded via
+                        // `pending`), so it's always an External change — including the
+                        // first sighting of a file created/edited outside Kyde.
+                        match s.last_hash(&rel) {
+                            Some(h) if h == kyde_local_history::content_hash(&content) => continue,
+                            _ => {}
+                        }
+                        let _ = s.record(&rel, &content, EventKind::External, None, now);
+                    }
+                }
+                for rel in deleted {
+                    if let Ok(mut s) = store.lock() {
+                        // Only tombstones a file the store already knows and hasn't already
+                        // marked gone (record_deletion dedups both).
+                        let _ = s.record_deletion(&rel, now);
+                    }
+                }
+            })
+            .detach();
+    }
+
     /// Immediately snapshot `paths`' CURRENT on-disk content under `label` — called by
     /// destructive operations *before* they touch the files. The reads happen inline
     /// (the caller is about to overwrite the content; a deferred read would capture the
@@ -224,6 +311,41 @@ impl Kyde {
                 for (rel, content) in contents {
                     let _ = s.record(&rel, &content, EventKind::Label, Some(label.clone()), now);
                 }
+            })
+            .detach();
+    }
+
+    /// An in-app delete of `rel`: snapshot its content ("Before delete") AND record a
+    /// deletion tombstone, in one background task so the tombstone lands after the content
+    /// (a file needs history for the tombstone to stick). Covers the untracked-file case
+    /// git status can't flag; the tracked case the `lh_scan_external` sweep would also
+    /// catch (`record_deletion` dedups). Content is read INLINE — the caller is about to
+    /// remove the file. No-op when disabled / unreadable.
+    pub(crate) fn lh_note_delete(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
+        if !self.lh.cfg.enabled || self.lh.store.is_none() {
+            return;
+        }
+        let Some(store) = self.lh.store.clone() else {
+            return;
+        };
+        let content = self
+            .lh_abs(rel)
+            .and_then(|a| std::fs::read_to_string(a).ok());
+        let rel = rel.to_path_buf();
+        cx.background_executor()
+            .spawn(async move {
+                let now = lh_now_ms();
+                let Ok(mut s) = store.lock() else { return };
+                if let Some(c) = content {
+                    let _ = s.record(
+                        &rel,
+                        &c,
+                        EventKind::Label,
+                        Some("Before delete".into()),
+                        now,
+                    );
+                }
+                let _ = s.record_deletion(&rel, now);
             })
             .detach();
     }
@@ -309,15 +431,17 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Rebuild the "changed since this snapshot" panel: the distinct files of
+    /// Rebuild the "changed by this and later" panel: the distinct files of
     /// `events[0..=selected]` (this change + everything newer) whose CURRENT content
-    /// differs from their state AT the snapshot — with "not tracked yet" and "no
-    /// file" both counting as empty. So a file created since shows (as all-added),
-    /// and a file touched but changed BACK (deleted then restored) is dropped — a
-    /// "No differences" row reads as a bug. Every listed file has a working revert
-    /// (rewrite / recreate / delete back to the snapshot state). The panel selection
-    /// survives if its file is still listed. Runs on selection change only (one
-    /// content-hash read per candidate — never on the render path).
+    /// differs from their state just BEFORE the selected change — with "didn't exist
+    /// then" and "no file now" both counting as empty. So the file the selected change
+    /// itself created/edited is listed (its own change IS included — that's the fix for
+    /// "0 files" on a creation), a file changed BACK to its pre-change state is dropped
+    /// (a "No differences" row reads as a bug), and a file untouched by this-change-and-
+    /// after never appears. Every listed file has a working revert (rewrite / recreate /
+    /// delete to the pre-change state). The panel selection survives if its file is still
+    /// listed. Runs on selection change only (one content-hash read per candidate — never
+    /// on the render path).
     fn lh_recompute_files(&mut self) {
         let upto = self.lh.selected.min(self.lh.events.len().saturating_sub(1));
         let mut seen = std::collections::HashSet::new();
@@ -331,10 +455,14 @@ impl Kyde {
             .map(|e| e.path.clone())
             .collect();
         files.retain(|f| {
-            // Existence-aware: `None` = no snapshot then / no file now. A pure
-            // existence flip (created since — even as an EMPTY file — or deleted
-            // since) is a real change, listed and revertable.
-            let base = self.lh_base_event_for(f).map(|e| e.hash.clone());
+            // Existence-aware: `None` = didn't exist before this change (no prior event OR
+            // a deletion tombstone) / no file now. A pure existence flip (created by
+            // this-change-or-later — even as an EMPTY file — or deleted since) is a real
+            // change, listed and revertable.
+            let base = self
+                .lh_existed_before(f)
+                .then(|| self.lh_base_event_for(f).map(|e| e.hash.clone()))
+                .flatten();
             let current = self
                 .lh_abs(f)
                 .and_then(|a| std::fs::read_to_string(a).ok())
@@ -371,38 +499,56 @@ impl Kyde {
             .or_else(|| self.lh.events.get(self.lh.selected).map(|e| e.path.clone()))
     }
 
-    /// `path`'s snapshot AT the selected point in time — its newest event at or before
-    /// the selected row (`None` = first seen after it).
+    /// `path`'s state just BEFORE the selected change — its newest event *older* than the
+    /// selected row (`None` = the file didn't exist yet). This is the "before" side of the
+    /// diff and the target a revert restores, so a timeline row reads as "this change (and
+    /// everything after it)": selecting a file's own creation shows it as fully added and
+    /// reverts it by deletion; selecting an edit shows what that edit (and later ones) did
+    /// and reverts to the pre-edit content. Events are newest-first, so "older" = a higher
+    /// index; skipping the selected row itself (`selected + 1..`) is what excludes the
+    /// selected change from the "before" state.
     fn lh_base_event_for(&self, path: &std::path::Path) -> Option<&kyde_local_history::Event> {
         self.lh
             .events
-            .get(self.lh.selected..)
+            .get(self.lh.selected + 1..)
             .unwrap_or_default()
             .iter()
             .find(|e| e.path == path)
     }
 
-    /// The snapshot text the panes show for the currently-targeted file — its state
-    /// AT the selected point (`None` = not tracked then; the caller diffs against
-    /// empty, so a created-since file reads as all-added).
+    /// Whether `path` EXISTED just before the selected change — `false` when it had no
+    /// event yet OR its newest prior event is a deletion tombstone (a re-creation must diff
+    /// against "did not exist", not against the pre-deletion content).
+    fn lh_existed_before(&self, path: &std::path::Path) -> bool {
+        self.lh_base_event_for(path)
+            .is_some_and(|e| e.kind != EventKind::Deleted)
+    }
+
+    /// The "before" text the left pane shows for the currently-targeted file — its state
+    /// just before the selected change (`None` = didn't exist yet / was deleted; the caller
+    /// diffs against empty, so a file the selected change created reads as all-added).
     fn lh_selected_content(&self) -> Option<String> {
-        let ev = self.lh_base_event_for(&self.lh_selected_path()?)?;
+        let path = self.lh_selected_path()?;
+        if !self.lh_existed_before(&path) {
+            return None;
+        }
+        let ev = self.lh_base_event_for(&path)?;
         let store = self.lh.store.as_ref()?;
         store.lock().ok()?.content(&ev.hash).ok()
     }
 
     /// Whether anything under `p` (a file or folder from the changed-files panel) has
-    /// a revert to offer. Every listed file does — it differs from its state at the
-    /// snapshot, so reverting rewrites, recreates, or deletes it.
+    /// a revert to offer. Every listed file does — it differs from its state before the
+    /// selected change, so reverting rewrites, recreates, or deletes it.
     pub(crate) fn lh_has_base_under(&self, p: &std::path::Path) -> bool {
         self.lh.files.iter().any(|f| f.starts_with(p))
     }
 
-    /// Load snapshot (left) vs current file (right) into the aligned panes — the
+    /// Load "before" (left) vs current file (right) into the aligned panes — the
     /// compare-view decoration pipeline. The file is the changed-files panel's
-    /// selection (else the selected event's own); its snapshot side is the file's
-    /// state AT the selected point in time. `park` scrolls to just above the first
-    /// hunk.
+    /// selection (else the selected event's own); its left side is the file's state
+    /// just BEFORE the selected change, so the selected change (and everything after
+    /// it) shows as the diff. `park` scrolls to just above the first hunk.
     fn lh_load_diff(&mut self, park: bool, cx: &mut Context<Self>) {
         let Some(path) = self.lh_selected_path() else {
             self.lh.diff = None;
@@ -456,21 +602,22 @@ impl Kyde {
         cx.notify();
     }
 
-    /// `»` on hunk `hi`: restore that hunk of the snapshot into the current file
+    /// `»` on hunk `hi`: restore that hunk's "before" lines into the current file
     /// (all OTHER differences stay). Snapshot-first, so the pre-restore state is
     /// itself in the timeline.
     pub(crate) fn lh_apply_hunk(&mut self, hi: usize, cx: &mut Context<Self>) {
         let Some(d) = self.lh.diff.as_ref() else {
             return;
         };
-        // diff = (snapshot → current); keeping every hunk EXCEPT `hi` un-reverts
-        // nothing else and hands hunk `hi` back its snapshot lines.
+        // diff = (before-this-change → current); keeping every hunk EXCEPT `hi` un-reverts
+        // nothing else and hands hunk `hi` back its pre-change lines.
         let text = d.partial_new_content(|j| j != hi);
         self.lh_write_current("Before hunk restore", &text, cx);
     }
 
-    /// Header Revert: the targeted file becomes exactly its snapshot at the selected
-    /// point.
+    /// Header Revert: undo the selected change (and everything after) for the targeted
+    /// file — it becomes exactly its state just before that change (deleted if the
+    /// change was its creation).
     pub(crate) fn lh_revert_to_selected(&mut self, cx: &mut Context<Self>) {
         let Some(path) = self.lh_selected_path() else {
             return;
@@ -479,7 +626,7 @@ impl Kyde {
     }
 
     /// Right-click a changed-files row: revert JUST that file (or that folder's files)
-    /// to its state at the selected snapshot — never the whole selection.
+    /// to its state before the selected change — never the whole selection.
     pub(crate) fn lh_revert_path(&mut self, p: PathBuf, cx: &mut Context<Self>) {
         let targets: Vec<PathBuf> = self
             .lh
@@ -491,19 +638,19 @@ impl Kyde {
         self.lh_revert_files(targets, cx);
     }
 
-    /// Right-click a timeline row: undo this change and everything newer — every file
-    /// in the changed-since panel returns to its state at the selected snapshot.
+    /// Right-click a timeline row: undo this change and everything newer — every file in
+    /// the changed panel returns to its state just before the selected change.
     pub(crate) fn lh_revert_since(&mut self, cx: &mut Context<Self>) {
         let targets = self.lh.files.clone();
         self.lh_revert_files(targets, cx);
     }
 
-    /// Restore each of `paths` to its state AT the selected snapshot: rewrite files
-    /// that differ, RECREATE files deleted since, and DELETE files that did not
-    /// exist then (created since). Every pre-revert state is labeled "Before revert"
-    /// first, so anything undone — including a deleted file's content — stays
-    /// recoverable from the timeline; a file whose current content can't be read
-    /// (and so can't be labeled) is never deleted. No-op targets are skipped.
+    /// Restore each of `paths` to its state just BEFORE the selected change: rewrite files
+    /// that differ, RECREATE files deleted since, and DELETE files that did not exist then
+    /// (i.e. the selected change — or a later one — created them). Every pre-revert state is
+    /// labeled "Before revert" first, so anything undone — including a deleted file's
+    /// content — stays recoverable from the timeline; a file whose current content can't be
+    /// read (and so can't be labeled) is never deleted. No-op targets are skipped.
     fn lh_revert_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
         enum Restore {
             Write(String),
@@ -515,17 +662,17 @@ impl Kyde {
                 let current = self
                     .lh_abs(&p)
                     .and_then(|a| std::fs::read_to_string(a).ok());
-                match self.lh_base_event_for(&p) {
-                    Some(ev) => {
-                        let store = self.lh.store.as_ref()?;
-                        let text = store.lock().ok()?.content(&ev.hash).ok()?;
-                        (current.as_deref() != Some(text.as_str()))
-                            .then_some((p, Restore::Write(text)))
-                    }
-                    // Didn't exist at the snapshot → reverting removes it (labeled
-                    // first, so it stays recoverable). Unreadable → skip, never
-                    // delete what we couldn't label.
-                    None => current.is_some().then_some((p, Restore::Delete)),
+                if self.lh_existed_before(&p) {
+                    // Had a prior content state → rewrite to it (if it differs).
+                    let ev = self.lh_base_event_for(&p)?;
+                    let store = self.lh.store.as_ref()?;
+                    let text = store.lock().ok()?.content(&ev.hash).ok()?;
+                    (current.as_deref() != Some(text.as_str())).then_some((p, Restore::Write(text)))
+                } else {
+                    // Didn't exist before this change (no event or a deletion tombstone) →
+                    // reverting removes it (labeled first, so it stays recoverable).
+                    // Unreadable → skip, never delete what we couldn't label.
+                    current.is_some().then_some((p, Restore::Delete))
                 }
             })
             .collect();
@@ -743,15 +890,11 @@ impl Kyde {
         let t = theme::get();
         match target {
             // Timeline row: undo this change and everything newer — every file in the
-            // changed-since panel returns to its state at this snapshot. On the
-            // virtual Start-of-history row that means undoing every recorded change.
-            // Say so when that includes DELETING files created since the snapshot.
+            // changed panel returns to its state just before this change. On the virtual
+            // Start-of-history row that means undoing every recorded change. Say so when
+            // that includes DELETING files this change (or a later one) created.
             MenuTarget::LhRow => {
-                let deletes = self
-                    .lh
-                    .files
-                    .iter()
-                    .any(|f| self.lh_base_event_for(f).is_none());
+                let deletes = self.lh.files.iter().any(|f| !self.lh_existed_before(f));
                 let at_start = self.lh.selected == self.lh.events.len();
                 let label = match (at_start, deletes) {
                     (true, true) => "Revert Everything Since (deletes created files)",
@@ -765,12 +908,12 @@ impl Kyde {
                 ))
             }
             // Changed-files row: revert JUST this file (or this folder's files). A
-            // file that didn't exist at the snapshot is deleted by the revert — say
+            // file that didn't exist before this change is deleted by the revert — say
             // so in the label (it stays recoverable from the timeline).
             MenuTarget::LhPath(p, is_dir) => {
                 let label = if *is_dir {
                     "Revert This Folder"
-                } else if self.lh_base_event_for(p).is_none() {
+                } else if !self.lh_existed_before(p) {
                     "Revert This File (deletes it)"
                 } else {
                     "Revert This File"
@@ -826,6 +969,7 @@ impl Kyde {
                 let mut title_text = match (&ev.kind, &ev.label) {
                     (EventKind::Label, Some(l)) => l.clone(),
                     (EventKind::External, _) => "External change".to_string(),
+                    (EventKind::Deleted, _) => "Deleted".to_string(),
                     _ => "Change".to_string(),
                 };
                 if !scoped_to_file {
@@ -982,7 +1126,7 @@ impl Kyde {
                     .text_size(px(t.ui_font_size - 1.0))
                     .text_color(t.line_number)
                     .child(SharedString::from(format!(
-                        "Changed since — {n_changed} file{}",
+                        "This change & later — {n_changed} file{}",
                         if n_changed == 1 { "" } else { "s" }
                     ))),
             )
@@ -1101,11 +1245,19 @@ impl Kyde {
 
         let lw = self.lh.left.read(cx).content_width();
         let rw = self.lh.right.read(cx).content_width();
-        let pane = |id: &'static str, w: f32, ed: gpui::AnyElement, scroll: &ScrollHandle| {
-            div()
+        // A pane shows its editor, plus a centered "Did not exist" / "File created" /
+        // "File deleted" placeholder when that side represents non-existence — otherwise an
+        // existence-only change (a created/deleted EMPTY file) reads as a blank pane.
+        let pane = |id: &'static str,
+                    w: f32,
+                    ed: gpui::AnyElement,
+                    scroll: &ScrollHandle,
+                    placeholder: Option<SharedString>| {
+            let mut d = div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
+                .relative()
                 .bg(t.main_bg)
                 .font_family(theme::font::FAMILY)
                 .text_size(fs)
@@ -1118,35 +1270,66 @@ impl Kyde {
                         .overflow_scroll()
                         .track_scroll(scroll)
                         .child(div().w(px(w)).child(ed)),
-                )
+                );
+            if let Some(msg) = placeholder {
+                d = d.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(ui)
+                        .text_size(ui_fs)
+                        .text_color(t.line_number)
+                        .child(msg),
+                );
+            }
+            d
         };
         let scroll = self.lh.scroll.clone();
 
-        let n = d.hunks.len();
-        let count = if n == 0 {
-            "No differences".to_string()
-        } else {
-            format!("{n} difference{}", if n == 1 { "" } else { "s" })
-        };
-        // Under a folder scope, name the file both sides are showing. The snapshot
-        // side is the file's state AT the selected point — a file not tracked then
-        // (created since) diffs against empty and says so.
+        // Under a folder scope, name the file both sides are showing. The left side is
+        // the file's state just BEFORE the selected change — a file the change created
+        // (didn't exist before) diffs against empty and says so.
         let sel_file = sel_path
             .as_ref()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_default();
-        let base = sel_path
+        // Existed just before the selected change? (`false` = no prior event OR a deletion
+        // tombstone — either way the left side is "did not exist" and the current file is
+        // shown as fully added.)
+        let existed_before = sel_path.as_ref().is_some_and(|p| self.lh_existed_before(p));
+        // The two existence flips (a listed file always exists on exactly one side unless
+        // it's a content edit): created = didn't exist → exists now; deleted = existed →
+        // gone now. These make an empty create/delete read as the change it is, not "No
+        // differences".
+        let created = !existed_before && !self.lh.current_missing;
+        let deleted = self.lh.current_missing;
+        let n = d.hunks.len();
+        let count = if n > 0 {
+            format!("{n} difference{}", if n == 1 { "" } else { "s" })
+        } else if created || deleted {
+            String::new() // the headers/placeholders carry the existence change
+        } else {
+            "No differences".to_string()
+        };
+        let base_ts = sel_path
             .as_ref()
-            .and_then(|p| self.lh_base_event_for(p).cloned());
-        let snap_label: SharedString = match &base {
-            Some(ev) if scoped_to_file => format!("Snapshot · {}", format_ts(ev.ts_ms, tz)),
-            Some(ev) => format!("{sel_file} · Snapshot · {}", format_ts(ev.ts_ms, tz)),
-            None if scoped_to_file => "Added since this point".to_string(),
-            None => format!("{sel_file} · Added since this point"),
+            .filter(|_| existed_before)
+            .and_then(|p| self.lh_base_event_for(p))
+            .map(|e| e.ts_ms);
+        let snap_label: SharedString = match base_ts {
+            Some(ts) if scoped_to_file => format!("Before this change · {}", format_ts(ts, tz)),
+            Some(ts) => format!("{sel_file} · Before this change · {}", format_ts(ts, tz)),
+            None if scoped_to_file => "Did not exist".to_string(),
+            None => format!("{sel_file} · Did not exist"),
         }
         .into();
-        let current_word = if self.lh.current_missing {
-            "Deleted"
+        let current_word = if deleted {
+            "File deleted"
+        } else if created {
+            "File created"
         } else {
             "Current"
         };
@@ -1154,6 +1337,16 @@ impl Kyde {
             current_word.into()
         } else {
             format!("{sel_file} · {current_word}").into()
+        };
+        // Pane placeholders for the non-existent side.
+        let left_placeholder: Option<SharedString> =
+            (!existed_before).then(|| "Did not exist".into());
+        let right_placeholder: Option<SharedString> = if deleted {
+            Some("File deleted".into())
+        } else if created && n == 0 {
+            Some("File created (empty)".into())
+        } else {
+            None
         };
         let mut header = div()
             .flex()
@@ -1181,12 +1374,12 @@ impl Kyde {
                     .child(SharedString::from(count)),
             );
         // Only offer Revert when it would change something (the targeted file is in
-        // the changed-files panel) — a no-op button is noise. A file with no snapshot
-        // at this point reverts by DELETION; the button says so.
+        // the changed-files panel) — a no-op button is noise. A file the selected change
+        // created (no prior state) reverts by DELETION; the button says so.
         let can_revert = sel_path.as_ref().is_some_and(|p| self.lh.files.contains(p));
         if can_revert {
-            let revert_label = if base.is_some() {
-                "Revert to This Version"
+            let revert_label = if existed_before {
+                "Revert to Before This Change"
             } else {
                 "Revert: Delete This File"
             };
@@ -1227,6 +1420,7 @@ impl Kyde {
                         lw,
                         self.lh.left.clone().into_any_element(),
                         &scroll,
+                        left_placeholder,
                     ))
                     .child(gutter)
                     .child(pane(
@@ -1234,6 +1428,7 @@ impl Kyde {
                         rw,
                         self.lh.right.clone().into_any_element(),
                         &scroll,
+                        right_placeholder,
                     )),
             );
 

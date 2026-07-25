@@ -233,6 +233,8 @@ impl Kyde {
                         self.lh_label_sync(std::slice::from_ref(&rel), "Created");
                         self.refresh(cx);
                         self.open_file(rel, cx);
+                        // Focus the editor so the user can type into the new file at once.
+                        self.focus_editor(window, cx);
                     }
                     Err(e) => self.fail("Creating file", e),
                 }
@@ -360,10 +362,11 @@ impl Kyde {
                 .as_ref()
                 .map_or_else(|| path.clone(), |r| r.join(&path))
         };
-        // Local history: a deleted file's content is recoverable from its timeline.
+        // Local history: a deleted file's content is recoverable from its timeline, and a
+        // deletion tombstone marks it gone (so a later re-creation reads as "added back").
         // (Folders are skipped — snapshotting a whole subtree could be huge.)
         if !is_dir {
-            self.lh_snapshot_now(vec![path.clone()], "Before delete", cx);
+            self.lh_note_delete(&path, cx);
         }
         let r = if is_dir {
             std::fs::remove_dir_all(&abs)
@@ -450,8 +453,14 @@ impl Kyde {
         self.open_finder(FinderMode::Scratch, window, cx);
     }
 
-    /// Create a scratch file of the given extension and open it.
-    pub(crate) fn create_scratch(&mut self, ext: &str, cx: &mut Context<Self>) {
+    /// Create a scratch file of the given extension, open it, and focus the editor so you
+    /// can type immediately.
+    pub(crate) fn create_scratch(
+        &mut self,
+        ext: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.repo_root.clone() else {
             return;
         };
@@ -460,6 +469,7 @@ impl Kyde {
                 self.refresh(cx);
                 self.mode = Mode::Browse;
                 self.open_file(path, cx);
+                self.focus_editor(window, cx);
             }
             Err(e) => self.fail("Creating scratch file", e),
         }

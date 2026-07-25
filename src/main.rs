@@ -497,6 +497,16 @@ enum MenuTarget {
 struct ContextMenu {
     at: Point<Pixels>,
     target: MenuTarget,
+    /// Which flyout submenu is expanded, if any (file/editor menu — New / Git). Only one
+    /// opens at a time.
+    submenu: Option<Submenu>,
+}
+
+/// A context-menu flyout submenu (the "New ▸" / "Git ▸" rows).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Submenu {
+    New,
+    Git,
 }
 
 /// Snapshot of a scroll view's `(pane_w, vp_w, vp_h, max_w, max_h)` used to debounce the
@@ -1542,6 +1552,14 @@ struct Kyde {
     /// Local-history state: config + the project store + the window (see `LocalHistoryView`).
     lh: LocalHistoryView,
 
+    /// Filesystem watcher on the open project (`FSEvents` on macOS). Its callback forwards
+    /// to a debounced `schedule_status_refresh`, so an external create/edit updates git
+    /// status + feeds local history without a window refocus. Dropping it stops watching,
+    /// so it's kept alive here for the project's lifetime (see `sync_fs_watcher`).
+    fs_watcher: Option<notify::RecommendedWatcher>,
+    /// The project `fs_watcher` is rooted at — a mismatch with `repo_root` re-arms it.
+    watch_root: Option<PathBuf>,
+
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
     term: TermState,
@@ -2254,6 +2272,7 @@ impl gpui::AssetSource for Assets {
             "icons/arrow-down.svg" => include_bytes!("../assets/icons/arrow-down.svg"),
             "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
             "icons/file-plus.svg" => include_bytes!("../assets/icons/file-plus.svg"),
+            "icons/file-clock.svg" => include_bytes!("../assets/icons/file-clock.svg"),
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/x.svg" => include_bytes!("../assets/icons/x.svg"),
@@ -2629,8 +2648,9 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     }
                 }
                 view.open_local_history(rel, cx);
-                // Show the older snapshot so the diff has visible hunks.
-                view.lh_select(1, cx);
+                // Select the newest change (row 0): under Model B its "before" side is the
+                // older snapshot, so the panes show a real before→current diff with hunks.
+                view.lh_select(0, cx);
             }
         }
         // The Compare window over two fixture files (KYDE_SHOT_FILE ↔ KYDE_SHOT_FILE_B):
@@ -2927,8 +2947,22 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Point local history at a throwaway data dir for the whole test binary, so smoke
+    /// tests never read or write the developer's real `~/.local/share/kyde` store — the
+    /// `refresh` external-change scan (and the boot-time store open) would otherwise land
+    /// there. Idempotent + serialized (`Once`), so parallel tests agree on one value that's
+    /// in place before any `Kyde::new` reads it.
+    fn isolate_history() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("kyde-test-xdg-{}", std::process::id()));
+            std::env::set_var("XDG_DATA_HOME", &dir);
+        });
+    }
+
     /// Build a `Kyde` window against a throwaway git repo, return its handle + a visual cx.
     fn boot(cx: &mut TestAppContext) -> (gpui::WindowHandle<Kyde>, std::path::PathBuf) {
+        isolate_history();
         // A real temp git repo with one change, so the commit/diff/rollback screens populate.
         // Unique per boot() call: pid is shared across parallel test threads, so a bare-pid
         // dir races (tests remove_dir_all/create_dir_all the same path at once → flaky panic).
@@ -2971,6 +3005,7 @@ mod gpui_smoke_tests {
     /// tree (file-derived trees can't see empty dirs — `extra_dirs` carries them).
     #[gpui::test]
     fn new_file_and_folder_work_in_a_plain_non_git_folder(cx: &mut TestAppContext) {
+        isolate_history();
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("kyde-plain-{}-{seq}", std::process::id()));
@@ -3849,43 +3884,40 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
-    /// The Local History changed-files panel + its reverts (issue #7 follow-up): a
-    /// selected snapshot lists every file changed at-or-since it; right-click reverts
-    /// JUST that file (or folder), the timeline row's menu reverts them all; a file
-    /// first seen after the snapshot has no base (nothing safe to restore); and every
-    /// revert records a "Before revert" label that shows in the reloaded timeline.
+    /// The Local History changed-files panel + reverts under Model B ("this change &
+    /// later"): selecting a change lists every file it (or a later change) touched vs the
+    /// state before it; a file whose selected change is an EDIT reverts to the pre-edit
+    /// content, one whose selected change is its CREATION reverts by DELETION; folder and
+    /// timeline reverts do the same over their scope; a file changed BACK drops out of the
+    /// panel; a recorded-but-never-on-disk file (both sides empty) is never listed; and
+    /// every revert records a recoverable "Before revert" label.
     #[gpui::test]
-    fn local_history_changed_since_panel_and_reverts(cx: &mut TestAppContext) {
+    fn local_history_changed_panel_and_reverts(cx: &mut TestAppContext) {
         let (handle, dir) = boot(cx);
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         std::fs::write(dir.join("app.tsx"), "now-a\n").unwrap();
         std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap();
         std::fs::write(dir.join("new.txt"), "n1\n").unwrap();
-        std::fs::write(dir.join("empty-new.txt"), "").unwrap();
+        std::fs::write(dir.join("empty.txt"), "").unwrap();
+        // ghost.txt is recorded below but never written to disk.
         handle
             .update(cx, |k, _w, cx| {
                 lh_test_store(k, &dir);
-                let store = k.lh.store.clone().unwrap();
                 {
                     use kyde_local_history::EventKind;
+                    let store = k.lh.store.clone().unwrap();
                     let mut s = store.lock().unwrap();
                     let rec = |s: &mut kyde_local_history::Store, p: &str, c: &str, ts: u64| {
                         s.record(std::path::Path::new(p), c, EventKind::Change, None, ts)
                             .unwrap();
                     };
-                    rec(&mut s, "app.tsx", "a1\n", 1_000);
-                    // An EMPTY snapshot of a file that no longer exists on disk —
-                    // both sides are effectively empty, so it must never be listed.
-                    rec(&mut s, "ghost.txt", "", 1_200);
-                    rec(&mut s, "sub/lib.rs", "l1\n", 1_500);
-                    // Created since the older snapshots, unchanged since creation:
-                    // listed as added-since; revert deletes them.
-                    rec(&mut s, "new.txt", "n1\n", 1_800);
-                    // Created EMPTY (the New File flow's baseline): existence-aware
-                    // listing — empty content must not read as "doesn't exist".
-                    rec(&mut s, "empty-new.txt", "", 1_900);
-                    rec(&mut s, "app.tsx", "a2\n", 2_000);
-                    rec(&mut s, "sub/lib.rs", "l2\n", 2_500);
+                    rec(&mut s, "app.tsx", "a1\n", 1_000); // app created
+                    rec(&mut s, "ghost.txt", "", 1_500); // empty, never on disk
+                    rec(&mut s, "sub/lib.rs", "l1\n", 2_000); // lib created
+                    rec(&mut s, "app.tsx", "a2\n", 3_000); // app edited
+                    rec(&mut s, "sub/lib.rs", "l2\n", 4_000); // lib edited
+                    rec(&mut s, "new.txt", "n1\n", 5_000); // new created, unchanged since
+                    rec(&mut s, "empty.txt", "", 6_000); // empty created
                 }
                 k.lh.path = Some(PathBuf::new()); // whole-project scope
                 k.lh.selected = 0;
@@ -3898,124 +3930,88 @@ mod gpui_smoke_tests {
                         .unwrap()
                 };
 
-                // Oldest snapshot selected → everything changed-or-created since is
-                // listed, and every listed file has a revert: lib.rs (first tracked
-                // after) would be recreated at its snapshot, new.txt (created since)
-                // would be DELETED — recoverable either way.
-                let i = row(k, "app.tsx", 1_000);
-                k.lh_select(i, cx);
+                // (1) Select app's CREATION (the oldest change) → undo everything from
+                // here on: every file that exists now is listed, ghost.txt (recorded
+                // empty, never on disk — both sides empty) is NOT.
+                k.lh_select(row(k, "app.tsx", 1_000), cx);
                 assert_eq!(
                     k.lh.files,
                     vec![
                         PathBuf::from("app.tsx"),
-                        PathBuf::from("empty-new.txt"),
+                        PathBuf::from("empty.txt"),
                         PathBuf::from("new.txt"),
-                        PathBuf::from("sub/lib.rs")
+                        PathBuf::from("sub/lib.rs"),
                     ]
                 );
-                assert!(k.lh_has_base_under(std::path::Path::new("app.tsx")));
-                assert!(k.lh_has_base_under(std::path::Path::new("sub/lib.rs")));
-                assert!(k.lh_has_base_under(std::path::Path::new("sub")));
-                assert!(
-                    k.lh_has_base_under(std::path::Path::new("new.txt")),
-                    "created-since file reverts by deletion"
-                );
-                // lib.rs did not exist at this point: reverting DELETES it — labeled
-                // first, so the deleted content stays recoverable from the timeline.
-                k.lh_revert_path(PathBuf::from("sub/lib.rs"), cx);
-                assert!(
-                    !dir.join("sub/lib.rs").exists(),
-                    "reverting a created-since file deletes it"
-                );
-                {
-                    let store = k.lh.store.clone().unwrap();
-                    let s = store.lock().unwrap();
-                    let ev = s.events_for(std::path::Path::new("sub/lib.rs"));
-                    assert_eq!(ev[0].label.as_deref(), Some("Before revert"));
-                    assert_eq!(
-                        s.content(&ev[0].hash).unwrap(),
-                        "now-l\n",
-                        "pre-delete content is recoverable"
-                    );
-                }
-                std::fs::write(dir.join("sub/lib.rs"), "now-l\n").unwrap(); // restore fixture
 
-                // Right-click a FILE row → revert just that file: app.tsx returns to its
-                // state at the selected point, lib.rs is untouched, and the timeline
-                // immediately shows the "Before revert" marker.
-                let i = row(k, "sub/lib.rs", 1_500);
-                k.lh_select(i, cx);
-                k.lh_revert_path(PathBuf::from("app.tsx"), cx);
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
-                    "a1\n"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
-                    "now-l\n"
-                );
-                use kyde_local_history::EventKind;
-                assert_eq!(k.lh.events[0].kind, EventKind::Label);
-                assert_eq!(k.lh.events[0].label.as_deref(), Some("Before revert"));
-                assert_eq!(k.lh.events[0].path, PathBuf::from("app.tsx"));
-
-                // app.tsx now matches its state at this snapshot (changed BACK), so
-                // the changed-since panel drops it — "No differences" rows are noise.
-                let i = row(k, "sub/lib.rs", 1_500);
-                k.lh_select(i, cx);
-                assert_eq!(
-                    k.lh.files,
-                    vec![
-                        PathBuf::from("empty-new.txt"),
-                        PathBuf::from("new.txt"),
-                        PathBuf::from("sub/lib.rs")
-                    ],
-                    "changed-back files leave the panel; created-since (even empty) stay"
-                );
-
-                // Right-click a FOLDER row → revert just that folder's files.
+                // (2) Folder revert restores CONTENT when the selected change is an EDIT
+                // (the file had a prior state). Select lib's edit (l1→l2); reverting "sub"
+                // undoes it → l1.
+                std::fs::write(dir.join("sub/lib.rs"), "zz\n").unwrap();
+                k.lh_select(row(k, "sub/lib.rs", 4_000), cx);
                 k.lh_revert_path(PathBuf::from("sub"), cx);
                 assert_eq!(
                     std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
-                    "l1\n"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
-                    "a1\n"
+                    "l1\n",
+                    "undoing an edit restores the pre-edit content"
                 );
 
-                // Timeline right-click → Revert This Change and After: every changed-
-                // since file returns to its state at the selected snapshot — rewrites
-                // for tracked files, deletion for the created-since new.txt.
-                std::fs::write(dir.join("app.tsx"), "zz\n").unwrap();
-                std::fs::write(dir.join("sub/lib.rs"), "zz\n").unwrap();
-                let i = row(k, "sub/lib.rs", 1_500);
-                k.lh_select(i, cx);
-                k.lh_revert_since(cx);
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
-                    "a1\n"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(dir.join("sub/lib.rs")).unwrap(),
-                    "l1\n"
-                );
+                // (3) File revert DELETES when the selected change is the file's CREATION.
+                // Select new.txt's creation; reverting removes it (recoverable via label).
+                k.lh_select(row(k, "new.txt", 5_000), cx);
+                assert!(k.lh_has_base_under(std::path::Path::new("new.txt")));
+                k.lh_revert_path(PathBuf::from("new.txt"), cx);
                 assert!(
                     !dir.join("new.txt").exists(),
-                    "revert-since deletes files created after the snapshot"
-                );
-                assert!(
-                    !dir.join("empty-new.txt").exists(),
-                    "an empty created file is deleted too — existence is the change"
+                    "undoing a creation deletes the file"
                 );
                 {
                     let store = k.lh.store.clone().unwrap();
                     let s = store.lock().unwrap();
                     let ev = s.events_for(std::path::Path::new("new.txt"));
                     assert_eq!(ev[0].label.as_deref(), Some("Before revert"));
-                    assert_eq!(s.content(&ev[0].hash).unwrap(), "n1\n");
+                    assert_eq!(
+                        s.content(&ev[0].hash).unwrap(),
+                        "n1\n",
+                        "pre-delete content is recoverable"
+                    );
                 }
-                // The pre-revert "zz" states were labeled — recoverable like anything else.
+
+                // (4) File revert restores CONTENT on an edit; the timeline immediately
+                // shows the "Before revert" marker.
+                std::fs::write(dir.join("app.tsx"), "zz\n").unwrap();
+                k.lh_select(row(k, "app.tsx", 3_000), cx);
+                k.lh_revert_path(PathBuf::from("app.tsx"), cx);
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
+                    "a1\n"
+                );
+                use kyde_local_history::EventKind;
+                assert_eq!(k.lh.events[0].kind, EventKind::Label);
+                assert_eq!(k.lh.events[0].label.as_deref(), Some("Before revert"));
+                assert_eq!(k.lh.events[0].path, PathBuf::from("app.tsx"));
+
+                // (5) app.tsx is now a1 = its state before the a2 edit (changed BACK), so
+                // at that edit's row it drops out of the panel — "No differences" is noise.
+                k.lh_select(row(k, "app.tsx", 3_000), cx);
+                assert!(
+                    !k.lh.files.contains(&PathBuf::from("app.tsx")),
+                    "a file reverted to its pre-change state leaves the panel"
+                );
+
+                // (6) Timeline "Revert This Change and After" at lib's CREATION: deletes
+                // lib (created here) and empty.txt (created later); labels every target.
+                std::fs::write(dir.join("sub/lib.rs"), "l1\n").unwrap(); // restore fixture
+                k.lh_select(row(k, "sub/lib.rs", 2_000), cx);
+                k.lh_revert_since(cx);
+                assert!(
+                    !dir.join("sub/lib.rs").exists(),
+                    "revert-since deletes files created at this change or later"
+                );
+                assert!(
+                    !dir.join("empty.txt").exists(),
+                    "an empty created file is deleted too — existence is the change"
+                );
                 let labels =
                     k.lh.events
                         .iter()
@@ -4027,19 +4023,20 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
     }
 
-    /// The virtual "Start of history" timeline row: even when a file's ONLY event is
-    /// its creation, selecting the row below it ("before the first snapshot") lists
-    /// the creation as a revertable change — reverting deletes the file ("revert to
-    /// before it was created"), recoverable via the pre-revert label.
+    /// Model B ("this change & later"): selecting a file's OWN creation event lists it as a
+    /// change and reverts by DELETING it — even for an EMPTY new file (the user's `abc.txt`
+    /// case that used to show a confusing "0 files / No differences"). The pre-revert state
+    /// is labeled first, so it stays recoverable. The virtual "Start of history" row does
+    /// the same (base `None` for everything).
     #[gpui::test]
-    fn local_history_start_row_undoes_creation(cx: &mut TestAppContext) {
+    fn local_history_creation_event_lists_and_reverts_by_deletion(cx: &mut TestAppContext) {
         let (handle, dir) = boot(cx);
         handle
             .update(cx, |k, _w, cx| {
                 lh_test_store(k, &dir);
-                let store = k.lh.store.clone().unwrap();
                 {
                     use kyde_local_history::EventKind;
+                    let store = k.lh.store.clone().unwrap();
                     let mut s = store.lock().unwrap();
                     s.record(
                         std::path::Path::new("solo.txt"),
@@ -4056,12 +4053,12 @@ mod gpui_smoke_tests {
                 k.lh.file_selected = None;
                 k.lh_reload(cx);
                 assert_eq!(k.lh.events.len(), 1);
-                // At the creation row itself nothing differs…
-                assert!(k.lh.files.is_empty());
-                // …but the virtual Start-of-history row shows the creation.
-                k.lh_select(1, cx);
+                // The creation event itself now lists the file — it went from not-existing
+                // to existing, which IS the change (even though empty). The old model
+                // showed "0 files / No differences" here; this is the fix.
                 assert_eq!(k.lh.files, vec![PathBuf::from("solo.txt")]);
                 assert!(k.lh_has_base_under(std::path::Path::new("solo.txt")));
+                // Reverting the creation deletes the file (undo "this change and after").
                 k.lh_revert_since(cx);
                 assert!(
                     !dir.join("solo.txt").exists(),
@@ -4075,6 +4072,67 @@ mod gpui_smoke_tests {
             })
             .unwrap();
         cx.run_until_parked();
+    }
+
+    /// Delete → re-create reads as a deletion then an ADDITION, not one long edit: the
+    /// tombstone (`EventKind::Deleted`) makes the re-creation diff against "did not exist"
+    /// (so it's listed/added), and reverting the DELETION row undoes the deletion (restores
+    /// the pre-delete content).
+    #[gpui::test]
+    fn local_history_delete_then_recreate_reads_as_deletion_then_addition(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                {
+                    use kyde_local_history::EventKind;
+                    let store = k.lh.store.clone().unwrap();
+                    let mut s = store.lock().unwrap();
+                    let p = std::path::Path::new("note.txt");
+                    s.record(p, "v1\n", EventKind::Change, None, 1_000).unwrap();
+                    s.record_deletion(p, 2_000).unwrap();
+                    s.record(p, "v2\n", EventKind::External, None, 3_000)
+                        .unwrap();
+                }
+                std::fs::write(dir.join("note.txt"), "v2\n").unwrap(); // currently re-created
+                k.lh.path = Some(PathBuf::from("note.txt"));
+                k.lh.selected = 0;
+                k.lh.file_selected = None;
+                k.lh_reload(cx);
+                use kyde_local_history::EventKind;
+                assert_eq!(k.lh.events.len(), 3);
+                assert_eq!(
+                    k.lh.events[0].kind,
+                    EventKind::External,
+                    "row 0 = re-creation"
+                );
+                assert_eq!(k.lh.events[1].kind, EventKind::Deleted, "row 1 = deletion");
+                // The re-creation is listed as a change (added back) — its "before" is the
+                // deletion tombstone, i.e. "did not exist".
+                assert_eq!(k.lh.files, vec![PathBuf::from("note.txt")]);
+                // Select the deletion row: the file is listed, and undoing the deletion
+                // restores the pre-delete content.
+                let del =
+                    k.lh.events
+                        .iter()
+                        .position(|e| e.kind == EventKind::Deleted)
+                        .unwrap();
+                k.lh_select(del, cx);
+                assert_eq!(k.lh.files, vec![PathBuf::from("note.txt")]);
+                k.lh_revert_to_selected(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(
+                    std::fs::read_to_string(dir.join("note.txt")).unwrap(),
+                    "v1\n",
+                    "undoing the deletion restores the pre-delete content"
+                );
+                let _ = k;
+            })
+            .unwrap();
     }
 
     /// Clear Local History: the action opens a native confirmation window; confirming
@@ -4199,7 +4257,15 @@ mod gpui_smoke_tests {
             retention_days: 7,
             throttle_secs: 1,
         };
-        let store = kyde_local_history::Store::open(dir.join(".lh-test-store")).unwrap();
+        // Keep the store OUTSIDE the repo (like production, which roots it under XDG) —
+        // a store inside the working tree would show up in `git status` as untracked and
+        // the external-change scan would try to record the store into itself.
+        let store_dir = std::env::temp_dir().join(format!(
+            "kyde-lh-store-{}",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&store_dir);
+        let store = kyde_local_history::Store::open(store_dir).unwrap();
         k.lh.store = Some(std::sync::Arc::new(std::sync::Mutex::new(store)));
         k.lh.store_root = k.repo_root.clone();
     }
@@ -4270,9 +4336,81 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
-    /// Local history revert: selecting an older snapshot and reverting rewrites the file
-    /// on disk, stamps a "Before revert" label (the pre-revert state stays recoverable),
-    /// and reloads the timeline.
+    /// External-change recording (the whole point of this fix): a file changed OUTSIDE
+    /// Kyde — written straight to disk, never saved through the editor, never re-opened in
+    /// Browse — still lands in local history. `apply_snapshot` runs `lh_scan_external` over
+    /// the git-changed files on every refresh; here we drive that scan directly (a real
+    /// refresh's debounce/watcher timing is exercised elsewhere) to check it records a
+    /// baseline on first sight and an `External` snapshot when the disk later moves.
+    #[gpui::test]
+    fn local_history_records_external_changes_on_refresh(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                lh_test_store(k, &dir);
+                // boot's refresh already populated the changed-files list (app.tsx
+                // modified, new.txt untracked) — scan it into the fresh store.
+                assert!(
+                    !k.files.is_empty(),
+                    "boot left the changed-files list ready"
+                );
+                k.lh_scan_external(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                {
+                    let store = k.lh.store.clone().unwrap();
+                    let s = store.lock().unwrap();
+                    let app_ev = s.events_for(std::path::Path::new("app.tsx"));
+                    assert_eq!(
+                        app_ev.len(),
+                        1,
+                        "a changed file's baseline is recorded from the scan, unopened"
+                    );
+                    assert_eq!(
+                        app_ev[0].kind,
+                        kyde_local_history::EventKind::External,
+                        "anything the scan catches is an External change, never a plain Change"
+                    );
+                    assert_eq!(
+                        s.events_for(std::path::Path::new("new.txt")).len(),
+                        1,
+                        "an externally-created (untracked) file records its baseline too"
+                    );
+                }
+                // Now edit app.tsx entirely outside Kyde: straight to disk, no save path,
+                // no reopen — then scan again, as a watcher-driven refresh would.
+                std::fs::write(dir.join("app.tsx"), "const a = 99;\n").unwrap();
+                k.lh_scan_external(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                let store = k.lh.store.clone().unwrap();
+                let s = store.lock().unwrap();
+                let ev = s.events_for(std::path::Path::new("app.tsx"));
+                assert_eq!(
+                    ev.len(),
+                    2,
+                    "the external edit is captured as a new snapshot"
+                );
+                assert_eq!(
+                    ev[0].kind,
+                    kyde_local_history::EventKind::External,
+                    "and it's labeled as an external change, not an in-app save"
+                );
+                assert_eq!(s.content(&ev[0].hash).unwrap(), "const a = 99;\n");
+            })
+            .unwrap();
+    }
+
+    /// Local history revert: selecting a change and undoing it rewrites the file to its
+    /// pre-change content, stamps a "Before revert" label (the pre-revert state stays
+    /// recoverable), and reloads the timeline. Model B: to get back to `v1` you undo the
+    /// change that produced the current `v2` (its row), which reverts to the state before.
     #[gpui::test]
     fn local_history_revert_restores_the_snapshot(cx: &mut TestAppContext) {
         let (handle, dir) = boot(cx);
@@ -4304,8 +4442,9 @@ mod gpui_smoke_tests {
                 k.lh.path = Some(PathBuf::from("app.tsx"));
                 k.lh_reload(cx);
                 assert_eq!(k.lh.events.len(), 2);
-                // Select the OLDER snapshot (rows are newest-first) and revert to it.
-                k.lh_select(1, cx);
+                // Undo the newest change (the one that produced current `v2`, row 0):
+                // reverting it restores the state before = `v1`.
+                k.lh_select(0, cx);
                 k.lh_revert_to_selected(cx);
             })
             .unwrap();
@@ -4315,7 +4454,7 @@ mod gpui_smoke_tests {
                 assert_eq!(
                     std::fs::read_to_string(dir.join("app.tsx")).unwrap(),
                     "const a = 1;\n",
-                    "the file becomes the selected snapshot"
+                    "undoing the change restores the state before it"
                 );
                 let store = k.lh.store.clone().unwrap();
                 let s = store.lock().unwrap();

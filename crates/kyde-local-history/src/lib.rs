@@ -54,10 +54,14 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(std::io::Error) -> HistoryE
 pub enum EventKind {
     /// A regular in-app save (autosave or ⌘S).
     Change,
-    /// The file changed on disk outside Kyde (detected on open/reload).
+    /// The file changed on disk outside Kyde (detected on open/reload/scan).
     External,
     /// A labeled system snapshot ("Before rollback", "Commit: …", …).
     Label,
+    /// The file was deleted — a tombstone marking non-existence, so a later re-creation
+    /// diffs against "did not exist" and the timeline shows when it went away. Its blob is
+    /// empty; the state it represents is *absence*, distinct from an empty file.
+    Deleted,
 }
 
 /// One timeline entry: `path` had content `hash` at `ts_ms`.
@@ -214,6 +218,9 @@ pub struct Store {
     events: Vec<Event>,
     /// Hash of the most recent event per path — the dedup check.
     last_by_path: HashMap<PathBuf, String>,
+    /// Paths whose most recent event is a [`EventKind::Deleted`] tombstone (the file is
+    /// currently gone) — dedups repeated deletions and drives [`Store::alive_paths`].
+    deleted: std::collections::HashSet<PathBuf>,
 }
 
 impl Store {
@@ -229,15 +236,29 @@ impl Store {
                     .filter_map(|l| serde_json::from_str::<Event>(l).ok()),
             );
         }
-        let mut last_by_path = HashMap::new();
-        for e in &events {
-            last_by_path.insert(e.path.clone(), e.hash.clone());
-        }
-        Ok(Self {
+        let mut store = Self {
             dir,
             events,
-            last_by_path,
-        })
+            last_by_path: HashMap::new(),
+            deleted: std::collections::HashSet::new(),
+        };
+        store.rebuild_indexes();
+        Ok(store)
+    }
+
+    /// Recompute `last_by_path` + `deleted` from `events` (call after any bulk change to
+    /// the journal — load, prune). Chronological order means the last event for a path wins.
+    fn rebuild_indexes(&mut self) {
+        self.last_by_path.clear();
+        self.deleted.clear();
+        for e in &self.events {
+            self.last_by_path.insert(e.path.clone(), e.hash.clone());
+            if e.kind == EventKind::Deleted {
+                self.deleted.insert(e.path.clone());
+            } else {
+                self.deleted.remove(&e.path);
+            }
+        }
     }
 
     /// Open the store for `project_root` under the default base dir.
@@ -272,8 +293,47 @@ impl Store {
         };
         self.append_journal(&event)?;
         self.last_by_path.insert(event.path.clone(), hash);
+        self.deleted.remove(&event.path); // any real snapshot means the file exists again
         self.events.push(event);
         Ok(true)
+    }
+
+    /// Record that `path` was DELETED — a tombstone marking non-existence (empty blob,
+    /// [`EventKind::Deleted`]). Returns `Ok(false)` (writing nothing) when the file has no
+    /// history yet (nothing to mark gone) or is already deleted (dedup consecutive
+    /// deletions). A later [`Store::record`] of real content flips it back to existing, so
+    /// a delete→recreate pair reads as "gone, then added back".
+    pub fn record_deletion(&mut self, path: &Path, now_ms: u64) -> Result<bool> {
+        if !self.last_by_path.contains_key(path) || self.deleted.contains(path) {
+            return Ok(false);
+        }
+        // Empty blob: the tombstone's *kind* carries the meaning, not its content.
+        let hash = content_hash("");
+        self.write_blob(&hash, "")?;
+        let event = Event {
+            ts_ms: now_ms,
+            path: path.to_path_buf(),
+            hash: hash.clone(),
+            kind: EventKind::Deleted,
+            label: None,
+        };
+        self.append_journal(&event)?;
+        self.last_by_path.insert(event.path.clone(), hash);
+        self.deleted.insert(event.path.clone());
+        self.events.push(event);
+        Ok(true)
+    }
+
+    /// Paths with history whose most recent event is NOT a deletion — i.e. files the store
+    /// believes currently exist. Drives the app's disappearance sweep (a file here that's
+    /// no longer on disk gets a [`Store::record_deletion`]).
+    #[must_use]
+    pub fn alive_paths(&self) -> Vec<PathBuf> {
+        self.last_by_path
+            .keys()
+            .filter(|p| !self.deleted.contains(*p))
+            .cloned()
+            .collect()
     }
 
     /// All events for `path`, newest first.
@@ -350,6 +410,7 @@ impl Store {
         std::fs::create_dir_all(&blobs).map_err(io_err(format!("recreating blobs {blobs:?}")))?;
         self.events.clear();
         self.last_by_path.clear();
+        self.deleted.clear();
         Ok(())
     }
 
@@ -406,11 +467,8 @@ impl Store {
                 }
             }
         }
-        // Rebuild the dedup index — the latest event for a path may have been dropped.
-        self.last_by_path.clear();
-        for e in &self.events {
-            self.last_by_path.insert(e.path.clone(), e.hash.clone());
-        }
+        // Rebuild the indexes — the latest event for a path may have been dropped.
+        self.rebuild_indexes();
         Ok(PruneStats {
             events_dropped,
             blobs_deleted,
@@ -568,6 +626,40 @@ mod tests {
         // Same content twice → exactly one blob on disk.
         let ev = s.events_for(p);
         assert_eq!(ev[0].hash, ev[1].hash);
+    }
+
+    #[test]
+    fn record_deletion_tombstones_dedups_and_recreate_flips_back() {
+        let mut s = tmp_store("delete");
+        let p = Path::new("a.txt");
+        // A file with no history can't be "deleted".
+        assert!(
+            !s.record_deletion(p, 1).unwrap(),
+            "no history → nothing to mark gone"
+        );
+        s.record(p, "v1", EventKind::Change, None, 10).unwrap();
+        assert_eq!(s.alive_paths(), vec![p.to_path_buf()]);
+        // Deleting records a tombstone…
+        assert!(s.record_deletion(p, 20).unwrap());
+        assert_eq!(s.events_for(p)[0].kind, EventKind::Deleted);
+        assert!(s.alive_paths().is_empty(), "a deleted file is not alive");
+        // …and a second consecutive deletion dedups.
+        assert!(
+            !s.record_deletion(p, 30).unwrap(),
+            "already deleted → no-op"
+        );
+        // Re-creating flips it back to alive and records the new content.
+        assert!(s.record(p, "v2", EventKind::External, None, 40).unwrap());
+        assert_eq!(s.alive_paths(), vec![p.to_path_buf()]);
+        assert_eq!(s.events_for(p)[0].kind, EventKind::External);
+        // The tombstone + both contents survive a reopen (indexes rebuild correctly).
+        let mut reopened = Store::open(s.dir.clone()).unwrap();
+        assert_eq!(reopened.alive_paths(), vec![p.to_path_buf()]);
+        assert_eq!(reopened.events_for(p).len(), 3);
+        assert!(
+            reopened.record_deletion(p, 50).unwrap(),
+            "reopened store can delete again"
+        );
     }
 
     #[test]

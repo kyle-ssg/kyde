@@ -702,6 +702,16 @@ impl Kyde {
                         }),
                     ));
                 }
+                // Local History for the edited file (issue #7) — hidden when disabled.
+                if self.lh.store.is_some() {
+                    let pl = p.clone();
+                    panel = panel.child(item("Local History").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.open_local_history(pl.clone(), cx);
+                        }),
+                    ));
+                }
                 // Git remote ops, WebStorm-style (Fetch/Pull always, Push when ahead).
                 panel = panel
                     .child(item("Fetch").on_mouse_down(
@@ -731,20 +741,101 @@ impl Kyde {
                         .map(std::path::Path::to_path_buf)
                         .unwrap_or_default()
                 };
-                let new_dir_f = new_dir.clone();
-                panel = panel
-                    .child(item("New File…").on_mouse_down(
+                // A "<label> ▸" row that reveals a flyout column of items on hover/click
+                // (IntelliJ-style; only one submenu open at a time). `flyout` is the
+                // caller's column of `item(..)` rows — this adds the header, chevron, and
+                // the right-hanging panel chrome.
+                let submenu_row = |kind: Submenu,
+                                   label: &'static str,
+                                   icon_label: &'static str,
+                                   flyout: gpui::Div| {
+                    let open = menu.submenu == Some(kind);
+                    let slot = {
+                        let s = div().flex_none().size(px(16.0)).flex().items_center();
+                        match menu_icon(icon_label) {
+                            Some(path) => s.child(
+                                svg().path(path).size(px(15.0)).text_color(t.secondary_text),
+                            ),
+                            None => s,
+                        }
+                    };
+                    let mut wrap = div().relative().child(
+                        div()
+                            .id(SharedString::from(format!("menu-sub-{label}")))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .px_3()
+                            .py_1()
+                            .cursor(gpui::CursorStyle::Arrow)
+                            .text_color(t.text)
+                            .when(open, |d| d.bg(t.selected_bg))
+                            .hover(|s| s.bg(t.selected_bg))
+                            .child(slot)
+                            .child(div().flex_1().child(label))
+                            .child(div().flex_none().text_color(t.line_number).child("›"))
+                            // Hover opens it (stays until you pick an item / dismiss); click
+                            // toggles.
+                            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                                if *hovered {
+                                    this.open_menu_submenu(kind, cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e, _w, cx| {
+                                    cx.stop_propagation();
+                                    this.toggle_menu_submenu(kind, cx);
+                                }),
+                            ),
+                    );
+                    if open {
+                        wrap = wrap.child(
+                            flyout
+                                .absolute()
+                                .left_full()
+                                .top_0()
+                                .ml(px(4.0))
+                                .min_w(px(150.0))
+                                .flex()
+                                .flex_col()
+                                .py_1()
+                                .bg(t.bg_mid)
+                                .border_1()
+                                .border_color(t.divider)
+                                .rounded_md()
+                                .shadow_lg(),
+                        );
+                    }
+                    wrap
+                };
+
+                // New ▸ — File / Scratch File / Directory.
+                let (nd_file, nd_dir) = (new_dir.clone(), new_dir);
+                let new_flyout = div()
+                    .child(item("File").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
-                            this.start_new_file(new_dir.clone(), window, cx);
+                            this.start_new_file(nd_file.clone(), window, cx);
                         }),
                     ))
-                    .child(item("New Folder…").on_mouse_down(
+                    // Scratch file: language picked in the finder overlay; a scratch lives
+                    // outside the tree, so it's not rooted at the clicked folder.
+                    .child(item("Scratch File").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
-                            this.start_new_folder(new_dir_f.clone(), window, cx);
+                            this.open_finder(FinderMode::Scratch, window, cx);
+                        }),
+                    ))
+                    .child(item("Directory").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| {
+                            this.start_new_folder(nd_dir.clone(), window, cx);
                         }),
                     ));
+                panel = panel.child(submenu_row(Submenu::New, "New", "New File…", new_flyout));
+
                 // Rename applies to files (not folders, for now).
                 if !is_dir {
                     let pn = p.clone();
@@ -768,9 +859,12 @@ impl Kyde {
                         }),
                     ));
                 }
-                // Commit/Rollback only make sense when there are changes under the path.
+
+                // Git ▸ — commit / rollback / history / fetch / pull / push, grouped.
+                let ph = p.clone();
+                let mut git_flyout = div();
                 if self.has_changes_under(p) {
-                    panel = panel
+                    git_flyout = git_flyout
                         .child(item("Commit").on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, _e, _w, cx| {
@@ -784,24 +878,11 @@ impl Kyde {
                             }),
                         ));
                 }
-                // Git History for this path (recursive for a folder, file-scoped for a file).
-                let ph = p.clone();
-                panel = panel.child(item("Git History").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
-                ));
-                // Local History (issue #7) — file OR folder scope; hidden when disabled.
-                if self.lh.store.is_some() {
-                    let pl = p.clone();
-                    panel = panel.child(item("Local History").on_mouse_down(
+                git_flyout = git_flyout
+                    .child(item("Git History").on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            this.open_local_history(pl.clone(), cx);
-                        }),
-                    ));
-                }
-                // Git remote ops, WebStorm-style: Fetch/Pull always, Push when ahead.
-                panel = panel
+                        cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
+                    ))
                     .child(item("Fetch").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
@@ -811,9 +892,21 @@ impl Kyde {
                         cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
                     ));
                 if self.sync.ahead.unwrap_or(0) > 0 {
-                    panel = panel.child(item("Push").on_mouse_down(
+                    git_flyout = git_flyout.child(item("Push").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
+                    ));
+                }
+                panel = panel.child(submenu_row(Submenu::Git, "Git", "Commit", git_flyout));
+
+                // Local History (issue #7) — file OR folder scope; hidden when disabled.
+                if self.lh.store.is_some() {
+                    let pl = p.clone();
+                    panel = panel.child(item("Local History").on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.open_local_history(pl.clone(), cx);
+                        }),
                     ));
                 }
                 let pd = p.clone();

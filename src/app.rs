@@ -279,6 +279,8 @@ impl Kyde {
             compare: CompareView::new(cx),
             local_history_win: None,
             lh: LocalHistoryView::new(cx),
+            fs_watcher: None,
+            watch_root: None,
             term: TermState::new(),
         };
         me.refresh(cx);
@@ -314,6 +316,9 @@ impl Kyde {
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
         // Keep the local-history store pointed at the open project (cheap when unchanged).
         self.lh_sync_store(cx);
+        // Keep the filesystem watcher armed on the open project (cheap when unchanged) so
+        // external creates/edits trigger a refresh without a window refocus.
+        self.sync_fs_watcher(cx);
         let Some(root) = self.repo_root.clone() else {
             // Landing view / project closed: no repo to read — clear git-derived state so a
             // stale tree/branch never lingers behind the landing view.
@@ -456,6 +461,10 @@ impl Kyde {
         if let Some(msg) = self.pending_error.take() {
             self.op_error = Some(msg);
         }
+        // Feed external (out-of-Kyde) creates/edits into local history. Runs on every
+        // refresh — window refocus, terminal output, the filesystem watcher — so a file
+        // changed outside Kyde lands in the timeline even if it's never (re)opened here.
+        self.lh_scan_external(cx);
         cx.notify();
     }
 
@@ -534,6 +543,71 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Arm (or drop) the filesystem watcher so it tracks the open project — cheap when the
+    /// root is unchanged (the common refresh case). The watcher runs its own thread; on an
+    /// event it only forwards a wake to a foreground pump, which debounces into
+    /// `schedule_status_refresh`. That refresh re-reads git status and, via `apply_snapshot`
+    /// → `lh_scan_external`, feeds external creates/edits into local history — so nothing
+    /// waits for a window refocus. Pure `.git`-internal churn (index/refs/logs from our own
+    /// git subprocesses) is filtered; real worktree changes from a checkout still fire.
+    pub(crate) fn sync_fs_watcher(&mut self, cx: &mut Context<Self>) {
+        use futures::StreamExt as _;
+        use notify::{RecursiveMode, Watcher};
+        let root = self.repo_root.clone();
+        if self.watch_root == root {
+            return; // already watching the right project
+        }
+        self.watch_root.clone_from(&root);
+        self.fs_watcher = None; // drop the previous watcher (stops its thread)
+        let Some(root) = root else { return };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(ev) = res else { return };
+            // Skip events that touch ONLY `.git`-internal paths — our own git commands
+            // churn the index/refs constantly. An empty path list (a backend rescan) still
+            // passes through, as do real worktree writes accompanying a checkout.
+            let only_git = !ev.paths.is_empty()
+                && ev
+                    .paths
+                    .iter()
+                    .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
+            if !only_git {
+                let _ = tx.unbounded_send(());
+            }
+        });
+        let Ok(mut watcher) = watcher else { return };
+        if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            return; // path vanished / OS watch limit — stay on focus-refresh only
+        }
+        self.fs_watcher = Some(watcher);
+        let watched = root;
+        cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                // Debounce the burst HERE (not via `schedule_status_refresh`, which bumps
+                // `refresh_gen` up front and would cancel a concurrent op-driven refresh):
+                // drain, wait a beat, drain again, then refresh once. `refresh_gen` only
+                // moves when the refresh actually runs, so nothing in flight is dropped.
+                while rx.try_recv().is_ok() {}
+                cx.background_executor()
+                    .timer(STATUS_REFRESH_DEBOUNCE)
+                    .await;
+                while rx.try_recv().is_ok() {}
+                let alive = this
+                    .update(cx, |this, cx| {
+                        // Still the same project? (The user may have switched away.)
+                        if this.watch_root.as_deref() == Some(watched.as_path()) {
+                            this.refresh(cx);
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break; // the app is gone — end the pump
+                }
+            }
+        })
+        .detach();
+    }
+
     // ── context menu ──────────────────────────────────────────────
     pub(crate) fn open_menu(
         &mut self,
@@ -541,7 +615,34 @@ impl Kyde {
         target: MenuTarget,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu { at, target });
+        self.context_menu = Some(ContextMenu {
+            at,
+            target,
+            submenu: None,
+        });
+        cx.notify();
+    }
+
+    /// Open a flyout submenu (`New` / `Git`) inside the context menu — used on hover, so it
+    /// switches between them but never re-closes on a repeated hover.
+    pub(crate) fn open_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
+        if let Some(m) = self.context_menu.as_mut() {
+            if m.submenu != Some(kind) {
+                m.submenu = Some(kind);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Toggle a flyout submenu (`New` / `Git`) — used on click.
+    pub(crate) fn toggle_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
+        if let Some(m) = self.context_menu.as_mut() {
+            m.submenu = if m.submenu == Some(kind) {
+                None
+            } else {
+                Some(kind)
+            };
+        }
         cx.notify();
     }
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {

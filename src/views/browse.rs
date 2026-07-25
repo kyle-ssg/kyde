@@ -822,6 +822,15 @@ impl Kyde {
         self.open_file_inner(rel, false, cx);
     }
 
+    /// Move keyboard focus into the Browse editor (so you can type immediately) — used right
+    /// after creating + opening a file. Focuses now and again via `window.defer`, since on
+    /// the first open the editor element isn't in the window tree yet (the name-prompt trick).
+    pub(crate) fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.browse.editor.read(cx).focus_handle.clone();
+        window.focus(&handle);
+        window.defer(cx, move |window, _cx| window.focus(&handle));
+    }
+
     /// Open `rel` as the VS Code-style *preview* (temporary) tab: a single-click in the tree.
     /// Reuses the one preview slot — a subsequent single-click on a different file replaces it
     /// in place rather than opening a new tab. Clicking a file that's already open as a
