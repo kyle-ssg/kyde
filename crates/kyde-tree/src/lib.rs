@@ -33,17 +33,29 @@ pub struct Row {
 impl Tree {
     /// Build from the flat file list. Every ancestor directory of every file becomes a node.
     pub fn build(files: &[PathBuf]) -> Self {
+        Self::build_with_dirs(files, &[])
+    }
+
+    /// [`Tree::build`] plus explicit directory nodes for `dirs`. File-derived trees
+    /// cannot see EMPTY directories (git and the file walk both list files only), so
+    /// a just-created folder rides in here until its first file exists.
+    pub fn build_with_dirs(files: &[PathBuf], dirs: &[PathBuf]) -> Self {
         // Per-parent dedup set while building, then sorted into `children`.
         let mut sets: BTreeMap<PathBuf, Vec<Entry>> = BTreeMap::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
 
-        for file in files {
+        // `(path, every component is a dir?)` — a file's LAST component is a file.
+        let entries = files
+            .iter()
+            .map(|f| (f, false))
+            .chain(dirs.iter().map(|d| (d, true)));
+        for (file, all_dirs) in entries {
             let mut parent = PathBuf::new();
             let comps: Vec<_> = file.components().collect();
             for (i, comp) in comps.iter().enumerate() {
                 let mut child = parent.clone();
                 child.push(comp);
-                let is_dir = i < comps.len() - 1;
+                let is_dir = all_dirs || i < comps.len() - 1;
                 if seen.insert(child.clone()) {
                     sets.entry(parent.clone()).or_default().push(Entry {
                         path: child.clone(),
@@ -98,6 +110,31 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn explicit_dirs_show_even_when_empty() {
+        let files = vec![p("src/main.rs")];
+        let dirs = vec![p("src/new"), p("empty/nested")];
+        let t = Tree::build_with_dirs(&files, &dirs);
+        let mut exp = HashSet::new();
+        exp.insert(p("src"));
+        exp.insert(p("empty"));
+        let rows = t.visible(&exp);
+        let names: Vec<_> = rows
+            .iter()
+            .map(|r| (r.path.to_string_lossy().into_owned(), r.is_dir))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("empty".to_string(), true),
+                ("empty/nested".to_string(), true),
+                ("src".to_string(), true),
+                ("src/new".to_string(), true),
+                ("src/main.rs".to_string(), false),
+            ]
+        );
     }
 
     #[test]

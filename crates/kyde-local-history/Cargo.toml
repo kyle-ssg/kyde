@@ -1,0 +1,19 @@
+[package]
+name = "kyde-local-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kyde local history: content-addressed snapshot store + append-only event journal. Pure, no GUI."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Content addressing (dedup). Already in the dependency tree transitively — no new
+# supply-chain surface; MIT OR Apache-2.0.
+sha2 = "0.10"
+
+[lints]
+workspace = true

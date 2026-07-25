@@ -237,6 +237,13 @@ impl Kyde {
             .filter(|f| self.rollback_checked.contains(&f.path))
             .cloned()
             .collect();
+        // Local history: capture every target's pre-rollback content first — the point
+        // of the label is recovering from exactly this operation.
+        self.lh_snapshot_now(
+            targets.iter().map(|f| f.path.clone()).collect(),
+            "Before rollback",
+            cx,
+        );
         let mut failures: Vec<String> = Vec::new();
         if let Some(repo) = self.repo() {
             for f in targets {

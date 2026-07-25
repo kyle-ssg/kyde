@@ -238,6 +238,7 @@ impl Kyde {
             plugins_query,
             fonts_win: None,
             clear_data_win: None,
+            clear_lh_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme_open: false,
@@ -276,6 +277,10 @@ impl Kyde {
             merge: MergeView::new(cx),
             compare_win: None,
             compare: CompareView::new(cx),
+            local_history_win: None,
+            lh: LocalHistoryView::new(cx),
+            fs_watcher: None,
+            watch_root: None,
             term: TermState::new(),
         };
         me.refresh(cx);
@@ -309,6 +314,11 @@ impl Kyde {
     /// thread, then applied on the foreground; a monotonic `refresh_gen` drops any snapshot
     /// that a newer refresh has already superseded.
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        // Keep the local-history store pointed at the open project (cheap when unchanged).
+        self.lh_sync_store(cx);
+        // Keep the filesystem watcher armed on the open project (cheap when unchanged) so
+        // external creates/edits trigger a refresh without a window refocus.
+        self.sync_fs_watcher(cx);
         let Some(root) = self.repo_root.clone() else {
             // Landing view / project closed: no repo to read — clear git-derived state so a
             // stale tree/branch never lingers behind the landing view.
@@ -322,6 +332,7 @@ impl Kyde {
             self.sync.behind = None;
             self.op_error = None;
             self.browse.all_files.clear();
+            self.browse.extra_dirs.clear();
             self.browse.tree = tree::Tree::default();
             self.browse.scratches.clear();
             self.rebuild_commit_view(false);
@@ -354,8 +365,33 @@ impl Kyde {
     /// Write a background [`RepoSnapshot`] into `self` and rebuild the derived UI state
     /// (commit tree + current selection). Runs on the foreground (needs `&mut self`).
     fn apply_snapshot(&mut self, snap: RepoSnapshot, cx: &mut Context<Self>) {
-        self.browse.all_files = snap.all_files;
-        self.browse.tree = tree::Tree::build(&self.browse.all_files);
+        // `git ls-files` keeps listing a tracked file whose working copy was deleted —
+        // showing a nonexistent file in the Browse tree (and ⌘P) reads as a bug. Drop
+        // Deleted-status paths; they still show in the Commit view (the change itself).
+        let deleted: std::collections::HashSet<&PathBuf> = snap
+            .files
+            .iter()
+            .filter(|f| f.status == FileStatus::Deleted)
+            .map(|f| &f.path)
+            .collect();
+        self.browse.all_files = snap
+            .all_files
+            .into_iter()
+            .filter(|p| !deleted.contains(p))
+            .collect();
+        // User-created folders stay visible while still empty (file-derived trees
+        // can't see them); pruned once a file exists under them or they're gone.
+        if let Some(root) = self.repo_root.clone() {
+            let has_file_under =
+                |d: &PathBuf| self.browse.all_files.iter().any(|f| f.starts_with(d));
+            self.browse
+                .extra_dirs
+                .retain(|d| root.join(d).is_dir() && !has_file_under(d));
+        } else {
+            self.browse.extra_dirs.clear();
+        }
+        self.browse.tree =
+            tree::Tree::build_with_dirs(&self.browse.all_files, &self.browse.extra_dirs);
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;
         // Merge-in-progress state (drives the banner). Covers merges we started AND ones
@@ -425,6 +461,10 @@ impl Kyde {
         if let Some(msg) = self.pending_error.take() {
             self.op_error = Some(msg);
         }
+        // Feed external (out-of-Kyde) creates/edits into local history. Runs on every
+        // refresh — window refocus, terminal output, the filesystem watcher — so a file
+        // changed outside Kyde lands in the timeline even if it's never (re)opened here.
+        self.lh_scan_external(cx);
         cx.notify();
     }
 
@@ -503,6 +543,71 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Arm (or drop) the filesystem watcher so it tracks the open project — cheap when the
+    /// root is unchanged (the common refresh case). The watcher runs its own thread; on an
+    /// event it only forwards a wake to a foreground pump, which debounces into
+    /// `schedule_status_refresh`. That refresh re-reads git status and, via `apply_snapshot`
+    /// → `lh_scan_external`, feeds external creates/edits into local history — so nothing
+    /// waits for a window refocus. Pure `.git`-internal churn (index/refs/logs from our own
+    /// git subprocesses) is filtered; real worktree changes from a checkout still fire.
+    pub(crate) fn sync_fs_watcher(&mut self, cx: &mut Context<Self>) {
+        use futures::StreamExt as _;
+        use notify::{RecursiveMode, Watcher};
+        let root = self.repo_root.clone();
+        if self.watch_root == root {
+            return; // already watching the right project
+        }
+        self.watch_root.clone_from(&root);
+        self.fs_watcher = None; // drop the previous watcher (stops its thread)
+        let Some(root) = root else { return };
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(ev) = res else { return };
+            // Skip events that touch ONLY `.git`-internal paths — our own git commands
+            // churn the index/refs constantly. An empty path list (a backend rescan) still
+            // passes through, as do real worktree writes accompanying a checkout.
+            let only_git = !ev.paths.is_empty()
+                && ev
+                    .paths
+                    .iter()
+                    .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
+            if !only_git {
+                let _ = tx.unbounded_send(());
+            }
+        });
+        let Ok(mut watcher) = watcher else { return };
+        if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
+            return; // path vanished / OS watch limit — stay on focus-refresh only
+        }
+        self.fs_watcher = Some(watcher);
+        let watched = root;
+        cx.spawn(async move |this, cx| {
+            while rx.next().await.is_some() {
+                // Debounce the burst HERE (not via `schedule_status_refresh`, which bumps
+                // `refresh_gen` up front and would cancel a concurrent op-driven refresh):
+                // drain, wait a beat, drain again, then refresh once. `refresh_gen` only
+                // moves when the refresh actually runs, so nothing in flight is dropped.
+                while rx.try_recv().is_ok() {}
+                cx.background_executor()
+                    .timer(STATUS_REFRESH_DEBOUNCE)
+                    .await;
+                while rx.try_recv().is_ok() {}
+                let alive = this
+                    .update(cx, |this, cx| {
+                        // Still the same project? (The user may have switched away.)
+                        if this.watch_root.as_deref() == Some(watched.as_path()) {
+                            this.refresh(cx);
+                        }
+                    })
+                    .is_ok();
+                if !alive {
+                    break; // the app is gone — end the pump
+                }
+            }
+        })
+        .detach();
+    }
+
     // ── context menu ──────────────────────────────────────────────
     pub(crate) fn open_menu(
         &mut self,
@@ -510,7 +615,34 @@ impl Kyde {
         target: MenuTarget,
         cx: &mut Context<Self>,
     ) {
-        self.context_menu = Some(ContextMenu { at, target });
+        self.context_menu = Some(ContextMenu {
+            at,
+            target,
+            submenu: None,
+        });
+        cx.notify();
+    }
+
+    /// Open a flyout submenu (`New` / `Git`) inside the context menu — used on hover, so it
+    /// switches between them but never re-closes on a repeated hover.
+    pub(crate) fn open_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
+        if let Some(m) = self.context_menu.as_mut() {
+            if m.submenu != Some(kind) {
+                m.submenu = Some(kind);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Toggle a flyout submenu (`New` / `Git`) — used on click.
+    pub(crate) fn toggle_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
+        if let Some(m) = self.context_menu.as_mut() {
+            m.submenu = if m.submenu == Some(kind) {
+                None
+            } else {
+                Some(kind)
+            };
+        }
         cx.notify();
     }
     pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
@@ -607,6 +739,8 @@ impl Kyde {
             return;
         }
         self.browse.editor.update(cx, |e, _| e.dirty = false);
+        // Local history: the save is on disk — mark it for the throttled snapshot flush.
+        self.lh_note_save(&rel, cx);
         // Optimistic status: flip the tree/tab color to "modified" the instant we save,
         // rather than waiting ~0.4s for the debounced `git status`. Only when the file isn't
         // already a known change — so a real Added/Untracked/Deleted status (e.g. a new file
@@ -636,6 +770,7 @@ impl Kyde {
             return;
         }
         self.browse.editor.update(cx, |e, _| e.dirty = false);
+        self.lh_note_save(&rel, cx);
         self.refresh(cx);
     }
 
@@ -680,6 +815,16 @@ impl Kyde {
         }
         window.focus(&self.focus_handle);
         cx.notify();
+    }
+
+    /// Enter at the app root: confirm the open confirmation dialog (currently the
+    /// Delete overlay — its Escape-cancel twin lives in `act_escape`). The native
+    /// confirm windows (New Branch / Rollback / Clear Data) handle Enter themselves
+    /// in `ModalWindow::render`. No dialog open → no-op.
+    pub(crate) fn act_confirm(&mut self, _: &ConfirmKey, _: &mut Window, cx: &mut Context<Self>) {
+        if self.delete_target.is_some() {
+            self.do_delete(cx);
+        }
     }
 
     // ── configurable action handlers ──────────────────────────────

@@ -27,6 +27,9 @@ FIX="$ROOT/target/shot-fixtures"
 LOCK="$FIX/package-lock.json"
 CFG_ROOT="$(mktemp -d)"
 CFG="$CFG_ROOT/config"
+# Throwaway DATA dir too: the local-history shot seeds snapshots via the store, which
+# lives under XDG_DATA_HOME — never let a shot write into the user's real history.
+DATA="$CFG_ROOT/data"
 PROFILE="${PROFILE:-release}"
 
 # Throwaway config: seed a keymap so first-run onboarding doesn't cover the shot.
@@ -169,12 +172,13 @@ shoot() {
     local out="$OUT/$outfile"
     echo "==> $name → $outfile"
 
-    env XDG_CONFIG_HOME="$CFG" KYDE_SHOT="$name" "$@" "$BIN" "$ROOT" >/dev/null 2>&1 &
+    env XDG_CONFIG_HOME="$CFG" XDG_DATA_HOME="$DATA" KYDE_SHOT="$name" "$@" "$BIN" "$ROOT" >/dev/null 2>&1 &
     local pid=$!
 
-    # rollback / plugins-window / merge open a second (modal) window; the rest have one.
+    # rollback / plugins-window / merge / local-history open a second (modal) window;
+    # the rest have one.
     local need=1
-    case "$name" in rollback|plugins-window|merge|merge-conflicts) need=2 ;; esac
+    case "$name" in rollback|plugins-window|merge|merge-conflicts|local-history) need=2 ;; esac
 
     local tries=0 count=0
     while [ $tries -lt 80 ]; do
@@ -240,7 +244,7 @@ shoot_welcome_gif() {
     local frames="${GIF_FRAMES:-40}" delay="${GIF_DELAY:-5}" width="${GIF_WIDTH:-960}"
     echo "==> welcome-gif → welcome.gif (${frames} frames)"
 
-    env XDG_CONFIG_HOME="$CFG" KYDE_SHOT=welcome "$BIN" >/dev/null 2>&1 &
+    env XDG_CONFIG_HOME="$CFG" XDG_DATA_HOME="$DATA" KYDE_SHOT=welcome "$BIN" >/dev/null 2>&1 &
     local pid=$!
 
     local tries=0 count=0
@@ -279,7 +283,7 @@ shoot_welcome_gif() {
 # (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
 #   ./scripts/screenshots.sh welcome-gif
-declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history merge-conflicts merge terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history local-history merge-conflicts merge terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -310,6 +314,7 @@ run_one() {
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
         rollback)         shoot_until rollback         rollback.png         region ;;
         history)          shoot_until history          history.png          window ;;
+        local-history)    shoot_until local-history    local-history.png    region KYDE_SHOT_FILE="release-please-config.json" ;;
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         terminal)         shoot_until terminal         terminal.png         window ;;

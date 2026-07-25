@@ -192,7 +192,9 @@ impl Kyde {
                         .child(SharedString::from(label))
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| this.create_scratch(ext, cx)),
+                            cx.listener(move |this, _e, window, cx| {
+                                this.create_scratch(ext, window, cx);
+                            }),
                         )
                         .into_any_element()
                 })
@@ -368,8 +370,18 @@ impl Kyde {
                         have_file
                             || !matches!(
                                 a,
-                                PaletteAction::RevealInFinder | PaletteAction::RevealInTerminal
+                                PaletteAction::RevealInFinder
+                                    | PaletteAction::RevealInTerminal
+                                    | PaletteAction::LocalHistory
                             )
+                    })
+                    // Local History actions additionally need its store (enabled +
+                    // project open); Clear works project-wide, no file required.
+                    .filter(|(_, (_, a, _))| {
+                        !matches!(
+                            a,
+                            PaletteAction::LocalHistory | PaletteAction::ClearLocalHistory
+                        ) || self.lh.store.is_some()
                     })
                     .filter_map(|(i, (label, _, _))| {
                         if q.is_empty() {
@@ -569,6 +581,21 @@ impl Kyde {
                 window.focus(&self.focus_handle);
                 self.nav_forward(cx);
             }
+            PaletteAction::LocalHistory => {
+                window.focus(&self.focus_handle);
+                if let Some(p) = self
+                    .browse
+                    .open_path
+                    .clone()
+                    .or_else(|| self.browse.selected_path.clone())
+                {
+                    self.open_local_history(p, cx);
+                }
+            }
+            PaletteAction::ClearLocalHistory => {
+                window.focus(&self.focus_handle);
+                self.open_clear_local_history(cx);
+            }
         }
     }
 
@@ -647,7 +674,7 @@ impl Kyde {
                 self.finder.open = false;
                 window.focus(&self.focus_handle);
                 if let Some(ext) = ext {
-                    self.create_scratch(ext, cx);
+                    self.create_scratch(ext, window, cx);
                 } else {
                     cx.notify();
                 }

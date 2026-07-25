@@ -29,7 +29,7 @@ feel. No web, no Electron, no React.
 
 ## Stack & why
 - **gpui** + **gpui_platform** (Apache-2.0) — Zed's GUI framework. Chosen over Tauri+Monaco
-  because the user wants beyond-WebStorm latency, which only a native GPU stack gives.
+  because the user wants lower latency than JVM/Swing IDEs give, which needs a native GPU stack.
   Decision was: build FRESH on the gpui crate, STUDY Zed for patterns — do NOT fork Zed
   (Zed editor is GPL-3.0, huge, tightly coupled).
 - **git binary, shelled out** — same as Zed's `crates/git`. No libgit2/git2 dependency.
@@ -278,7 +278,7 @@ Clicking → `toggle_branch_popup`: loads `branch_list` via `Repo::branches`
 box, **+ New Branch** (`create_branch` = `git checkout -b`, name from the query), **Recent**
 (top 5 by recency, current excluded), **All Branches** (alphabetical, current marked `✓`).
 Clicking (or right-clicking) a branch row opens the branch ACTIONS menu at the cursor
-(`MenuTarget::Branch`, WebStorm-style — no instant checkout): **Checkout** (`checkout_branch`
+(`MenuTarget::Branch`, IDE-style — no instant checkout): **Checkout** (`checkout_branch`
 → `git checkout` + `refresh`; worktree-aware — jumps when checked out elsewhere, hidden in a
 pinned linked worktree) and **Merge “X” into “Y”** (`menu_merge_branch` — see Merge view).
 Rows carry `↑a ↓b` ahead/behind badges vs current (background gather on open). Debug shot:
@@ -370,6 +370,139 @@ buffer showing it, re-diffs in place, and refreshes git status. Smoke test:
 `compare_applies_hunks_both_directions`. Debug shot: `KYDE_SHOT=compare` +
 `KYDE_SHOT_FILE`/`KYDE_SHOT_FILE_B`.
 
+## Local History (issue #7 — crates/kyde-local-history + src/views/local_history.rs)
+IntelliJ-style per-file snapshots, independent of git. **Model = `kyde-local-history`**
+(pure Rust, sha2 only — already transitively in-tree): per-project store under
+`$XDG_DATA_HOME/kyde/local-history/<name>-<fnv64(path)>/` with **content-addressed blobs**
+(`blobs/<aa>/<hash>`, SHA-256, temp+rename writes — identical content stored once, an
+unchanged save writes zero bytes) and an **append-only `events.jsonl` journal**
+(`Event { ts_ms, path, hash, kind: Change|External|Label|Deleted, label }`; corrupt lines
+skipped on load, never fatal). `Deleted` is a tombstone (empty blob, non-existence marker)
+written by `Store::record_deletion` (dedups consecutive deletions, no-ops on unknown files);
+`Store::alive_paths` + the `deleted` index track which files currently exist (rebuilt by
+`rebuild_indexes` on load/prune). `Store::prune` (run once per project-open, in the background) drops
+events past retention, rewrites the journal atomically, GCs unreferenced blobs, and is
+`prune.lock`-guarded against a second instance (stale >10min locks stolen). Timestamps are
+caller-supplied (testable); `format_ts` (civil-from-days, tz offset passed in — the app reads
+`date +%z` once) + `relative_ts` are pure. Perf guards: `perf_record_large_file_stays_fast`,
+`perf_load_10k_event_journal_stays_fast`.
+- **Recording** (`views/local_history.rs`, `LocalHistoryView` = `lh` on `Kyde`; ALL store IO
+  off the UI thread, everything gated on the master switch): saves funnel through
+  `lh_note_save` → pending set → ONE throttled flush (default 10s) reads each file's FINAL
+  on-disk state (`lh_flush`) — a burst's last save is never lost, dedup makes no-ops free.
+  `lh_note_open` records a **baseline** on a file's first sight and **External change** when
+  disk ≠ last snapshot. But opening in Browse can't be the ONLY external-change hook (a file
+  edited/created by another editor is invisible until reopened), so **`lh_scan_external`**
+  (called from `apply_snapshot`, i.e. on EVERY refresh — window refocus, terminal output, the
+  filesystem watcher) records external creates/edits over the **git-changed set** (`self.files`)
+  + the open Browse file. Everything the scan catches is a change Kyde did NOT make (our own
+  saves go through `lh_note_save` and are excluded via `pending`), so it always records
+  **`EventKind::External`** — including the first sighting of an externally created/edited file
+  (never a plain `Change`); the store's content-hash dedup drops re-scanned unchanged files.
+  **Deletions are first-class**: `lh_scan_external` tombstones files git reports **Deleted**
+  (`Store::record_deletion` → `EventKind::Deleted`, an empty-blob non-existence marker) — keyed
+  off git status, NOT a blind disk sweep, so a branch checkout (which drops files without
+  marking them deleted) never spams delete/recreate churn. In-app deletes go through
+  **`lh_note_delete`** (`do_delete`): snapshot "Before delete" content + a tombstone in one
+  task (covers the untracked case git can't flag). A tombstone makes a later re-creation diff
+  against "did not exist" (reads as an addition, not an edit). Other destructive ops snapshot
+  targets FIRST via `lh_snapshot_now` (inline read, background write): "Before rollback" /
+  "Before checkout X" / "Before hunk revert" / "Before compare apply" / "Before merge resolve"
+  / "Before revert", plus "Commit: <subject>" stamped on committed files. Label events always
+  append (timeline markers) even at unchanged content. `lh_sync_store` (called from `refresh`)
+  keeps the store pointed at the open project. Smoke tests:
+  `local_history_records_external_changes_on_refresh`,
+  `local_history_delete_then_recreate_reads_as_deletion_then_addition`.
+- **Window** (`ModalKind::LocalHistory`, opens at the main window's bounds) — the **Model B
+  "this change & later"** semantics (each timeline row is a CHANGE; selecting it shows what
+  that change *and everything after it* did, and reverting undoes exactly that): left column
+  = timeline (title + `format_ts · relative_ts`) over a **"This change & later" panel**: the
+  distinct files of `events[0..=selected]` whose CURRENT state differs from their state just
+  BEFORE the selected change (`lh_base_event_for` = the file's newest event *older* than the
+  selected row, i.e. `events[selected+1..]`; `None` = didn't exist yet). So the file the
+  selected change itself created/edited IS listed (this is the fix for a fresh file showing
+  a confusing "0 files / No differences"). The check is **existence-aware** — a
+  `EventKind::Deleted` tombstone base counts as *did-not-exist* via **`lh_existed_before`**
+  (`false` = no prior event OR the newest prior event is a deletion), so a delete→recreate
+  pair reads as a deletion then an ADDITION, not one long edit: an existence flip (created by
+  this-change-or-later — even as an EMPTY file — or deleted since) is a real, listed,
+  revertable change; only content-identical both-exist (changed-BACK) and neither-exists
+  files are dropped (hash check per candidate, on selection change only). Rendered as a
+  fully-expanded tree (`tree::Tree` + `ui::tree::item`); clicking a file shows ITS diff;
+  `Deleted` timeline rows read "Deleted", a missing current file shows "Deleted" in the header
+  (`lh.current_missing`). Folders carry no history — their FILES do (recording is file-based;
+  a revert deletes/recreates the files, the dir shell stays). The timeline still ends with a
+  virtual **"Start of history"** row (`selected == events.len()` — every base lookup `None`);
+  under Model B it's equivalent to selecting the oldest change (undo everything). New File
+  stamps a "Created" label inline (`lh_label_sync`, before the open's baseline would dedupe
+  it) so creation rows read as such. Right = **before ↔ current** read-only aligned panes
+  (the compare-view pattern: `diff_line_bgs`/`diff_word_bgs`/`diff_fillers`, shared
+  `ScrollHandle`); the LEFT side is the file's state just BEFORE the selected change
+  (non-existent → diff vs empty → header "Did not exist", so a created/re-added file reads
+  as all-added). REVERTS restore that pre-change state: rewrite an edited file, RECREATE a
+  deleted-since one, or DELETE one the selected change created/re-added (menu/button say
+  "…(deletes it)" / **Revert: Delete This File**; the pre-revert content is always labeled
+  first so a deletion stays recoverable; an unreadable/binary current is never deleted — can't
+  label it). No-op writes are skipped. Center gutter `»` = restore ONE hunk of the "before" state
+  (`FileDiff::partial_new_content(|j| j != hi)`), header **Revert to Before This Change** =
+  the targeted file. **Right-click menus** (`MenuTarget::LhRow`/`LhPath`, rendered in THIS
+  window like the rollback modal; items live in `lh_menu_items` — `render_context_menu` only
+  dispatches): a timeline row offers **Revert This Change and After** (every listed file back
+  to its pre-change state — now genuinely including the selected change, matching the label),
+  a file row **Revert This File** (JUST it), a folder row **Revert This Folder** (its
+  subtree). Every revert labels the pre-write state "Before revert" INLINE (`lh_label_sync` —
+  not the background `lh_snapshot_now`, so the immediately-reloaded timeline shows the
+  marker), reloads a clean open Browse buffer, re-diffs, refreshes git status. Entry points:
+  right-click file/FOLDER/tab **or the editor pane** (`MenuTarget::BrowseFile`/`EditorGit`) →
+  **Local History**, ⌘⇧A palette. (The file/tree menu groups items into **flyout submenus** —
+  **New ▸** = File / Scratch File / Directory, **Git ▸** = Commit / Rollback / Git History /
+  Fetch / Pull / Push — built by the `submenu_row` helper in `render_context_menu`: hover or
+  click opens one at a time via `ContextMenu.submenu: Option<Submenu>` + `open_/toggle_
+  menu_submenu`, rendered as an absolute `left_full` panel off the row. Icons come from
+  `kyde_ui::menu_icon`; Scratch File uses a bundled Lucide `file-clock.svg` — new icons MUST be
+  added to the `Assets` `include_bytes!` match in main.rs.) A folder (or repo-root)
+  scope lists every file's events under it (`Store::events_under`, component-wise prefix);
+  rows/header carry the file name. Smoke tests:
+  `local_history_creation_event_lists_and_reverts_by_deletion`,
+  `local_history_changed_panel_and_reverts`, `local_history_revert_restores_the_snapshot`.
+- **Config** (`kyde-config::history::HistoryCfg` → `history.json`): `enabled` (default ON —
+  dedup + debounce make steady-state cost ≈0), `retention_days` (7, clamp 1..=90),
+  `throttle_secs` (10, clamp 1..=300). Settings → **Local History** section (toggle +
+  steppers; toggling opens/drops the store live). Off = zero work: no store, no reads, no
+  writes.
+- **Clear Local History** (destructive): Settings → Local History button + ⌘⇧A palette →
+  `open_clear_local_history` → a native confirmation window (`ModalKind::ClearLocalHistory`,
+  Enter confirms / Escape cancels like the other confirm dialogs) → `do_clear_local_history`
+  → `Store::clear()` (deletes the journal + every blob, resets the in-memory index; the
+  store stays open and recording continues from empty) + empties any open timeline. Both
+  entry points need a store (project open + enabled).
+- Smoke tests: `local_history_records_opens_and_saves`, `local_history_revert_restores_the_
+  snapshot`, `local_history_disabled_records_nothing`, `local_history_changed_panel_and_
+  reverts`, `local_history_creation_event_lists_and_reverts_by_deletion`,
+  `local_history_records_external_changes_on_refresh`, `local_history_clear_confirms_and_wipes`.
+  Debug shot: `KYDE_SHOT=local-history` + `KYDE_SHOT_FILE=<json>` (seeds two snapshots
+  synchronously, then opens the window) — in the README set (`scripts/screenshots.sh
+  local-history`, region mode, 2 windows; the script exports a throwaway `XDG_DATA_HOME` so
+  shot seeding never writes into the user's real history store).
+
+## Live filesystem watching (src/app.rs `sync_fs_watcher` — `notify`/FSEvents)
+Refresh used to fire only on window-refocus (`observe_window_activation` → `reload_external`)
+and terminal output — so an external create/edit was invisible until you alt-tabbed back.
+`sync_fs_watcher` (called from `refresh`, keyed on `watch_root` like `lh_sync_store`) arms a
+recursive `notify::RecommendedWatcher` on `repo_root` (dropped/re-armed on project switch; the
+watcher must be **kept alive** on `Kyde.fs_watcher` or it stops). Its callback runs on notify's
+own thread and only forwards a wake over a `futures::mpsc` channel to a foreground pump (the
+terminal `EventProxy` pattern); the pump **debounces in itself** (drain → `STATUS_REFRESH_DEBOUNCE`
+timer → drain → `refresh`) rather than calling `schedule_status_refresh`, because that bumps
+`refresh_gen` up front and would cancel a concurrent op-driven refresh (this bit the smoke tests:
+a watcher wake dropped an explicit `refresh`'s apply). Events touching ONLY `.git`-internal paths
+are filtered so our own git subprocesses (index/refs/logs churn) don't spin it; real worktree
+writes from a checkout still fire. This is what makes **local history + git status live** — the
+refresh it triggers runs `lh_scan_external` (above). `futures` is now a NON-optional dep (the
+always-compiled watcher needs its channel; it was terminal/remote-images-only before). Tests
+isolate the history store via `isolate_history()` (sets a throwaway `XDG_DATA_HOME` once) so the
+refresh-time scan never writes the developer's real `~/.local/share/kyde`.
+
 ## Window chrome — native blend + activity rail (render)
 The window uses a **transparent titlebar** (`WindowOptions.titlebar = TitlebarOptions {
 appears_transparent: true, traffic_light_position: point(16,16) }`) so our `frame_bg` chrome
@@ -417,6 +550,18 @@ The divider (`browse-divider`, `cursor_col_resize`) sets `tree_resizing`; the ro
 `on_mouse_move`/`on_mouse_up` update `tree_width` (cursor x, clamped 180–900) accounting for
 `RAIL_W + FRAME_GAP`. Right-click a row always opens the menu: Commit/Rollback only when
 `has_changes_under`, plus **Reveal in Finder** (`reveal_in_os` → `open -R`) always.
+`apply_snapshot` drops Deleted-status paths from `all_files` — `git ls-files` keeps
+listing a tracked file whose working copy was deleted, and a nonexistent file in the
+tree/⌘P reads as a bug (the deletion still shows in the Commit view).
+**New File / New Folder / Rename are pure fs ops** (`fs_create_file`/`fs_create_folder`/
+`fs_rename` in file_ops.rs, rooted at `repo_root`, exists-guarded — never through `Repo`),
+so they work in plain non-git folders too. A created-but-still-EMPTY folder can't appear in
+a file-derived tree (git + the fs walk list files), so it rides in
+`BrowseView.extra_dirs` → `tree::Tree::build_with_dirs` until its first file exists
+(pruned in `apply_snapshot` once non-empty/gone; cleared on project switch). **Terminal
+output triggers a debounced refresh** (`TerminalEvent::Output` on every PTY wakeup →
+`schedule_status_refresh`), so files created in the built-in terminal appear without
+refocusing the window (refresh otherwise only fires on activation + ops).
 
 ## Editor tabs (render_tab_bar)
 Opening a file appends to `open_tabs: Vec<PathBuf>` (deduped, open order); `open_path` is the
@@ -440,7 +585,7 @@ Remaining: undo/redo, soft-wrap, caret-follow scrolling, rope buffer for huge fi
 ## Keymap / finder / onboarding (src/keymap.rs + main.rs)
 - `keymap.rs`: `Keymap { preset, overrides }` serialized to `~/.config/kyde/keymap.json`
   (XDG_CONFIG_HOME respected). `ACTIONS` table holds each configurable action's name +
-  WebStorm/VSCode default keystroke + label. `key_for(name)` = override else preset default.
+  per-preset default keystroke + label. `key_for(name)` = override else preset default.
   `Keymap::load()` returns `(km, first_run)`; first_run drives onboarding.
 - `main::apply_keymap(cx, &km)` clears ALL bindings then rebinds: editor keys
   (`editor::bind_keys`), finder nav (context "FileFinder", fixed), and the configurable
@@ -490,7 +635,7 @@ Syntax highlighting is a **plugin**: nothing is parsed by default (speed). Each
 `Kyde::effective_lang` highlights with the real grammar only if the pack is
 installed, else falls back to `PlainText` (no tree-sitter) and shows a top-of-editor
 "Install <name> support?" banner (`render_install_banner`, primary button
-`theme::ui::ACCENT` = WebStorm blue `#3473EE`). Installed packs persist to
+`theme::ui::ACCENT` = accent blue `#3473EE`). Installed packs persist to
 `~/.config/kyde/plugins.json` (`plugins::Plugins`, XDG-respecting like keymap).
 Shipped packs: JSON, TypeScript (ts+tsx), JavaScript, Rust, Markdown (block-only),
 Shell (bash), CSS, SCSS (reuses CSS grammar), `.env`, `.gitignore`. `.env`/`.gitignore`

@@ -519,6 +519,7 @@ impl Kyde {
             self.browse.nav_history.clear();
             self.browse.nav_index = 0;
             self.selected = None;
+            self.browse.extra_dirs.clear();
             self.browse.expanded.clear();
             self.browse.expanded.insert(PathBuf::new()); // root folder visible by default
             self.refresh(cx);

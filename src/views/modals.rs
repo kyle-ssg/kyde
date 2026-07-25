@@ -462,6 +462,8 @@ impl Kyde {
             ModalKind::Settings => &mut self.settings_win,
             ModalKind::Merge => &mut self.merge_win,
             ModalKind::Compare => &mut self.compare_win,
+            ModalKind::LocalHistory => &mut self.local_history_win,
+            ModalKind::ClearLocalHistory => &mut self.clear_lh_win,
         }
     }
 
@@ -494,7 +496,7 @@ impl Kyde {
         // focused window's, which may be another modal (e.g. Rollback) they were launched from.
         let main_bounds = matches!(
             kind,
-            ModalKind::Diff | ModalKind::Merge | ModalKind::Compare
+            ModalKind::Diff | ModalKind::Merge | ModalKind::Compare | ModalKind::LocalHistory
         )
         .then_some(self.main_window_bounds)
         .flatten();

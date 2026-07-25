@@ -656,6 +656,9 @@ impl Kyde {
         let checked: Vec<PathBuf> = self.commit.checked.iter().cloned().collect();
         let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
         let excluded = self.commit.excluded_hunks.clone();
+        // For the local-history "Commit: <subject>" stamp on success.
+        let committed = checked.clone();
+        let subject = msg.lines().next().unwrap_or_default().to_string();
         self.commit.committing = true;
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -686,6 +689,9 @@ impl Kyde {
                         // Committed hunks are gone and the survivors renumber — reset to
                         // fully-included rather than let stale unticks land on new hunks.
                         this.commit.excluded_hunks.clear();
+                        // Local history: stamp the committed state on each file's timeline
+                        // (WebStorm's "Commit changes: …" marker).
+                        this.lh_snapshot_now(committed, &format!("Commit: {subject}"), cx);
                         this.refresh(cx);
                         // Tab may be empty now → flip to Push if it has work.
                         this.normalize_git_tab(cx);

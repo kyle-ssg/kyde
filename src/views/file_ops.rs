@@ -85,6 +85,7 @@ impl Kyde {
         };
         let (title, action) = match &prompt {
             NamePrompt::NewFile(_) => ("New file", "Create"),
+            NamePrompt::NewFolder(_) => ("New folder", "Create"),
             NamePrompt::Rename(_) => ("Rename", "Rename"),
         };
 
@@ -139,7 +140,6 @@ impl Kyde {
         overlay(cx, true).child(panel).into_any_element()
     }
 
-    /// Open the delete-confirmation modal for a tree path (`is_dir` derived from disk).
     /// Open the "new file" prompt, creating in `dir` (rel path; `""` = repo root).
     pub(crate) fn start_new_file(
         &mut self,
@@ -147,8 +147,27 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.start_name_prompt(NamePrompt::NewFile(dir), window, cx);
+    }
+
+    /// Open the "new folder" prompt, creating in `dir` (rel path; `""` = repo root).
+    pub(crate) fn start_new_folder(
+        &mut self,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_name_prompt(NamePrompt::NewFolder(dir), window, cx);
+    }
+
+    fn start_name_prompt(
+        &mut self,
+        prompt: NamePrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.context_menu = None;
-        self.name_prompt = Some(NamePrompt::NewFile(dir));
+        self.name_prompt = Some(prompt);
         self.name_input.update(cx, |e, cx| {
             e.set_content(String::new(), Lang::PlainText, cx);
         });
@@ -197,6 +216,8 @@ impl Kyde {
             cx.notify();
             return;
         }
+        // Pure filesystem ops rooted at the project — they must work in plain
+        // (non-git) folders too, so none of them go through `Repo`.
         match prompt {
             NamePrompt::NewFile(dir) => {
                 let rel = if dir.as_os_str().is_empty() {
@@ -204,44 +225,115 @@ impl Kyde {
                 } else {
                     dir.join(&name)
                 };
-                if let Some(repo) = self.repo() {
-                    match repo.save_file(&rel, "") {
-                        Ok(()) => {
-                            self.refresh(cx);
-                            self.open_file(rel, cx);
-                        }
-                        Err(e) => self.fail("Creating file", e),
+                match self.fs_create_file(&rel) {
+                    Ok(()) => {
+                        // Stamp the creation in local history (inline, before the
+                        // open records a bare baseline) — the timeline row reads
+                        // "Created" and the pre-creation state is one revert away.
+                        self.lh_label_sync(std::slice::from_ref(&rel), "Created");
+                        self.refresh(cx);
+                        self.open_file(rel, cx);
+                        // Focus the editor so the user can type into the new file at once.
+                        self.focus_editor(window, cx);
                     }
+                    Err(e) => self.fail("Creating file", e),
+                }
+            }
+            NamePrompt::NewFolder(dir) => {
+                let rel = if dir.as_os_str().is_empty() {
+                    PathBuf::from(&name)
+                } else {
+                    dir.join(&name)
+                };
+                match self.fs_create_folder(&rel) {
+                    Ok(()) => {
+                        // Keep the (still empty, so invisible-to-git) folder in the
+                        // tree, expanded down to it, and selected.
+                        if !self.browse.extra_dirs.contains(&rel) {
+                            self.browse.extra_dirs.push(rel.clone());
+                        }
+                        for a in rel.ancestors().skip(1) {
+                            self.browse.expanded.insert(a.to_path_buf());
+                        }
+                        self.browse.expanded.insert(PathBuf::new());
+                        self.browse.selected_path = Some(rel);
+                        self.refresh(cx);
+                    }
+                    Err(e) => self.fail("Creating folder", e),
                 }
             }
             NamePrompt::Rename(path) => {
                 let dst = path
                     .parent()
                     .map_or_else(|| PathBuf::from(&name), |d| d.join(&name));
-                if let Some(repo) = self.repo() {
-                    match repo.rename(&path, &dst) {
-                        Ok(()) => {
-                            // Repoint any open tab / selection from the old path to the new one.
-                            for t in &mut self.browse.open_tabs {
-                                if *t == path {
-                                    *t = dst.clone();
-                                }
-                            }
-                            let was_open = self.browse.open_path.as_ref() == Some(&path);
-                            if self.browse.selected_path.as_ref() == Some(&path) {
-                                self.browse.selected_path = Some(dst.clone());
-                            }
-                            self.refresh(cx);
-                            if was_open {
-                                self.open_file(dst, cx);
+                match self.fs_rename(&path, &dst) {
+                    Ok(()) => {
+                        // Repoint any open tab / selection from the old path to the new one.
+                        for t in &mut self.browse.open_tabs {
+                            if *t == path {
+                                *t = dst.clone();
                             }
                         }
-                        Err(e) => self.fail("Renaming", e),
+                        let was_open = self.browse.open_path.as_ref() == Some(&path);
+                        if self.browse.selected_path.as_ref() == Some(&path) {
+                            self.browse.selected_path = Some(dst.clone());
+                        }
+                        self.refresh(cx);
+                        if was_open {
+                            self.open_file(dst, cx);
+                        }
                     }
+                    Err(e) => self.fail("Renaming", e),
                 }
             }
         }
         cx.notify();
+    }
+
+    /// `rel` resolved against the open project's root.
+    fn project_abs(&self, rel: &std::path::Path) -> anyhow::Result<PathBuf> {
+        let root = self
+            .repo_root
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no project open"))?;
+        Ok(root.join(rel))
+    }
+
+    /// Create an empty file at `rel`. Refuses to touch an existing path (a "new" file
+    /// must never truncate something already there).
+    fn fs_create_file(&self, rel: &std::path::Path) -> anyhow::Result<()> {
+        let full = self.project_abs(rel)?;
+        if full.exists() {
+            anyhow::bail!("{} already exists", rel.display());
+        }
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&full, "")?;
+        Ok(())
+    }
+
+    /// Create the folder `rel` (and any missing parents).
+    fn fs_create_folder(&self, rel: &std::path::Path) -> anyhow::Result<()> {
+        let full = self.project_abs(rel)?;
+        if full.exists() {
+            anyhow::bail!("{} already exists", rel.display());
+        }
+        std::fs::create_dir_all(&full)?;
+        Ok(())
+    }
+
+    /// Move `from` to `to` within the project. Refuses to clobber an existing target.
+    fn fs_rename(&self, from: &std::path::Path, to: &std::path::Path) -> anyhow::Result<()> {
+        let (src, dst) = (self.project_abs(from)?, self.project_abs(to)?);
+        if dst.exists() {
+            anyhow::bail!("{} already exists", to.display());
+        }
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&src, &dst)?;
+        Ok(())
     }
 
     pub(crate) fn open_delete(&mut self, path: PathBuf, cx: &mut Context<Self>) {
@@ -270,6 +362,12 @@ impl Kyde {
                 .as_ref()
                 .map_or_else(|| path.clone(), |r| r.join(&path))
         };
+        // Local history: a deleted file's content is recoverable from its timeline, and a
+        // deletion tombstone marks it gone (so a later re-creation reads as "added back").
+        // (Folders are skipped — snapshotting a whole subtree could be huge.)
+        if !is_dir {
+            self.lh_note_delete(&path, cx);
+        }
         let r = if is_dir {
             std::fs::remove_dir_all(&abs)
         } else {
@@ -355,8 +453,14 @@ impl Kyde {
         self.open_finder(FinderMode::Scratch, window, cx);
     }
 
-    /// Create a scratch file of the given extension and open it.
-    pub(crate) fn create_scratch(&mut self, ext: &str, cx: &mut Context<Self>) {
+    /// Create a scratch file of the given extension, open it, and focus the editor so you
+    /// can type immediately.
+    pub(crate) fn create_scratch(
+        &mut self,
+        ext: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(root) = self.repo_root.clone() else {
             return;
         };
@@ -365,6 +469,7 @@ impl Kyde {
                 self.refresh(cx);
                 self.mode = Mode::Browse;
                 self.open_file(path, cx);
+                self.focus_editor(window, cx);
             }
             Err(e) => self.fail("Creating scratch file", e),
         }

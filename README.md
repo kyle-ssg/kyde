@@ -98,6 +98,7 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 * **Branch switcher** — searchable tree, `/` as folders, Recent / Local roots, ahead/behind counts per branch.
 * **Merge** — right-click a branch to merge it into the current one. Conflicts open a native two-stage resolver: a conflicts list (what each side did, Accept Yours / Accept Theirs / Merge…), then a 3-pane merge view — yours | result | theirs — with per-change apply/ignore gutters, "apply non-conflicting changes", Compare Contents pairs, and whitespace-ignoring diffs.
 * **History** — commit log for any branch, with the selected commit's changed files and a read-only diff that compares vs the parent, latest, or your local working tree.
+* **Local History** — per-file snapshots independent of git (saves, external changes, and markers before every destructive op). A timeline + snapshot ↔ current diff per file or folder, a changed-since files panel, per-hunk restore, and revert for one file, a folder, or everything since a snapshot — every revert is itself recorded. Configurable retention, clearable, or off entirely.
 * **File management** from the tree — New File, Rename, Delete (with confirm).
 
 <p align="center">
@@ -106,6 +107,10 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 
 <p align="center">
   <img src="assets/screenshots/history.png" alt="History view — commit log on the left, the selected commit's changed files, and a read-only side-by-side diff comparable against the parent, latest, or local working tree" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/local-history.png" alt="Local History — a native window with the file's change timeline and changed-files panel on the left, and a before ↔ current side-by-side diff with per-hunk restore controls on the right" width="900">
 </p>
 
 <p align="center">
@@ -201,7 +206,7 @@ Guarded by `perf_*` time-budget tests, headless-gpui smoke tests (render every s
 
 * **Prebuilt releases are macOS-only.** I develop on macOS and wouldn't actively test Linux/Windows, so I only ship a signed + notarized macOS build rather than binaries I can't stand behind. The code itself is cross-platform — gpui runs on all three, and Linux/Windows packaging already exists in `scripts/` (just unwired from the release). Re-enabling them is a **good first issue** for a contributor who runs those platforms. Until then, Linux/Windows users can `cargo build --release`.
 * No soft-wrap or caret-follow scrolling yet. The editor uses a flat `String`; a rope-based buffer comes later for very large edits.
-* File watching currently refreshes on focus only. Live updates will likely use `notify`.
+* Live file watching (`notify`/FSEvents) refreshes git status + local history when files change outside Kyde, on top of the window-refocus refresh. `.git`-internal churn is filtered so our own git commands don't spin it.
 
 ## Contributing
 

@@ -782,6 +782,10 @@ impl Kyde {
         if self.in_linked_worktree() {
             return;
         }
+        // Local history: a checkout rewrites tracked files — snapshot the uncommitted
+        // changes it could clobber.
+        let changed: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
+        self.lh_snapshot_now(changed, &format!("Before checkout {name}"), cx);
         self.run_branch_op(window, cx, move |r| r.checkout(&name));
     }
 

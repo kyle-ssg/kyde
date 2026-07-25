@@ -11,6 +11,10 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         "Pull" => "icons/arrow-down.svg",
         "Push" => "icons/arrow-up.svg",
         "New File" => "icons/file-plus.svg",
+        // "New ▸" flyout items (File / Scratch File / Directory).
+        "File" => "icons/file-lines.svg",
+        "Scratch File" => "icons/file-clock.svg",
+        "Directory" => "icons/folder.svg",
         "Rename" => "icons/pencil.svg",
         "Delete" => "icons/trash.svg",
         "Git History" => "icons/history.svg",
