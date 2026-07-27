@@ -323,6 +323,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_confirm))
             .on_action(cx.listener(Self::act_clear_data))
             .on_action(cx.listener(Self::act_open_plugins))
+            .on_action(cx.listener(Self::act_open_changelog))
             .on_action(cx.listener(Self::act_find))
             .on_action(cx.listener(Self::act_replace))
             .on_action(cx.listener(Self::find_next))

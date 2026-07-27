@@ -134,7 +134,14 @@ actions!(
 // Native menu bar actions.
 actions!(
     kyde_menu,
-    [Quit, ToggleFps, ClearData, OpenPlugins, OpenProject]
+    [
+        Quit,
+        ToggleFps,
+        ClearData,
+        OpenPlugins,
+        OpenProject,
+        OpenChangelog
+    ]
 );
 
 /// The native macOS menu bar: the app menu (Settings/Plugins/Quit) + a File menu with
@@ -166,6 +173,7 @@ fn app_menus(recents: &Recents) -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Settings…", OpenKeymap),
                 MenuItem::action("Plugins…", OpenPlugins),
+                MenuItem::action("What's New…", OpenChangelog),
                 MenuItem::action("Toggle FPS Monitor", ToggleFps),
                 MenuItem::separator(),
                 MenuItem::action("Clear Data & Restart…", ClearData),
@@ -432,6 +440,7 @@ enum PaletteAction {
     NavForward,
     LocalHistory,
     ClearLocalHistory,
+    Changelog,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -467,6 +476,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ("Settings / Keymap", PaletteAction::Settings, "open_keymap"),
     ("Manage Plugins", PaletteAction::Plugins, ""),
     ("Preview Fonts", PaletteAction::Fonts, ""),
+    ("What's New (Changelog)", PaletteAction::Changelog, ""),
 ];
 
 /// What a right-click context menu was opened on.
@@ -1482,6 +1492,10 @@ struct Kyde {
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Local History" confirmation — wipes the open project's snapshot store.
     clear_lh_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// "What's New" changelog — a native modal window mirroring GitHub Releases (issue #71).
+    changelog_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Its state: the fetched release list, the selected row, and the markdown pane.
+    changelog: ChangelogView,
     /// Settings — a native modal window with a category sidebar (Appearance/Keymap/…).
     settings_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Which Settings category the sidebar has selected.
@@ -1613,6 +1627,36 @@ enum ModalKind {
     LocalHistory,
     /// "Clear Local History" confirmation (destructive — wipes the project's store).
     ClearLocalHistory,
+    /// "What's New": the published releases + their notes (issue #71).
+    Changelog,
+}
+
+/// Changelog-window state (issue #71): the GitHub release list, which one is showing, and
+/// the markdown pane its notes render into. Fetched lazily on first open (see
+/// `views/changelog.rs`); a failure leaves `error` set and the list empty.
+struct ChangelogView {
+    /// Published releases, newest first.
+    notes: Vec<update::ReleaseNote>,
+    /// Index into `notes` of the release being shown.
+    selected: usize,
+    /// A fetch is in flight (shows "Loading releases…").
+    loading: bool,
+    /// Why the last fetch failed / why there's nothing to show (shows Retry + a GitHub link).
+    error: Option<String>,
+    /// The selected release's notes, rendered as selectable markdown.
+    body: Entity<mdview::MarkdownView>,
+}
+
+impl ChangelogView {
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        Self {
+            notes: Vec::new(),
+            selected: 0,
+            loading: false,
+            error: None,
+            body: cx.new(|cx| mdview::MarkdownView::new("", None, cx)),
+        }
+    }
 }
 
 /// Compare-two-files state (issue #42): the chosen paths, the computed diff, and
@@ -1808,6 +1852,7 @@ impl Render for ModalWindow {
             ModalKind::Compare => k.render_compare_body(kcx),
             ModalKind::LocalHistory => k.render_local_history_body(kcx),
             ModalKind::ClearLocalHistory => k.render_clear_local_history_body(kcx),
+            ModalKind::Changelog => k.render_changelog_body(kcx),
         });
         div()
             .track_focus(&self.focus)
@@ -2695,6 +2740,42 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             ) {
                 view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
             }
+        }
+        // The "What's New" changelog window (issue #71). Seeded with fixed release notes so
+        // the shot is deterministic and needs no network; `KYDE_SHOT_RELEASES=<file>` renders
+        // a real GitHub feed dump instead.
+        "changelog" => {
+            let seeded = std::env::var("KYDE_SHOT_RELEASES")
+                .ok()
+                .and_then(|f| std::fs::read_to_string(f).ok())
+                .map(|body| update::parse_releases(&body))
+                .filter(|r| !r.is_empty())
+                .unwrap_or_else(|| {
+                    ["2.5.0", "2.4.0", "2.3.0"]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| update::ReleaseNote {
+                            version: (*v).to_string(),
+                            tag: format!("kyde-v{v}"),
+                            title: format!("Kyde {v}"),
+                            body: String::from(
+                                "## Features\n\n* **compare:** side-by-side compare of any \
+                                 two files ([#42](https://github.com/kyle-ssg/kyde/issues/42))\n\
+                                 * **local history:** per-file snapshots independent of git\n\n\
+                                 ## Bug Fixes\n\n* **editor:** keep the caret visible when \
+                                 folding a region\n* **tree:** drop deleted paths from the \
+                                 file tree\n",
+                            ),
+                            date: format!("2026-0{}-14", 7 - i),
+                            page_url: format!("https://github.com/kyle-ssg/kyde/releases/tag/v{v}"),
+                            prerelease: false,
+                        })
+                        .collect()
+                });
+            // Seed BEFORE opening: `open_changelog` only fetches when the list is empty, so
+            // this keeps the shot offline and deterministic (no live feed racing it in).
+            view.set_changelog(Ok(seeded), cx);
+            view.open_changelog(cx);
         }
         // Browse a Rust file with ⌘ "held" over an import — the link underlines
         // (issue #26). Uses the debug hover forcer since shots can't hold keys.
@@ -4460,6 +4541,47 @@ mod gpui_smoke_tests {
                 assert!(k.lh.events.is_empty(), "any open timeline empties");
                 let store = k.lh.store.clone().unwrap();
                 assert_eq!(store.lock().unwrap().event_count(), 0, "store wiped");
+            })
+            .unwrap();
+    }
+
+    /// Changelog window (issue #71): opening it spawns the native window; a fetch result
+    /// populates the version list, selects the newest, and pushes its notes into the
+    /// markdown pane; selecting an older release swaps the notes. A failed fetch keeps the
+    /// window usable (error text + Retry), never a blank pane.
+    #[gpui::test]
+    fn changelog_lists_releases_and_shows_their_notes(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle.update(cx, |k, _w, cx| k.open_changelog(cx)).unwrap();
+        cx.run_until_parked(); // the native window opens on a spawned task
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.changelog_win.is_some(), "changelog window opens");
+                let note = |v: &str, body: &str| update::ReleaseNote {
+                    version: v.into(),
+                    tag: format!("kyde-v{v}"),
+                    title: format!("Kyde {v}"),
+                    body: body.into(),
+                    date: "2026-07-01".into(),
+                    page_url: format!("https://example.com/{v}"),
+                    prerelease: false,
+                };
+                k.set_changelog(
+                    Ok(vec![note("2.5.0", "# new stuff"), note("2.4.0", "# old")]),
+                    cx,
+                );
+                assert_eq!(k.changelog.notes.len(), 2);
+                assert_eq!(k.changelog.selected, 0, "newest release shown first");
+                assert!(k.changelog.error.is_none());
+                assert_eq!(k.changelog.body.read(cx).source(), "# new stuff");
+
+                k.select_changelog(1, cx);
+                assert_eq!(k.changelog.body.read(cx).source(), "# old");
+
+                // Fetch failure → an error to show, and the retry path is armed.
+                k.set_changelog(Err("network is down".into()), cx);
+                assert_eq!(k.changelog.error.as_deref(), Some("network is down"));
+                assert!(!k.changelog.loading);
             })
             .unwrap();
     }

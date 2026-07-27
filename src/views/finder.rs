@@ -562,6 +562,9 @@ impl Kyde {
             PaletteAction::Plugins => {
                 self.open_modal_window(ModalKind::Plugins, "Language Plugins", 520.0, 560.0, cx);
             }
+            PaletteAction::Changelog => {
+                self.open_changelog(cx);
+            }
             PaletteAction::Fonts => {
                 self.open_modal_window(ModalKind::Fonts, "Fonts", 760.0, 620.0, cx);
             }

@@ -67,6 +67,21 @@ impl Kyde {
                     .child(badge)
                     .child(msg),
             )
+            // The release notes for what's being offered (issue #71) — same window as the
+            // Kyde ▸ What's New… menu item.
+            .child(
+                div()
+                    .id("update-whats-new")
+                    .flex_none()
+                    .cursor_pointer()
+                    .text_color(t.primary)
+                    .hover(|s| s.text_color(t.text))
+                    .child("What's new")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.open_changelog(cx)),
+                    ),
+            )
             .child(
                 btn_primary("update-now", action_label)
                     .when(updating, |d| d.opacity(0.6))
