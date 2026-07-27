@@ -48,7 +48,7 @@ use widgets::terminal;
 
 // ── small OS utilities ──
 mod platform;
-use platform::{clipboard as os_clipboard, scratch, shellcmd};
+use platform::{clipboard as os_clipboard, instance, scratch, shellcmd};
 
 // ── workspace crates, aliased back to their old module names ──
 use kyde_config::keymap;
@@ -2908,6 +2908,20 @@ fn main() {
         .and_then(|p| Repo::discover(&p).ok())
         .map(|repo| repo.root().to_path_buf());
 
+    // Single instance (issue #72): every open project is already a tab, so a second
+    // `kyde <path>` hands the path to the running Kyde (which opens it as another tab and
+    // comes forward) and exits here, before any window is created. Nothing listening → we
+    // are the instance, and take the socket over below.
+    let guarded = instance::enabled();
+    if guarded {
+        let req = initial
+            .clone()
+            .map_or(instance::Request::Activate, instance::Request::Open);
+        if instance::try_send(&req) {
+            return;
+        }
+    }
+
     let (km, first_run) = Keymap::load();
 
     let app = Application::new().with_assets(Assets);
@@ -2991,6 +3005,36 @@ fn main() {
                 .detach();
             })
             .ok();
+
+        // Become the instance later launches talk to (issue #72). The socket thread can't
+        // touch gpui entities, so it only forwards over a channel to this foreground pump —
+        // the terminal `EventProxy` / fs-watcher pattern. The guard lives in the task, so the
+        // socket is unlinked when the app goes away.
+        if guarded {
+            let (tx, mut rx) = futures::channel::mpsc::unbounded::<instance::Request>();
+            if let Some((guard, _thread)) = instance::listen(move |req| {
+                let _ = tx.unbounded_send(req);
+            }) {
+                cx.spawn(async move |cx| {
+                    let _guard = guard;
+                    while let Some(req) = futures::StreamExt::next(&mut rx).await {
+                        let ok = window.update(cx, |view, window, cx| {
+                            if let instance::Request::Open(path) = req {
+                                view.open_project(path, cx);
+                                window.focus(&view.focus_handle(cx));
+                            }
+                            // Either way the user asked for Kyde — raise it.
+                            window.activate_window();
+                            cx.activate(true);
+                        });
+                        if ok.is_err() {
+                            break; // main window gone — stop pumping
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
     });
 }
 
