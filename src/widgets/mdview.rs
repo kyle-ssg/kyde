@@ -106,6 +106,13 @@ impl MarkdownView {
         }
     }
 
+    /// The markdown currently rendered (what the last `set_text` accepted) — the seam the
+    /// changelog smoke test reads, so it's test-only.
+    #[cfg(test)]
+    pub fn source(&self) -> &str {
+        &self.src
+    }
+
     /// Re-parse only if the source actually changed (preserves selection otherwise). The
     /// base dir can change without the text changing (switching between two files of equal
     /// content is unlikely, but keep it in sync regardless).

@@ -71,7 +71,7 @@ divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
 browse  tabs  commit  diff_view  push  branch  history  finder  find  rollback
-file_ops  modals  onboarding  projects_view  notifications  terminal_panel
+file_ops  modals  onboarding  projects_view  notifications  terminal_panel  changelog
 
 # ── widgets/ — gpui-coupled widgets (own Entities/Elements) ──
 editor/  mdview.rs  terminal.rs  remote_img.rs
@@ -87,7 +87,8 @@ kyde-diff     FileDiff::compute() → line Hunks + word ranges; stats();
               partial_new_content(); hunk_patch(). (similar)
 kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
-kyde-update   GitHub release check + self-update download/swap. (thiserror: UpdateError, serde_json)
+kyde-update   GitHub release check + self-update download/swap, plus the changelog feed
+              (`release_notes`/`parse_releases`). (thiserror: UpdateError, serde_json)
 kyde-config   keymap + plugins + projects: config/persistence (JSON, XDG). (serde)
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
               feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
@@ -771,6 +772,21 @@ async via `cx.spawn`). The OS folder dialog has no initial-dir field in gpui 0.2
 Launch: `kyde` shell function in `~/.zshrc` runs the newest of
 `target/{release,debug}/kyde`, args passed through (bare = Projects view).
 (`gs` is ghostscript — not aliased.)
+
+## Changelog window (issue #71 — src/views/changelog.rs + kyde-update)
+"What's New" mirrors the GitHub Releases page in-app: Kyde ▸ **What's New…** (menu action
+`OpenChangelog`), the ⌘⇧A palette, or the **What's new** link on the update banner →
+`ModalKind::Changelog`. Left = one row per release (`v<version>`, date, `current` badge on the
+running version); right = that release's notes rendered by the selectable `mdview::MarkdownView`,
+with an "Open on GitHub" link. Data = `kyde_update::release_notes()` (`GET /releases?per_page=50`,
+`KYDE_RELEASES_FEED_URL`-overridable like the update feed) fetched **off the UI thread on first
+open only**; `parse_releases` is pure + unit-tested (drafts skipped, newest-version first, CRLF
+normalised, `published_at` trimmed to `YYYY-MM-DD`). A failed fetch keeps the window useful:
+error text + **Retry** + a link to the releases page. State = `ChangelogView` (`changelog` on
+`Kyde`); `set_changelog` applies a fetch result (the test/shot seam — no network needed). Smoke
+test: `changelog_lists_releases_and_shows_their_notes`. Debug shot: `KYDE_SHOT=changelog`
+(seeds fixed notes, so it's offline/deterministic; `KYDE_SHOT_RELEASES=<feed dump>` renders a
+real feed instead).
 
 ## Sort ops (issues #43/#41 — Sort Lines + Sort Object Keys)
 Right-clicking the editor pane (the `MenuTarget::EditorGit` menu) offers, above the git

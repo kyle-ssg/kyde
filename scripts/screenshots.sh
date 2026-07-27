@@ -178,7 +178,7 @@ shoot() {
     # rollback / plugins-window / merge / local-history open a second (modal) window;
     # the rest have one.
     local need=1
-    case "$name" in rollback|plugins-window|merge|merge-conflicts|local-history) need=2 ;; esac
+    case "$name" in rollback|plugins-window|merge|merge-conflicts|local-history|changelog) need=2 ;; esac
 
     local tries=0 count=0
     while [ $tries -lt 80 ]; do
@@ -318,6 +318,7 @@ run_one() {
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
+        changelog)        shoot_until changelog        changelog.png        region ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         welcome-gif)      shoot_welcome_gif ;;
         *) echo "unknown shot: $1"; exit 2 ;;
