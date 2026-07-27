@@ -278,6 +278,8 @@ impl Kyde {
             merge: MergeView::new(cx),
             compare_win: None,
             compare: CompareView::new(cx),
+            changelog_win: None,
+            changelog: ChangelogView::new(cx),
             local_history_win: None,
             lh: LocalHistoryView::new(cx),
             fs_watcher: None,

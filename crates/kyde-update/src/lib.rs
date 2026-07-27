@@ -68,6 +68,10 @@ fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> Update
 /// GitHub "latest release" API for this repo.
 const DEFAULT_FEED: &str = "https://api.github.com/repos/kyle-ssg/kyde/releases/latest";
 
+/// GitHub "all releases" API for this repo — the changelog window's feed (issue #71).
+const DEFAULT_RELEASES_FEED: &str =
+    "https://api.github.com/repos/kyle-ssg/kyde/releases?per_page=50";
+
 /// A release newer than what's running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
@@ -83,6 +87,27 @@ pub struct Release {
     pub sha256_url: String,
     /// Release page URL — the fallback when we can't swap in place (dev binary / no asset).
     pub page_url: String,
+}
+
+/// One published release, as shown in the changelog window (issue #71) — the GitHub
+/// Releases page mirrored in-app. Unlike [`Release`] (the self-update target) this carries
+/// the human-facing notes and is kept for *every* version, not just newer ones.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseNote {
+    /// Normalised numeric version, e.g. "2.5.0".
+    pub version: String,
+    /// Raw tag, e.g. "kyde-v2.5.0".
+    pub tag: String,
+    /// Release title (GitHub's `name`); falls back to the tag when unset.
+    pub title: String,
+    /// Release notes, markdown as published.
+    pub body: String,
+    /// Publication date as `YYYY-MM-DD` (empty when GitHub reports none).
+    pub date: String,
+    /// Release page URL — the "Open on GitHub" link.
+    pub page_url: String,
+    /// Whether GitHub flagged this as a pre-release.
+    pub prerelease: bool,
 }
 
 /// Version the running app reports — env override (dev/testing) else the compiled crate version.
@@ -187,6 +212,77 @@ pub fn parse_feed(body: &str, current: &str) -> Option<Release> {
         sha256_url,
         page_url,
     })
+}
+
+/// Where the changelog window reads its release list from (`KYDE_RELEASES_FEED_URL`
+/// overrides it — a `file://` fixture works, same dev seam as [`feed_url`]).
+fn releases_feed_url() -> String {
+    std::env::var("KYDE_RELEASES_FEED_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_RELEASES_FEED.to_string())
+}
+
+/// Fetch every published release, newest first — the changelog window's data (issue #71).
+/// Network I/O: run it off the UI thread. `Err` = network/HTTP failure (the caller shows a
+/// retry + an "Open on GitHub" link).
+pub fn release_notes() -> Result<Vec<ReleaseNote>> {
+    let body = curl_text(&releases_feed_url())?;
+    Ok(parse_releases(&body))
+}
+
+/// Pure feed → release notes, so the changelog is unit-testable without the network.
+/// Drafts are skipped (they aren't public), entries are sorted newest-version first, and a
+/// tag with no numeric version sorts last rather than being dropped.
+pub fn parse_releases(body: &str) -> Vec<ReleaseNote> {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    // A single-release feed (the `latest` endpoint) parses too — treat it as a one-element list.
+    let items: Vec<&serde_json::Value> = match json.as_array() {
+        Some(a) => a.iter().collect(),
+        None if json.is_object() => vec![&json],
+        None => return Vec::new(),
+    };
+    let mut out: Vec<ReleaseNote> = items
+        .into_iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(false))
+        .filter_map(|r| {
+            let tag = r["tag_name"].as_str().unwrap_or("").trim().to_string();
+            if tag.is_empty() {
+                return None;
+            }
+            let title = r["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&tag)
+                .to_string();
+            Some(ReleaseNote {
+                version: norm(&tag),
+                title,
+                // GitHub sends CRLF in release bodies; the markdown parser is happier without.
+                body: r["body"].as_str().unwrap_or("").replace("\r\n", "\n"),
+                date: r["published_at"]
+                    .as_str()
+                    .or_else(|| r["created_at"].as_str())
+                    .unwrap_or("")
+                    .chars()
+                    .take(10)
+                    .collect(),
+                page_url: r["html_url"].as_str().unwrap_or("").to_string(),
+                prerelease: r["prerelease"].as_bool().unwrap_or(false),
+                tag,
+            })
+        })
+        .collect();
+    // Newest first; unparseable tags sink to the bottom (keeps real versions ordered).
+    out.sort_by(|a, b| {
+        parse_semver(&b.tag)
+            .unwrap_or((0, 0, 0))
+            .cmp(&parse_semver(&a.tag).unwrap_or((0, 0, 0)))
+    });
+    out
 }
 
 /// Filename tokens that identify a build for `arch` (Rust's `std::env::consts::ARCH`).
@@ -575,6 +671,47 @@ mod tests {
             Some("https://x/kyde-macos.zip")
         );
         assert_eq!(pick_asset_url(&shipping, "x86_64").as_deref(), Some(intel));
+    }
+
+    /// The changelog feed (issue #71): drafts dropped, newest version first, CRLF cleaned,
+    /// dates trimmed to `YYYY-MM-DD`, missing `name` falling back to the tag.
+    #[test]
+    fn parse_releases_orders_newest_first_and_skips_drafts() {
+        let feed = r#"[
+            { "tag_name": "kyde-v2.4.0", "name": "2.4.0", "body": "old\r\nnotes",
+              "published_at": "2026-05-01T10:11:12Z", "html_url": "u24", "prerelease": false },
+            { "tag_name": "kyde-v2.10.0", "name": "", "body": "newest",
+              "published_at": "2026-07-01T00:00:00Z", "html_url": "u210" },
+            { "tag_name": "kyde-v2.5.0", "name": "2.5.0", "body": "mid",
+              "published_at": "2026-06-02T00:00:00Z", "html_url": "u25", "prerelease": true },
+            { "tag_name": "kyde-v9.9.9", "name": "draft", "body": "x", "draft": true }
+        ]"#;
+        let rs = parse_releases(feed);
+        // Numeric order (2.10 > 2.5), draft excluded.
+        assert_eq!(
+            rs.iter().map(|r| r.version.as_str()).collect::<Vec<_>>(),
+            ["2.10.0", "2.5.0", "2.4.0"]
+        );
+        assert_eq!(rs[0].title, "kyde-v2.10.0", "no name → tag as the title");
+        assert_eq!(
+            rs[2].body, "old\nnotes",
+            "CRLF normalised for the md parser"
+        );
+        assert_eq!(rs[2].date, "2026-05-01");
+        assert!(rs[1].prerelease);
+        assert_eq!(rs[0].page_url, "u210");
+    }
+
+    #[test]
+    fn parse_releases_tolerates_junk_and_single_objects() {
+        assert!(parse_releases("not json").is_empty());
+        assert!(parse_releases("[]").is_empty());
+        // Tagless entries are skipped; a lone object (the `latest` endpoint) still parses.
+        assert!(parse_releases(r#"[{ "body": "x" }]"#).is_empty());
+        let one = parse_releases(r#"{ "tag_name": "v1.2.3", "body": "b" }"#);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].version, "1.2.3");
+        assert_eq!(one[0].date, "", "no timestamp → empty date, not a panic");
     }
 
     #[test]

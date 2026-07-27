@@ -3,6 +3,7 @@
 //! shared `ui` toolkit and the controller core in app.rs/render.rs.
 mod branch;
 mod browse;
+mod changelog;
 mod commit;
 mod compare;
 mod diff_view;
