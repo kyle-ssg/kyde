@@ -328,8 +328,6 @@ impl Kyde {
     /// Body of the "Clear Data & Restart" confirmation modal window. Destructive: wipes the
     /// whole config dir and restarts.
     pub(crate) fn render_clear_data_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
-        let t = theme::get();
         let cancel = btn_secondary("clear-cancel", "Cancel").on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| this.close_modal_window(ModalKind::ClearData, cx)),
@@ -338,27 +336,13 @@ impl Kyde {
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| this.do_clear_data(cx)),
         );
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size + 1.0))
-            .child(div().text_color(t.text).child("Clear all data & restart?"))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(t.secondary_text)
-                    .text_size(px(theme::get().ui_font_size))
-                    .child(
-                        "Uninstalls all language plugins and clears cached settings (keymap, \
-                         theme, recent projects, preferences). Kyde will restart. Can't be undone.",
-                    ),
-            )
-            .child(ui::modal_footer().child(cancel).child(confirm))
-            .into_any_element()
+        ui::confirm_body(
+            "Clear all data & restart?",
+            "Uninstalls all language plugins and clears cached settings (keymap, theme, \
+             recent projects, preferences). Kyde will restart. Can't be undone.",
+        )
+        .child(ui::modal_footer().child(cancel).child(confirm))
+        .into_any_element()
     }
 
     /// Font specimen viewer: each bundled family at every available weight, previewing a

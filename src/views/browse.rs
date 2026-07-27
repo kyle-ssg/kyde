@@ -357,6 +357,37 @@ impl Kyde {
                     .then(|| status_by_path.get(&r.path))
                     .flatten()
                     .map_or(theme::get().text, |&s| status_color(s));
+                // Drag & drop (issue #65): every real repo file/folder is a drag source;
+                // real directories (incl. the repo-root row, path "") are drop targets that
+                // move the dropped path inside them. Scratch rows (absolute paths / the
+                // "Scratches" pseudo-group) are excluded — they live outside the project.
+                let is_scratch = r.path.is_absolute() || r.path == scratch_group;
+                let draggable = !is_root && !is_scratch;
+                let on_drop: Option<ui::tree::OnDrop<Self>> = (is_dir && !is_scratch).then(|| {
+                    let dest = r.path.clone();
+                    let f: ui::tree::OnDrop<Self> = Box::new(move |this: &mut Self, src, cx| {
+                        this.drop_onto_dir(src, dest.clone(), cx);
+                    });
+                    f
+                });
+                // Finder files dropped ON this row (issue #67): a folder takes them inside
+                // itself; a file takes them into its parent folder — so the highlighted row
+                // is exactly where they'll land.
+                let on_ext_drop: Option<ui::tree::OnExtDrop<Self>> = (!is_scratch).then(|| {
+                    let dest = if is_dir {
+                        r.path.clone()
+                    } else {
+                        r.path
+                            .parent()
+                            .map(std::path::Path::to_path_buf)
+                            .unwrap_or_default()
+                    };
+                    let f: ui::tree::OnExtDrop<Self> =
+                        Box::new(move |this: &mut Self, paths, cx| {
+                            this.drop_external_paths(paths, dest.clone(), cx);
+                        });
+                    f
+                });
                 ui::tree::item(
                     cx,
                     self.dragging(Divider::Tree),
@@ -369,6 +400,9 @@ impl Kyde {
                     name_color,
                     None,
                     None,
+                    draggable,
+                    on_drop,
+                    on_ext_drop,
                     move |this, e, window, cx| {
                         // Cmd-click on a FILE toggles it in the multi-selection (for
                         // "Compare Selected" — issue #42) without opening it. The
@@ -451,6 +485,7 @@ impl Kyde {
                 }),
             );
         let tree = div()
+            .id("browse-tree-pane")
             .flex()
             .flex_col()
             .relative()
@@ -464,6 +499,13 @@ impl Kyde {
             .font_family(ui)
             // A touch larger than the editor/code size for readability.
             .text_size(px(theme::get().ui_font_size + 3.0))
+            // Catch-all for Finder files dropped on the tree's EMPTY area (below the rows):
+            // they go to the repo root. Drops onto a row are handled per-row (with that
+            // row highlighted) — see `on_ext_drop` above (issue #67). No pane-wide tint here,
+            // so the highlight only ever marks the specific target folder.
+            .on_drop(cx.listener(|this, ep: &gpui::ExternalPaths, _w, cx| {
+                this.drop_external_paths(ep.paths().to_vec(), PathBuf::new(), cx);
+            }))
             .child({
                 let rows_pane = div()
                     .id("browse-tree")

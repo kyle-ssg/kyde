@@ -48,7 +48,7 @@ use widgets::terminal;
 
 // ── small OS utilities ──
 mod platform;
-use platform::{scratch, shellcmd};
+use platform::{clipboard as os_clipboard, scratch, shellcmd};
 
 // ── workspace crates, aliased back to their old module names ──
 use kyde_config::keymap;
@@ -107,7 +107,10 @@ actions!(
         DeleteFile,
         CloseTab,
         DiffNextChange,
-        DiffPrevChange
+        DiffPrevChange,
+        CopyFiles,
+        CutFiles,
+        PasteFiles
     ]
 );
 // File-finder navigation (fixed keys, context "FileFinder").
@@ -246,6 +249,14 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.bind_keys([
         KeyBinding::new("backspace", DeleteFile, Some("Kyde")),
         KeyBinding::new("cmd-backspace", DeleteFile, Some("Kyde")),
+    ]);
+    // File-tree cut/copy/paste (issue #67). Scoped to the "Kyde" root, so the deeper
+    // "CodeEditor" copy/cut/paste bindings win whenever an editor is focused — these only
+    // fire at the app root (a tree row selected, no editor focused).
+    cx.bind_keys([
+        KeyBinding::new("cmd-c", CopyFiles, Some("Kyde")),
+        KeyBinding::new("cmd-x", CutFiles, Some("Kyde")),
+        KeyBinding::new("cmd-v", PasteFiles, Some("Kyde")),
     ]);
     // Jump between diff changes (Alt+↓ / Alt+↑). Global so they fire while the diff editor is
     // focused; no-op when no diff is showing.
@@ -978,6 +989,18 @@ struct BrowseView {
     md_view: Option<gpui::Entity<mdview::MarkdownView>>,
     /// Editor pane width (px) of the markdown side-by-side split (drag-resizable).
     md_editor_w: f32,
+    /// Cut/Copy clipboard for the file tree (issue #67). `None` = nothing copied; a paste
+    /// then falls back to the OS clipboard (Finder file copies, image data).
+    clipboard: Option<TreeClip>,
+}
+
+/// A pending cut/copy of tree paths (issue #67). `cut` moves on paste; otherwise it copies.
+#[derive(Clone)]
+struct TreeClip {
+    /// The rel paths that were cut/copied.
+    paths: Vec<PathBuf>,
+    /// True for a cut (paste moves + clears the clipboard); false for a copy.
+    cut: bool,
 }
 
 impl BrowseView {
@@ -1044,6 +1067,7 @@ impl BrowseView {
             md_preview_scroll: ScrollHandle::new(),
             md_view: None,
             md_editor_w: 480.0,
+            clipboard: None,
         }
     }
 }
@@ -1510,6 +1534,10 @@ struct Kyde {
     name_input: Entity<CodeEditor>,
 
     // Branch switcher (bottom-right status bar + popup)
+    /// Whether the open project is inside a git working tree. `false` for a plain folder —
+    /// the UI hides every git action (branch chip, git menu items, commit/history) and the
+    /// git views explain why instead of offering broken buttons (issue #66).
+    is_git: bool,
     /// Current branch name (repo state — read by refresh/history/status bar, hence kept
     /// directly on `Kyde` rather than in `BranchPopup`).
     current_branch: Option<String>,
@@ -2275,6 +2303,9 @@ impl gpui::AssetSource for Assets {
             "icons/file-clock.svg" => include_bytes!("../assets/icons/file-clock.svg"),
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
+            "icons/scissors.svg" => include_bytes!("../assets/icons/scissors.svg"),
+            "icons/copy.svg" => include_bytes!("../assets/icons/copy.svg"),
+            "icons/clipboard.svg" => include_bytes!("../assets/icons/clipboard.svg"),
             "icons/x.svg" => include_bytes!("../assets/icons/x.svg"),
             "icons/maximize-2.svg" => include_bytes!("../assets/icons/maximize-2.svg"),
             "icons/minimize-2.svg" => include_bytes!("../assets/icons/minimize-2.svg"),
@@ -3000,6 +3031,230 @@ mod gpui_smoke_tests {
         (handle, dir)
     }
 
+    /// Renaming a FOLDER (issue #68) moves its whole subtree on disk and repoints every
+    /// piece of Browse UI state that pointed under it — open tabs, the active/selected
+    /// path, and the expanded set — to the new location.
+    #[gpui::test]
+    fn rename_folder_moves_subtree_and_repoints_state(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("src/inner")).unwrap();
+        std::fs::write(dir.join("src/inner/mod.rs"), "// mod\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.refresh(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                let inner = PathBuf::from("src/inner/mod.rs");
+                k.open_file(inner.clone(), cx);
+                k.browse.expanded.insert(PathBuf::from("src"));
+                k.browse.expanded.insert(PathBuf::from("src/inner"));
+                k.browse.selected_path = Some(inner.clone());
+                // Rename the top folder `src` → `lib`.
+                k.name_prompt = Some(NamePrompt::Rename(PathBuf::from("src")));
+                k.name_input
+                    .update(cx, |e, cx| e.set_content("lib".into(), Lang::PlainText, cx));
+                k.confirm_name_prompt(w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                // Moved on disk.
+                assert!(dir.join("lib/inner/mod.rs").is_file());
+                assert!(!dir.join("src").exists());
+                // Tabs, selection, expansion all repointed under the new name.
+                let moved = PathBuf::from("lib/inner/mod.rs");
+                assert!(k.browse.open_tabs.contains(&moved));
+                assert_eq!(k.browse.open_path.as_ref(), Some(&moved));
+                assert_eq!(k.browse.selected_path.as_ref(), Some(&moved));
+                assert!(k.browse.expanded.contains(&PathBuf::from("lib")));
+                assert!(k.browse.expanded.contains(&PathBuf::from("lib/inner")));
+                assert!(!k.browse.expanded.contains(&PathBuf::from("src")));
+            })
+            .unwrap();
+    }
+
+    /// Tree drag & drop (issue #65): dropping a file onto a folder moves it there; a
+    /// drop that's a no-op (already in that folder) or into a folder's own subtree is
+    /// refused so it can't destroy the source.
+    #[gpui::test]
+    fn drag_drop_moves_into_folder_and_guards_bad_drops(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("src/sub")).unwrap();
+        std::fs::write(dir.join("src/sub/keep.rs"), "// keep\n").unwrap();
+        std::fs::write(dir.join("top.txt"), "top\n").unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // Move top.txt into src/.
+                k.drop_onto_dir(PathBuf::from("top.txt"), PathBuf::from("src"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(dir.join("src/top.txt").is_file(), "file moved into folder");
+        assert!(!dir.join("top.txt").exists(), "source is gone");
+
+        handle
+            .update(cx, |k, _w, cx| {
+                // No-op: already inside src/.
+                k.drop_onto_dir(PathBuf::from("src/top.txt"), PathBuf::from("src"), cx);
+                // Refused: moving src into its own descendant would destroy it.
+                k.drop_onto_dir(PathBuf::from("src"), PathBuf::from("src/sub"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            dir.join("src/top.txt").is_file(),
+            "no-op drop kept the file"
+        );
+        assert!(
+            dir.join("src/sub/keep.rs").is_file(),
+            "self-descendant drop refused"
+        );
+        assert!(
+            !dir.join("src/sub/src").exists(),
+            "src was not moved into its child"
+        );
+    }
+
+    /// File-tree clipboard (issue #67): Copy duplicates (auto-renaming on a clash), Cut
+    /// moves and clears the clipboard, and a folder copies recursively.
+    #[gpui::test]
+    fn clipboard_copy_cut_paste_move_and_duplicate(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::create_dir_all(dir.join("b")).unwrap();
+        std::fs::write(dir.join("a/x.txt"), "x\n").unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+
+        // Copy a/x.txt, paste into b/ → b/x.txt appears, source stays.
+        handle
+            .update(cx, |k, _w, cx| {
+                k.clip_paths(vec![PathBuf::from("a/x.txt")], false, cx);
+                k.paste_into(PathBuf::from("b"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(dir.join("b/x.txt").is_file(), "copy pasted into b/");
+        assert!(dir.join("a/x.txt").is_file(), "copy left the source");
+
+        // Paste the same copy back into a/ (where it already lives) → auto-renamed.
+        handle
+            .update(cx, |k, _w, cx| {
+                k.clip_paths(vec![PathBuf::from("a/x.txt")], false, cx);
+                k.paste_into(PathBuf::from("a"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            dir.join("a/x copy.txt").is_file(),
+            "clash auto-renamed to ' copy'"
+        );
+
+        // Cut folder a/ into b/ → b/a/x.txt appears, a/ is gone, clipboard cleared.
+        handle
+            .update(cx, |k, _w, cx| {
+                k.clip_paths(vec![PathBuf::from("a")], true, cx);
+                k.paste_into(PathBuf::from("b"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            dir.join("b/a/x.txt").is_file(),
+            "cut moved the folder recursively"
+        );
+        assert!(!dir.join("a").exists(), "cut removed the source folder");
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.browse.clipboard.is_none(), "cut cleared the clipboard");
+            })
+            .unwrap();
+    }
+
+    /// Renaming a tracked file records it clearly in local history (issue #67 QA): the new
+    /// path gets a "Renamed" marker and the old path a deletion tombstone.
+    #[gpui::test]
+    fn rename_shows_clearly_in_local_history(cx: &mut TestAppContext) {
+        use kyde_local_history::EventKind;
+        let (handle, dir) = boot(cx);
+        // app.tsx is a tracked file in the boot repo; rename it.
+        handle
+            .update(cx, |k, _w, cx| {
+                k.move_path(
+                    std::path::Path::new("app.tsx"),
+                    std::path::Path::new("renamed.tsx"),
+                    "Renaming",
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(dir.join("renamed.tsx").is_file());
+        assert!(!dir.join("app.tsx").exists());
+        handle
+            .update(cx, |k, _w, _cx| {
+                let store = k.lh.store.clone().unwrap();
+                let s = store.lock().unwrap();
+                let new_ev = s.events_for(std::path::Path::new("renamed.tsx"));
+                assert!(
+                    new_ev.iter().any(|e| e.label.as_deref() == Some("Renamed")),
+                    "new path has a Renamed marker: {new_ev:?}"
+                );
+                let old_ev = s.events_for(std::path::Path::new("app.tsx"));
+                assert!(
+                    old_ev.iter().any(|e| e.kind == EventKind::Deleted),
+                    "old path is tombstoned: {old_ev:?}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Pasting raw image data (e.g. a screenshot on the clipboard) writes it as an image
+    /// file in the target folder — into the folder itself, and (regression) into a folder
+    /// even when the paste target resolves to a FILE, without the "not a directory" error.
+    #[gpui::test]
+    fn paste_clipboard_image_writes_a_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::create_dir_all(dir.join("assets")).unwrap();
+        // A tiny valid-enough PNG byte blob — the paste writes bytes verbatim, it doesn't decode.
+        let png = b"\x89PNG\r\n\x1a\n-fake-image-bytes".to_vec();
+        handle
+            .update(cx, |k, _w, cx| {
+                let img = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.clone());
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&img));
+                // Nothing on the internal clipboard, so paste falls through to image data.
+                assert!(k.browse.clipboard.is_none());
+                k.paste_into(PathBuf::from("assets"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let into_folder = dir.join("assets/image.png");
+        assert!(into_folder.is_file(), "image pasted into the folder");
+        assert_eq!(std::fs::read(&into_folder).unwrap(), png);
+
+        // Regression: a paste target that is a FILE must resolve to its parent folder, not
+        // error with "not a directory".
+        std::fs::write(dir.join("note.txt"), "hi\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                let img = gpui::Image::from_bytes(gpui::ImageFormat::Png, png.clone());
+                cx.write_to_clipboard(gpui::ClipboardItem::new_image(&img));
+                k.paste_into(PathBuf::from("note.txt"), cx);
+                assert!(k.op_error.is_none(), "no paste error: {:?}", k.op_error);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(
+            dir.join("image.png").is_file(),
+            "file-target paste landed in the parent"
+        );
+    }
+
     /// New File / New Folder must work in a plain folder with NO git repo (they're pure
     /// filesystem ops), and a created-but-still-empty folder must show in the Browse
     /// tree (file-derived trees can't see empty dirs — `extra_dirs` carries them).
@@ -3051,6 +3306,40 @@ mod gpui_smoke_tests {
                         .any(|r| r.path.as_os_str() == "docs" && r.is_dir),
                     "empty new folder shows in the tree"
                 );
+            })
+            .unwrap();
+    }
+
+    /// A plain (non-git) folder reports `is_git == false`, and `do_git_init` turns it into a
+    /// real repo so the full git UI comes to life (issue #66).
+    #[gpui::test]
+    fn non_git_folder_flags_and_git_init_makes_a_repo(cx: &mut TestAppContext) {
+        isolate_history();
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("kyde-nogit-{}-{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("readme.md"), "hi\n").unwrap();
+
+        let km = Keymap::default();
+        let root = Some(dir.clone());
+        let handle = cx.add_window(move |_w, cx| Kyde::new(root.clone(), km.clone(), false, cx));
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(!k.is_git, "a plain folder is not a git repo");
+                // The Browse tree still works (filesystem walk).
+                assert!(k.browse.all_files.contains(&PathBuf::from("readme.md")));
+            })
+            .unwrap();
+        // git init here, then refresh flips the flag.
+        handle.update(cx, |k, _w, cx| k.do_git_init(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(dir.join(".git").is_dir(), "git init created .git");
+                assert!(k.is_git, "is_git flips true after init");
             })
             .unwrap();
     }

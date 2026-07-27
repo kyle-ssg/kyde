@@ -263,6 +263,7 @@ impl Kyde {
             name_input,
             rollback_checked: std::collections::HashSet::new(),
             rollback_delete_added: false,
+            is_git: true,
             current_branch: None,
             branch: BranchPopup::new(cx),
             worktree: WorktreePopup::new(),
@@ -325,6 +326,7 @@ impl Kyde {
             self.files.clear();
             self.stats.clear();
             self.sync.push_files.clear();
+            self.is_git = false;
             self.current_branch = None;
             self.worktree.list.clear();
             self.worktree.popup_open = false;
@@ -392,6 +394,7 @@ impl Kyde {
         }
         self.browse.tree =
             tree::Tree::build_with_dirs(&self.browse.all_files, &self.browse.extra_dirs);
+        self.is_git = snap.is_git;
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;
         // Merge-in-progress state (drives the banner). Covers merges we started AND ones

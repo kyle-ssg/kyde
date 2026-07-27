@@ -16,6 +16,10 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
+        // No git repository → no history. Reuse the Commit view's explanation (issue #66).
+        if !self.is_git {
+            return self.render_no_git(ui, cx);
+        }
 
         // ── header: branch chip + commit search + compare-mode segmented control ──
         let rev_label: SharedString = format!("⎇ {}", self.history.rev).into();
@@ -367,6 +371,9 @@ impl Kyde {
                     selected,
                     name,
                     name_color,
+                    None,
+                    None,
+                    false,
                     None,
                     None,
                     move |this, _e, _w, cx| {

@@ -310,6 +310,9 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_sort_keys))
             .on_action(cx.listener(Self::act_nav_back))
             .on_action(cx.listener(Self::act_nav_forward))
+            .on_action(cx.listener(Self::act_copy_files))
+            .on_action(cx.listener(Self::act_cut_files))
+            .on_action(cx.listener(Self::act_paste_files))
             .on_action(cx.listener(Self::open_keymap))
             .on_action(cx.listener(Self::open_recent_project))
             .on_action(cx.listener(Self::act_open_project))
@@ -690,17 +693,20 @@ impl Kyde {
                         cx.listener(|this, _e, _w, cx| this.sort_object_keys_at_caret(cx)),
                     ));
                 }
-                panel = panel.child(item("Commit").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| this.menu_commit_path(pc.clone(), cx)),
-                ));
-                if self.has_changes_under(p) {
-                    panel = panel.child(item("Rollback").on_mouse_down(
+                // Git commands only when the project is a git repo (issue #66).
+                if self.is_git {
+                    panel = panel.child(item("Commit").on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            this.open_rollback_path(pr.clone(), cx);
-                        }),
+                        cx.listener(move |this, _e, _w, cx| this.menu_commit_path(pc.clone(), cx)),
                     ));
+                    if self.has_changes_under(p) {
+                        panel = panel.child(item("Rollback").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.open_rollback_path(pr.clone(), cx);
+                            }),
+                        ));
+                    }
                 }
                 // Local History for the edited file (issue #7) — hidden when disabled.
                 if self.lh.store.is_some() {
@@ -713,20 +719,22 @@ impl Kyde {
                     ));
                 }
                 // Git remote ops, WebStorm-style (Fetch/Pull always, Push when ahead).
-                panel = panel
-                    .child(item("Fetch").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
-                    ))
-                    .child(item("Pull").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
-                    ));
-                if self.sync.ahead.unwrap_or(0) > 0 {
-                    panel = panel.child(item("Push").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
-                    ));
+                if self.is_git {
+                    panel = panel
+                        .child(item("Fetch").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
+                        ))
+                        .child(item("Pull").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
+                        ));
+                    if self.sync.ahead.unwrap_or(0) > 0 {
+                        panel = panel.child(item("Push").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
+                        ));
+                    }
                 }
                 panel
             }
@@ -835,14 +843,50 @@ impl Kyde {
                         }),
                     ));
                 panel = panel.child(submenu_row(Submenu::New, "New", "New File…", new_flyout));
+                panel = panel.child(ui::menu_divider());
 
-                // Rename applies to files (not folders, for now).
-                if !is_dir {
-                    let pn = p.clone();
-                    panel = panel.child(item("Rename…").on_mouse_down(
+                // Cut / Copy / Paste (issue #67). Copy/Cut act on the whole cmd-selection
+                // when the clicked row is part of it, else just this row. Paste targets a
+                // folder (or the clicked file's folder), pulling from kyde's clipboard, then
+                // Finder file copies, then image data.
+                {
+                    let clip_paths = |this: &Kyde, row: &std::path::Path| -> Vec<PathBuf> {
+                        if this.browse.multi_selected.iter().any(|s| s == row)
+                            && this.browse.multi_selected.len() > 1
+                        {
+                            this.browse.multi_selected.clone()
+                        } else {
+                            vec![row.to_path_buf()]
+                        }
+                    };
+                    let (pcut, pcopy) = (p.clone(), p.clone());
+                    panel = panel
+                        .child(item("Cut").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                let paths = clip_paths(this, &pcut);
+                                this.clip_paths(paths, true, cx);
+                            }),
+                        ))
+                        .child(item("Copy").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                let paths = clip_paths(this, &pcopy);
+                                this.clip_paths(paths, false, cx);
+                            }),
+                        ));
+                    // Paste destination: the folder itself, else the file's parent folder.
+                    let dest = if is_dir {
+                        p.clone()
+                    } else {
+                        p.parent()
+                            .map(std::path::Path::to_path_buf)
+                            .unwrap_or_default()
+                    };
+                    panel = panel.child(item("Paste").on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, window, cx| {
-                            this.start_rename(pn.clone(), window, cx);
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.paste_into(dest.clone(), cx);
                         }),
                     ));
                 }
@@ -859,46 +903,29 @@ impl Kyde {
                         }),
                     ));
                 }
+                panel = panel.child(ui::menu_divider());
 
-                // Git ▸ — commit / rollback / history / fetch / pull / push, grouped.
-                let ph = p.clone();
-                let mut git_flyout = div();
-                if self.has_changes_under(p) {
-                    git_flyout = git_flyout
-                        .child(item("Commit").on_mouse_down(
+                // Rename / Delete — act on the file/folder itself. Rename covers both files
+                // and folders (a folder rename carries its whole subtree).
+                {
+                    let (pn, pd) = (p.clone(), p.clone());
+                    panel = panel
+                        .child(item("Rename…").on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| {
-                                this.menu_commit_path(pc.clone(), cx);
+                            cx.listener(move |this, _e, window, cx| {
+                                this.start_rename(pn.clone(), window, cx);
                             }),
                         ))
-                        .child(item("Rollback").on_mouse_down(
+                        .child(item("Delete…").on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| {
-                                this.open_rollback_path(pr.clone(), cx);
-                            }),
+                            cx.listener(move |this, _e, _w, cx| this.open_delete(pd.clone(), cx)),
                         ));
                 }
-                git_flyout = git_flyout
-                    .child(item("Git History").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.enter_history_for(ph.clone(), cx)),
-                    ))
-                    .child(item("Fetch").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
-                    ))
-                    .child(item("Pull").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
-                    ));
-                if self.sync.ahead.unwrap_or(0) > 0 {
-                    git_flyout = git_flyout.child(item("Push").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
-                    ));
-                }
-                panel = panel.child(submenu_row(Submenu::Git, "Git", "Commit", git_flyout));
 
+                // Local History + Git group (each conditional) — its own divided section.
+                if self.lh.store.is_some() || self.is_git {
+                    panel = panel.child(ui::menu_divider());
+                }
                 // Local History (issue #7) — file OR folder scope; hidden when disabled.
                 if self.lh.store.is_some() {
                     let pl = p.clone();
@@ -909,15 +936,57 @@ impl Kyde {
                         }),
                     ));
                 }
-                let pd = p.clone();
+
+                // Git ▸ — commit / rollback / history / fetch / pull / push, grouped.
+                // The whole submenu is hidden for a plain (non-git) folder (issue #66).
+                if self.is_git {
+                    let ph = p.clone();
+                    let mut git_flyout = div();
+                    if self.has_changes_under(p) {
+                        git_flyout = git_flyout
+                            .child(item("Commit").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e, _w, cx| {
+                                    this.menu_commit_path(pc.clone(), cx);
+                                }),
+                            ))
+                            .child(item("Rollback").on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, _e, _w, cx| {
+                                    this.open_rollback_path(pr.clone(), cx);
+                                }),
+                            ));
+                    }
+                    git_flyout = git_flyout
+                        .child(item("Git History").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                this.enter_history_for(ph.clone(), cx);
+                            }),
+                        ))
+                        .child(item("Fetch").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.do_fetch(cx)),
+                        ))
+                        .child(item("Pull").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.do_pull(cx)),
+                        ));
+                    if self.sync.ahead.unwrap_or(0) > 0 {
+                        git_flyout = git_flyout.child(item("Push").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
+                        ));
+                    }
+                    panel = panel.child(submenu_row(Submenu::Git, "Git", "Commit", git_flyout));
+                }
+
+                // Reveal in Finder — its own trailing group.
                 panel
+                    .child(ui::menu_divider())
                     .child(item("Reveal in Finder").on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| this.reveal_in_os(&pv, cx)),
-                    ))
-                    .child(item("Delete…").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.open_delete(pd.clone(), cx)),
                     ))
             }
             MenuTarget::Tab(idx) => {
