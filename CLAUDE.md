@@ -77,7 +77,7 @@ file_ops  modals  onboarding  projects_view  notifications  terminal_panel
 editor/  mdview.rs  terminal.rs  remote_img.rs
 
 # ── platform/ — small OS utils (no gpui) ──
-clipboard.rs  scratch.rs  shellcmd.rs
+clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
@@ -772,6 +772,22 @@ Launch: `kyde` shell function in `~/.zshrc` runs the newest of
 `target/{release,debug}/kyde`, args passed through (bare = Projects view).
 (`gs` is ghostscript — not aliased.)
 
+## Single instance (issue #72 — src/platform/instance.rs + main.rs)
+Every open project is already a **tab** (`open_projects`), so a second `kyde <path>` from the
+terminal must NOT start a second app — it hands the path to the running one, which opens it as
+another project tab and comes forward. Mechanism = a **unix domain socket** (`$TMPDIR/kyde-
+<hash>.sock`, hash = `USER|XDG_CONFIG_HOME` so users/config profiles never collide; a `TMPDIR`
+too deep for `sun_path`'s ~104 bytes falls back to `/tmp` with the dir folded into the hash —
+`socket_path_in`, unit-tested, this is a real bind failure not a hypothetical). `main()` calls
+`instance::try_send` BEFORE `Application::new()`: delivered → `return` (no window, no gpui
+init, ~30ms); nothing listening → we're the instance and `instance::listen` binds after the
+main window opens. The accept thread can't touch gpui entities, so it only forwards a
+`Request` (`Open(path)` / `Activate`) over a `futures::mpsc` channel to a foreground pump —
+the terminal `EventProxy` / fs-watcher pattern — which calls `open_project` + `activate_window`.
+A socket left behind by a crash/SIGTERM is detected (connect fails) and unlinked before the
+rebind; a clean exit unlinks it via `Guard`'s `Drop`. **Opt-out**: `KYDE_SINGLE_INSTANCE=0`,
+and any `KYDE_SHOT` run (the screenshot suite launches instances back to back).
+
 ## Sort ops (issues #43/#41 — Sort Lines + Sort Object Keys)
 Right-clicking the editor pane (the `MenuTarget::EditorGit` menu) offers, above the git
 commands: **Sort Lines** when the selection spans ≥2 lines OR the caret sits in a
@@ -834,7 +850,7 @@ Opening a project lands in **Browse (code) view**, not git — `open_project`/`n
 - gpui but **Kyde-agnostic**, its own crate: `kyde-ui` (the reusable toolkit — buttons, badge,
   tree row, …; depends only on gpui + kyde-theme).
 - Plain Rust, still in the binary (small OS utils, not yet crated): `platform/{scratch,
-  shellcmd}.rs`.
+  shellcmd,instance}.rs`.
 - gpui UI in the binary: core shell `main.rs`/`app.rs`/`render.rs`/`divider.rs`; the `views/`
   feature modules; the `widgets/` (editor, mdview, terminal, remote_img).
   Compile on gpui 0.2.2.
