@@ -39,8 +39,10 @@ Built from scratch on gpui, borrowing patterns from existing editors but not the
 
 ## Theme
 
-A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.json`. A
-built-in **Kyde Light** palette ships too — switch in Settings.
+A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.json`.
+Six built-in palettes ship — **Kyde Dark**, **Kyde Light**, and colour-vision-deficiency
+variants of each (**Red–Green** and **Blue–Yellow**, which separate the diff/syntax poles
+by lightness instead of hue) — switch in Settings.
 
 <p align="center">
   <img src="assets/screenshots/light.png" alt="Kyde Light theme — the same side-by-side diff rendered in the built-in light palette" width="900">
@@ -59,9 +61,12 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 * **Text editor** — selection, undo/redo, copy/cut/paste, Tab/Shift-Tab indent, ⌘-backspace, line numbers, current-line highlight, IME, auto-save.
 * **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace.
 * **Editor tabs** that scroll and follow the active file.
-* **Image preview** for PNG/JPG/GIF/WebP.
+* **Image preview** for PNG/JPG/GIF/WebP/BMP/ICO/AVIF/TIFF.
 * **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
 * **Code folding** for grammar-backed languages.
+* **Error highlighting** — wavy red squiggles under parse errors, on by default for every installed pack, opt-out per pack.
+* **⌘-click navigation** — ⌘-click an import to open the file it points at, a symbol to jump to its definition (same file, or the file it was imported from). Rust, TypeScript/TSX, JavaScript, Python.
+* **Sort Lines** (`⌥⌘L`) and **Sort Object Keys** (`⌥⌘S`) — a line sort inside a JSON/JS/TS object delegates to the key sort, so entries move with their commas.
 * **Markdown preview** — a live rendered pane alongside the editor.
 
 <p align="center">
@@ -79,7 +84,7 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 ### Terminal
 
 * **Embedded multi-tab terminal** — a real PTY-backed shell (alacritty's VTE engine),
-  bottom-docked, toggled with `⌃\``. Full color, scrollback, resize, multiple tabs.
+  bottom-docked, toggled with ``⌃` ``. Full color, scrollback, resize, multiple tabs.
 * **Mouse select + copy** (`⌘C`), **paste** (`⌘V`, bracketed-paste aware), **`⌘`-click URLs**.
 * History (`↑`), tab-completion, line-editing all work — it's your real shell.
 * Optional: drop it entirely with `--no-default-features` (the `terminal` Cargo feature)
@@ -94,12 +99,20 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 * **Commit view**: changed-files list + an editable side-by-side diff — base on the left, live working copy on the right, both highlighted.
 * **Stage / revert** per hunk from the center gutter, or whole files; commit via the message box.
 * **Rollback** in a native window — checkbox tree, optional deletion of added files, right-click for diff.
-* **Push** when ahead of upstream (status-bar button + context menu).
+* **Push / Pull / Fetch** — status-bar chips that appear when you're ahead or behind upstream, plus the context menu.
 * **Branch switcher** — searchable tree, `/` as folders, Recent / Local roots, ahead/behind counts per branch.
+* **Worktree switcher** — a chip listing every linked worktree with its branch and changed-file count; switching restores that worktree's UI state, and the branch popup jumps to a worktree rather than failing a checkout that's already checked out elsewhere.
+* **Compare two files** — ⌘-click two files in the tree → right-click → **Compare Selected** (or right-click a tab → **Compare with Current Tab**) for a side-by-side compare in a native window, with a `«` `»` gutter that applies a hunk in either direction.
 * **Merge** — right-click a branch to merge it into the current one. Conflicts open a native two-stage resolver: a conflicts list (what each side did, Accept Yours / Accept Theirs / Merge…), then a 3-pane merge view — yours | result | theirs — with per-change apply/ignore gutters, "apply non-conflicting changes", Compare Contents pairs, and whitespace-ignoring diffs.
 * **History** — commit log for any branch, with the selected commit's changed files and a read-only diff that compares vs the parent, latest, or your local working tree.
 * **Local History** — per-file snapshots independent of git (saves, external changes, and markers before every destructive op). A timeline + snapshot ↔ current diff per file or folder, a changed-since files panel, per-hunk restore, and revert for one file, a folder, or everything since a snapshot — every revert is itself recorded. Configurable retention, clearable, or off entirely.
-* **File management** from the tree — New File, Rename, Delete (with confirm).
+* **File management** from the tree — New File / Directory / Scratch, Rename (files *and* folders, repointing open tabs across the moved subtree), Delete (with confirm), Cut / Copy / Paste (`⌘X`/`⌘C`/`⌘V`, including files copied in Finder and clipboard image data), drag & drop within the tree or in from Finder, and Reveal in Finder.
+* **Non-git folders work too** — file management and editing are plain filesystem ops; git actions hide themselves and offer an **Initialize Git Repository** button instead.
+* **Live** — a filesystem watcher (`notify`/FSEvents) refreshes git status and local history when files change outside Kyde, on top of the window-refocus refresh. `.git`-internal churn is filtered so Kyde's own git commands don't spin it.
+
+<p align="center">
+  <img src="assets/screenshots/worktrees.png" alt="Worktree switcher — a popup listing every linked worktree with its branch and changed-file count, the active one ticked" width="900">
+</p>
 
 <p align="center">
   <img src="assets/screenshots/rollback.png" alt="Rollback in a native window — checkbox tree of changes over the diff" width="900">
@@ -125,6 +138,7 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 
 * **Go to File** (`⌘⇧O` / `⌘P`) and **Find Action** (`⌘⇧A`) fuzzy finders.
 * **Find in Files** (`⌘⇧F`) — full-text content search across the repo (`git grep`), jump straight to a match.
+* **Back / Forward** (`⌘⌥←` / `⌘⌥→`) through visited files, IDE-style.
 * **Scratch files** — throwaway buffers under a "Scratches" folder.
 * **Breadcrumbs** in the status bar.
 
@@ -135,7 +149,10 @@ built-in **Kyde Light** palette ships too — switch in Settings.
 ### Look & feel
 
 * **Islands layout** — rounded panels, draggable dividers, activity rail, native title bar (double-click to zoom), status bar.
-* **Native menu bar** — Settings, FPS monitor toggle, Quit.
+* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu).
+* **What's New** — the project's GitHub releases mirrored in-app: version list on the left, that release's notes rendered on the right.
+* **In-app updates** — a banner when a newer release exists; **Update & Relaunch** downloads and swaps the running `.app` in place (or opens the release page when not running from a bundle).
+* **Single instance** — a second `ky <path>` hands the project to the running app as another tab and brings it forward instead of starting a second process (`KYDE_SINGLE_INSTANCE=0` opts out).
 * **App icon** from the bundled logo.
 
 ### Keymap & configuration
@@ -169,12 +186,16 @@ Default shortcuts (WebStorm → VSCode):
 
 * Go to File: `⌘⇧O` → `⌘P`
 * Find Action: `⌘⇧A`
-* Find / Replace in file: `⌘F` / `⌘R`
+* Find in Files: `⌘⇧F`
+* Find / Replace in file: `⌘F` / `⌘R` (`⌘G` / `⇧⌘G` to cycle)
 * Save: `⌘S`
 * Commit: `⌘K` → `⌘⏎`
 * Commit view: `⌘9` → `⌃⇧G`
 * Browse view: `⌘1` → `⌘⇧E`
+* Back / Forward: `⌘⌥←` / `⌘⌥→`
+* Sort Lines / Sort Object Keys: `⌥⌘L` / `⌥⌘S`
 * New Scratch: `⌘⇧N`
+* Toggle terminal: ``⌃` ``
 * Settings: `⌘,`
 
 ## Build
@@ -182,9 +203,12 @@ Default shortcuts (WebStorm → VSCode):
 Needs Rust 1.96+ and (on macOS) Apple's Metal Toolchain, which gpui uses to compile its shaders — if a clean machine errors with "missing Metal Toolchain", run `xcodebuild -downloadComponent MetalToolchain`.
 
 ```sh
-cargo build --release          # full — every language grammar baked in (default)
-cargo test                     # logic, perf guards, and headless-gpui smoke tests
+cargo build --release             # full — every language grammar baked in (default)
+cargo test --workspace            # logic, perf guards, and headless-gpui smoke tests
 ```
+
+`--workspace` matters: the root package is the binary, so a bare `cargo test` skips the
+library crates under `crates/` where most of the logic tests live.
 
 Each language pack is a Cargo feature, so unused grammars can be dropped from the binary entirely (smaller image + resident RAM):
 
@@ -205,8 +229,8 @@ Guarded by `perf_*` time-budget tests, headless-gpui smoke tests (render every s
 ## Known limitations / next
 
 * **Prebuilt releases are macOS-only.** I develop on macOS and wouldn't actively test Linux/Windows, so I only ship a signed + notarized macOS build rather than binaries I can't stand behind. The code itself is cross-platform — gpui runs on all three, and Linux/Windows packaging already exists in `scripts/` (just unwired from the release). Re-enabling them is a **good first issue** for a contributor who runs those platforms. Until then, Linux/Windows users can `cargo build --release`.
-* No soft-wrap or caret-follow scrolling yet. The editor uses a flat `String`; a rope-based buffer comes later for very large edits.
-* Live file watching (`notify`/FSEvents) refreshes git status + local history when files change outside Kyde, on top of the window-refocus refresh. `.git`-internal churn is filtered so our own git commands don't spin it.
+* No soft-wrap in the file editor (long lines scroll horizontally; the commit box does wrap). The editor holds a flat `String` and undo is whole-buffer snapshots — a rope-based buffer comes later for very large edits.
+* No scrollback search in the terminal.
 
 ## Contributing
 
