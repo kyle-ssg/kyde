@@ -9,6 +9,7 @@ mod checkbox;
 mod color;
 mod footer;
 mod menu;
+mod panel;
 /// Shared list-picker mechanics (bounded nav + the selected/hover row pill). Call sites
 /// use the explicit `ui::picker::…`.
 pub mod picker;
@@ -25,6 +26,7 @@ pub use checkbox::*;
 pub use color::*;
 pub use footer::*;
 pub use menu::*;
+pub use panel::*;
 pub use scrollbar::*;
 pub use select::*;
 pub use stats::*;

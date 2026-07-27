@@ -12,23 +12,17 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
+        // A plain (non-git) folder has no git actions at all — say so clearly and offer to
+        // initialise a repository, rather than showing an empty "nothing to commit" screen
+        // that looks broken (issue #66).
+        if !self.is_git {
+            return self.render_no_git(ui, cx);
+        }
         let commit_n = self.files.len();
         let push_n = self.sync.push_files.len();
         // Nothing to commit AND nothing to push → a single centered message.
         if commit_n == 0 && push_n == 0 {
-            return div()
-                .flex()
-                .flex_1()
-                .h_full()
-                .items_center()
-                .justify_center()
-                .bg(t.main_bg)
-                .rounded(px(theme::ISLAND_RADIUS))
-                .font_family(ui)
-                .text_size(px(theme::get().ui_font_size + 1.0))
-                .text_color(t.line_number)
-                .child("You have nothing to commit or push")
-                .into_any_element();
+            return ui::empty_state("You have nothing to commit or push", ui).into_any_element();
         }
 
         // Only tabs with content are shown; fall back to the available one if the selected
@@ -261,6 +255,9 @@ impl Kyde {
                     name_color,
                     Some(checked),
                     stats,
+                    false,
+                    None,
+                    None,
                     move |this, _e, _w, cx| {
                         if is_dir {
                             this.toggle_commit_dir(p_act.clone(), cx);
@@ -770,6 +767,69 @@ impl Kyde {
             self.diff.right.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
             });
+        }
+        cx.notify();
+    }
+
+    /// The Commit/Git view for a plain folder that is NOT a git repository (issue #66):
+    /// state plainly why there are no git actions, and offer to `git init` here.
+    pub(crate) fn render_no_git(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let init_btn = btn_primary("git-init", "Initialize Git Repository").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| this.do_git_init(cx)),
+        );
+        div()
+            .flex()
+            .flex_1()
+            .h_full()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .bg(t.main_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .font_family(ui)
+            .child(
+                svg()
+                    .path("icons/git-branch.svg")
+                    .size(px(40.0))
+                    .text_color(t.line_number),
+            )
+            .child(
+                div()
+                    .text_size(px(theme::get().ui_font_size + 3.0))
+                    .text_color(t.text)
+                    .child("Not a git repository"),
+            )
+            .child(
+                div()
+                    .max_w(px(360.0))
+                    .text_center()
+                    .text_size(px(theme::get().ui_font_size))
+                    .text_color(t.secondary_text)
+                    .child(
+                        "This folder isn’t tracked by git, so there’s nothing to commit, \
+                         push, or browse in history. Initialize a repository to start \
+                         versioning it.",
+                    ),
+            )
+            .child(init_btn)
+            .into_any_element()
+    }
+
+    /// `git init` the open project, then refresh so the full git UI comes to life.
+    pub(crate) fn do_git_init(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        match git::Repo::init(&root) {
+            Ok(_) => self.refresh(cx),
+            Err(e) => self.fail("Initializing repository", e),
         }
         cx.notify();
     }

@@ -182,6 +182,14 @@ impl Repo {
         Ok(Self { root })
     }
 
+    /// Initialise a new git repository at `path` (`git init`) and return it opened.
+    /// Errors if `path` isn't a directory or `git init` fails.
+    pub fn init(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        git(path, &["init"])?;
+        Self::discover(path)
+    }
+
     /// The repository's working-tree root.
     pub fn root(&self) -> &Path {
         &self.root
@@ -1101,6 +1109,23 @@ fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_turns_a_plain_dir_into_a_repo() {
+        let dir = std::env::temp_dir().join(format!("kyde-git-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Not a repo yet.
+        assert!(Repo::discover(&dir).is_err());
+        // init makes it one, rooted at the dir.
+        let repo = Repo::init(&dir).unwrap();
+        assert!(dir.join(".git").exists());
+        assert_eq!(
+            repo.root().canonicalize().unwrap(),
+            dir.canonicalize().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn push_rejected_matches_only_non_fast_forward() {

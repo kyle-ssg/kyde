@@ -7,6 +7,41 @@ use gpui::prelude::*;
 use gpui::{div, px, svg, Context, MouseButton, Pixels, SharedString, Window};
 use kyde_theme as theme;
 
+/// Drag payload for a tree row: the path being moved. Drop targets type-match on this, so
+/// an in-app row drag never collides with an OS file drop (`ExternalPaths`).
+#[derive(Clone)]
+pub struct DragPath(pub std::path::PathBuf);
+
+/// The little chip that follows the cursor while a tree row is dragged.
+pub struct DragPreview {
+    name: SharedString,
+}
+
+impl gpui::Render for DragPreview {
+    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        div()
+            .px_2()
+            .py_0p5()
+            .rounded_md()
+            .bg(t.bg_light)
+            .border_1()
+            .border_color(t.divider)
+            .text_color(t.text)
+            .text_size(px(theme::get().ui_font_size + 1.0))
+            .font_family(theme::font::UI_FAMILY)
+            .child(self.name.clone())
+    }
+}
+
+/// Boxed drop handler: `(view, dragged_source_path, cx)`. Passed to [`item`] on rows that
+/// accept a drop (directories); `None` means the row is not a drop target.
+pub type OnDrop<V> = Box<dyn Fn(&mut V, std::path::PathBuf, &mut Context<V>)>;
+
+/// Boxed handler for files dragged in from the OS file manager (Finder): `(view, paths,
+/// cx)`. `Some` on a row makes it a target for external-file drops with a highlight.
+pub type OnExtDrop<V> = Box<dyn Fn(&mut V, Vec<std::path::PathBuf>, &mut Context<V>)>;
+
 /// Render one file-tree row (chevron + icon + label) generic over the hosting view `V`.
 /// The caller supplies the row's data + click/right-click handlers; this owns the layout,
 /// indentation, and hover/selected styling so every tree in the app looks identical.
@@ -23,6 +58,12 @@ pub fn item<V: 'static>(
     name_color: kyde_color::Color,
     checkbox: Option<bool>,
     trailing: Option<gpui::AnyElement>,
+    // `draggable` makes the row a drag source (payload = its own `path`); `on_drop` = Some
+    // makes it a target for in-app row drags (issue #65); `on_ext_drop` = Some makes it a
+    // target for OS file-manager drops (issue #67). All default off.
+    draggable: bool,
+    on_drop: Option<OnDrop<V>>,
+    on_ext_drop: Option<OnExtDrop<V>>,
     on_activate: impl Fn(&mut V, &gpui::MouseDownEvent, &mut Window, &mut Context<V>) + 'static,
     on_check: impl Fn(&mut V, &mut Context<V>) + 'static,
     on_context: impl Fn(&mut V, gpui::Point<Pixels>, &mut Context<V>) + 'static,
@@ -108,7 +149,20 @@ pub fn item<V: 'static>(
         )
         .when_some(trailing, gpui::ParentElement::child);
 
-    div()
+    // A stable per-path id makes the row a stateful element (needed for drag), and a Copy
+    // color to tint the row while a compatible drag hovers it.
+    let row_id: gpui::ElementId =
+        SharedString::from(format!("tree-row::{}", path.to_string_lossy())).into();
+    let drop_hl = t.selected_bg;
+    let drag_name: SharedString = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .into();
+    let drag_src = path.to_path_buf();
+
+    let mut row = div()
+        .id(row_id)
         .flex()
         .flex_row()
         .items_center()
@@ -133,6 +187,30 @@ pub fn item<V: 'static>(
             cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
                 on_context(this, e.position, cx);
             }),
-        )
-        .into_any_element()
+        );
+
+    if draggable {
+        row = row.on_drag(DragPath(drag_src), move |_p, _off, _w, cx| {
+            cx.new(|_| DragPreview {
+                name: drag_name.clone(),
+            })
+        });
+    }
+    if let Some(handler) = on_drop {
+        row = row
+            .drag_over::<DragPath>(move |s, _drag, _w, _cx| s.bg(drop_hl))
+            .on_drop(cx.listener(move |this, dp: &DragPath, _w, cx| {
+                handler(this, dp.0.clone(), cx);
+            }));
+    }
+    if let Some(handler) = on_ext_drop {
+        row = row
+            .drag_over::<gpui::ExternalPaths>(move |s, _drag, _w, _cx| s.bg(drop_hl))
+            .on_drop(
+                cx.listener(move |this, paths: &gpui::ExternalPaths, _w, cx| {
+                    handler(this, paths.paths().to_vec(), cx);
+                }),
+            );
+    }
+    row.into_any_element()
 }

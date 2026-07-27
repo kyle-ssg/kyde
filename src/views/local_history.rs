@@ -38,6 +38,27 @@ pub(crate) fn lh_now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Every file (not directory) under `dir`, recursively — for recording a folder rename
+/// file-by-file in local history. Best-effort: unreadable subdirs are skipped.
+fn lh_walk_files(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 /// The local timezone's offset from UTC in minutes, read once per launch (`date +%z`
 /// — no chrono/libc dependency; a failure falls back to UTC).
 fn tz_offset_min() -> i32 {
@@ -310,6 +331,66 @@ impl Kyde {
                 let Ok(mut s) = store.lock() else { return };
                 for (rel, content) in contents {
                     let _ = s.record(&rel, &content, EventKind::Label, Some(label.clone()), now);
+                }
+            })
+            .detach();
+    }
+
+    /// Record a rename/move in local history (issue #67 QA): the OLD path gets a snapshot
+    /// then a deletion tombstone ("renamed away here"), and the NEW path a clearly `label`ed
+    /// snapshot ("arrived there") — so a rename reads unambiguously in the timeline. `to` is
+    /// already on disk (call AFTER the fs move). A directory is walked file-by-file (local
+    /// history is per-file); content-hash dedup keeps the later refresh scan from duplicating
+    /// these. No-op when disabled / the moved content is unreadable (e.g. binary).
+    pub(crate) fn lh_record_rename(
+        &mut self,
+        from: &std::path::Path,
+        to: &std::path::Path,
+        label: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.lh.cfg.enabled || self.lh.store.is_none() {
+            return;
+        }
+        let Some(store) = self.lh.store.clone() else {
+            return;
+        };
+        let Some(to_abs) = self.lh_abs(to) else {
+            return;
+        };
+        // (old_rel, new_rel, content) for every moved FILE (a dir expands to its files).
+        let mut pairs: Vec<(PathBuf, PathBuf, String)> = Vec::new();
+        if to_abs.is_dir() {
+            for abs in lh_walk_files(&to_abs) {
+                if let (Ok(rest), Ok(content)) =
+                    (abs.strip_prefix(&to_abs), std::fs::read_to_string(&abs))
+                {
+                    pairs.push((from.join(rest), to.join(rest), content));
+                }
+            }
+        } else if let Ok(content) = std::fs::read_to_string(&to_abs) {
+            pairs.push((from.to_path_buf(), to.to_path_buf(), content));
+        }
+        if pairs.is_empty() {
+            return;
+        }
+        let label = label.to_string();
+        cx.background_executor()
+            .spawn(async move {
+                let now = lh_now_ms();
+                let Ok(mut s) = store.lock() else { return };
+                for (old_rel, new_rel, content) in pairs {
+                    // Give the old path history (if it lacked any), then tombstone it.
+                    let _ = s.record(&old_rel, &content, EventKind::Change, None, now);
+                    let _ = s.record_deletion(&old_rel, now);
+                    // A clear, always-appended marker on the new path.
+                    let _ = s.record(
+                        &new_rel,
+                        &content,
+                        EventKind::Label,
+                        Some(label.clone()),
+                        now,
+                    );
                 }
             })
             .detach();
@@ -832,8 +913,6 @@ impl Kyde {
         &mut self,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
-        let t = theme::get();
         let cancel = btn_secondary("clear-lh-cancel", "Cancel").on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| {
@@ -852,29 +931,13 @@ impl Kyde {
                 || "this project".to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size + 1.0))
-            .child(div().text_color(t.text).child(SharedString::from(format!(
-                "Clear local history for “{project}”?"
-            ))))
-            .child(
-                div()
-                    .flex_1()
-                    .text_color(t.secondary_text)
-                    .text_size(px(theme::get().ui_font_size))
-                    .child(
-                        "Deletes every snapshot and timeline event Kyde has recorded for \
-                         this project. Git history is not touched. Can't be undone.",
-                    ),
-            )
-            .child(ui::modal_footer().child(cancel).child(confirm))
-            .into_any_element()
+        ui::confirm_body(
+            format!("Clear local history for “{project}”?"),
+            "Deletes every snapshot and timeline event Kyde has recorded for this project. \
+             Git history is not touched. Can't be undone.",
+        )
+        .child(ui::modal_footer().child(cancel).child(confirm))
+        .into_any_element()
     }
 
     /// The Local History window's context-menu items — `render_context_menu`'s match
@@ -1092,6 +1155,9 @@ impl Kyde {
                     selected,
                     name,
                     t.text,
+                    None,
+                    None,
+                    false,
                     None,
                     None,
                     move |this, _e, _w, cx| {

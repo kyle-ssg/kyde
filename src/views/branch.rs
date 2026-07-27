@@ -241,10 +241,12 @@ impl Kyde {
                     })
                     // Worktree chip only when the repo has linked worktrees (list = main +
                     // linked, so > 1) — zero chrome otherwise.
-                    .when(self.worktree.list.len() > 1, |d| {
+                    .when(self.is_git && self.worktree.list.len() > 1, |d| {
                         d.child(self.render_worktree_chip(cx))
                     })
-                    .child(chip),
+                    // The branch chip is a git action — hidden for a plain (non-git)
+                    // folder, where it would only show "(no branch)" (issue #66).
+                    .when(self.is_git, |d| d.child(chip)),
             )
             .into_any_element()
     }

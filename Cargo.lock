@@ -2970,14 +2970,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-color"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "kyde-config"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2985,21 +2985,21 @@ dependencies = [
 
 [[package]]
 name = "kyde-diff"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "similar",
 ]
 
 [[package]]
 name = "kyde-git"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "kyde-local-history"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3009,14 +3009,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-markdown"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "kyde-syntax"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "codebook-tree-sitter-latex",
  "kyde-color",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-theme"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "kyde-color",
  "serde",
@@ -3049,11 +3049,11 @@ dependencies = [
 
 [[package]]
 name = "kyde-tree"
-version = "2.3.0"
+version = "2.4.0"
 
 [[package]]
 name = "kyde-ui"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "gpui",
  "kyde-color",
@@ -3062,7 +3062,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-update"
-version = "2.3.0"
+version = "2.4.0"
 dependencies = [
  "serde_json",
  "thiserror 2.0.19",
