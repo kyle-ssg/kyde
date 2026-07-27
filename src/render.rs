@@ -782,7 +782,14 @@ impl Kyde {
                             .hover(|s| s.bg(t.selected_bg))
                             .child(slot)
                             .child(div().flex_1().child(label))
-                            .child(div().flex_none().text_color(t.line_number).child("›"))
+                            .child(
+                                div().flex_none().flex().items_center().child(
+                                    svg()
+                                        .path("icons/chevron-right.svg")
+                                        .size(px(14.0))
+                                        .text_color(t.line_number),
+                                ),
+                            )
                             // Hover opens it (stays until you pick an item / dismiss); click
                             // toggles.
                             .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {

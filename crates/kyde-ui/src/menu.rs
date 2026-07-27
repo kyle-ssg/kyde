@@ -4,10 +4,12 @@ use gpui::prelude::*;
 use gpui::{div, px, Div};
 use kyde_theme as theme;
 
-/// A subtle full-width separator between context-menu groups (a hairline in the divider
-/// colour with a little vertical breathing room). Chain nothing — just `.child(menu_divider())`.
+/// A subtle full-width separator between context-menu groups (a hairline with a little
+/// vertical breathing room). Uses `bg_light`, NOT `divider` — the menu panel itself is
+/// `bg_mid`, and `divider` is the same colour as `bg_mid`, so a `divider` line is invisible
+/// against it. Chain nothing — just `.child(menu_divider())`.
 pub fn menu_divider() -> Div {
-    div().h(px(1.0)).my_1().mx_2().bg(theme::get().divider)
+    div().h(px(1.0)).my_1().mx_2().bg(theme::get().bg_light)
 }
 
 /// Icon path for a context-menu row. Tolerates a leading "✓ " and trailing "…". `None` → no

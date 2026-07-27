@@ -2306,6 +2306,7 @@ impl gpui::AssetSource for Assets {
             "icons/scissors.svg" => include_bytes!("../assets/icons/scissors.svg"),
             "icons/copy.svg" => include_bytes!("../assets/icons/copy.svg"),
             "icons/clipboard.svg" => include_bytes!("../assets/icons/clipboard.svg"),
+            "icons/chevron-right.svg" => include_bytes!("../assets/icons/chevron-right.svg"),
             "icons/x.svg" => include_bytes!("../assets/icons/x.svg"),
             "icons/maximize-2.svg" => include_bytes!("../assets/icons/maximize-2.svg"),
             "icons/minimize-2.svg" => include_bytes!("../assets/icons/minimize-2.svg"),
