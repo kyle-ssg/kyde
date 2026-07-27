@@ -8,10 +8,19 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## [2.5.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.4.0...kyde-v2.5.0) (2026-07-27)
 
+All shipped together in [#69](https://github.com/kyle-ssg/kyde/pull/69) ([588e364](https://github.com/kyle-ssg/kyde/commit/588e364481bb7daf730e664583d26991122382a9)).
 
 ### Features
 
-* file-tree cut/copy/paste, drag & drop, folder rename, non-git guard ([#69](https://github.com/kyle-ssg/kyde/issues/69)) ([588e364](https://github.com/kyle-ssg/kyde/commit/588e364481bb7daf730e664583d26991122382a9))
+* Cut / Copy / Paste in the file tree — context menu + ⌘X/⌘C/⌘V, paste files copied in Finder, paste clipboard image data as an image file, and drag files in from Finder (target folder highlighted); grouped context menu with icons + dividers ([#67](https://github.com/kyle-ssg/kyde/issues/67))
+* Drag files/folders onto folders in the tree, with the target folder highlighted ([#65](https://github.com/kyle-ssg/kyde/issues/65))
+* Rename folders, not just files — repoints open tabs, selection and expansion across the moved subtree ([#68](https://github.com/kyle-ssg/kyde/issues/68))
+* Non-git projects hide git actions and explain why, with an "Initialize Git Repository" button ([#66](https://github.com/kyle-ssg/kyde/issues/66))
+
+
+### Refactor
+
+* Extract reusable modal / dialog / empty-state UI helpers, removing duplicated hand-rolled `div` chains ([#64](https://github.com/kyle-ssg/kyde/issues/64))
 
 ## [2.4.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.3.0...kyde-v2.4.0) (2026-07-25)
 
