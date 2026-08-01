@@ -48,7 +48,9 @@ use widgets::terminal;
 
 // ── small OS utilities ──
 mod platform;
-use platform::{clipboard as os_clipboard, instance, scratch, shellcmd};
+#[cfg(unix)]
+use platform::instance;
+use platform::{clipboard as os_clipboard, scratch, shellcmd};
 
 // ── workspace crates, aliased back to their old module names ──
 use kyde_config::keymap;
@@ -2912,7 +2914,9 @@ fn main() {
     // `kyde <path>` hands the path to the running Kyde (which opens it as another tab and
     // comes forward) and exits here, before any window is created. Nothing listening → we
     // are the instance, and take the socket over below.
+    #[cfg(unix)]
     let guarded = instance::enabled();
+    #[cfg(unix)]
     if guarded {
         let req = initial
             .clone()
@@ -3010,6 +3014,7 @@ fn main() {
         // touch gpui entities, so it only forwards over a channel to this foreground pump —
         // the terminal `EventProxy` / fs-watcher pattern. The guard lives in the task, so the
         // socket is unlinked when the app goes away.
+        #[cfg(unix)]
         if guarded {
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<instance::Request>();
             if let Some((guard, _thread)) = instance::listen(move |req| {

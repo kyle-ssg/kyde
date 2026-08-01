@@ -10,6 +10,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ### Bug Fixes
 
+* keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
 ## [2.5.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.4.0...kyde-v2.5.0) (2026-07-27)

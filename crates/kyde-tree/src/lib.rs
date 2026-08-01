@@ -121,18 +121,15 @@ mod tests {
         exp.insert(p("src"));
         exp.insert(p("empty"));
         let rows = t.visible(&exp);
-        let names: Vec<_> = rows
-            .iter()
-            .map(|r| (r.path.to_string_lossy().into_owned(), r.is_dir))
-            .collect();
+        let entries: Vec<_> = rows.iter().map(|r| (r.path.clone(), r.is_dir)).collect();
         assert_eq!(
-            names,
+            entries,
             vec![
-                ("empty".to_string(), true),
-                ("empty/nested".to_string(), true),
-                ("src".to_string(), true),
-                ("src/new".to_string(), true),
-                ("src/main.rs".to_string(), false),
+                (p("empty"), true),
+                (p("empty/nested"), true),
+                (p("src"), true),
+                (p("src/new"), true),
+                (p("src/main.rs"), false),
             ]
         );
     }
