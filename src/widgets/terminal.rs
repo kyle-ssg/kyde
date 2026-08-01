@@ -240,7 +240,7 @@ impl TerminalView {
         self.write(text.as_bytes().to_vec());
     }
 
-    /// Relay a key's raw bytes to the PTY from an action handler (backspace / escape): jump to
+    /// Relay a key's raw bytes to the PTY from an action handler (Enter / backspace / escape): jump to
     /// the live screen, write, repaint — the same steps `on_key` does for typed keys.
     fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.term.lock().scroll_display(Scroll::Bottom);
@@ -501,10 +501,13 @@ impl Render for TerminalView {
             // ⌘K clears the current (unsubmitted) input line — overrides the global commit
             // binding in this context.
             .on_action(cx.listener(|this, _: &crate::ClearTerminal, _w, cx| this.clear_input(cx)))
-            // Backspace / Escape are also app shortcuts (DeleteFile / EscapeKey). gpui dispatches
+            // Enter / Backspace / Escape are also app shortcuts. gpui dispatches
             // binding actions before on_key_down and consumes the key, so we relay the PTY byte
             // here rather than let it fall through to the app action (which deleted the selected
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
+            .on_action(cx.listener(|this, _: &crate::TerminalEnter, _w, cx| {
+                this.send_key(b"\r".to_vec(), cx);
+            }))
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
                 this.send_key(vec![0x7f], cx);
             }))

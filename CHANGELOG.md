@@ -10,6 +10,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ### Bug Fixes
 
+* relay Enter to the embedded terminal instead of consuming it as an app confirmation shortcut
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
