@@ -48,7 +48,9 @@ use widgets::terminal;
 
 // ── small OS utilities ──
 mod platform;
-use platform::{clipboard as os_clipboard, instance, scratch, shellcmd};
+#[cfg(unix)]
+use platform::instance;
+use platform::{clipboard as os_clipboard, scratch, shellcmd};
 
 // ── workspace crates, aliased back to their old module names ──
 use kyde_config::keymap;
@@ -102,6 +104,7 @@ actions!(
         NewTerminalTab,
         CloseTerminalTab,
         ClearTerminal,
+        TerminalEnter,
         TerminalBackspace,
         TerminalEscape,
         DeleteFile,
@@ -288,12 +291,13 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("cmd-w", CloseTerminalTab, Some("Terminal")),
         // ⌘K clears the terminal; "Terminal" context (depth) beats the "Kyde"-scoped commit.
         KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
-        // Bare backspace / escape are app shortcuts in "Kyde" (DeleteFile / EscapeKey). gpui
+        // Enter / backspace / escape are app shortcuts in "Kyde". gpui
         // dispatches binding ACTIONS *before* on_key_down and an action stops propagation by
         // default, so on_key_down never runs once a binding matches — meaning a no-op here would
         // swallow the key (nothing reaches the PTY). So these route to actions whose handlers
         // (on TerminalView) write the raw byte to the shell, exactly like the editor binds
         // backspace to its own buffer action. The "Terminal" context (depth) shadows "Kyde".
+        KeyBinding::new("enter", TerminalEnter, Some("Terminal")),
         KeyBinding::new("backspace", TerminalBackspace, Some("Terminal")),
         // ⌘⌫ is DeleteFile in "Kyde" (issue #61); in the terminal it must act as a plain
         // backspace, not delete the tree-selected file out from under a typing user.
@@ -2912,7 +2916,9 @@ fn main() {
     // `kyde <path>` hands the path to the running Kyde (which opens it as another tab and
     // comes forward) and exits here, before any window is created. Nothing listening → we
     // are the instance, and take the socket over below.
+    #[cfg(unix)]
     let guarded = instance::enabled();
+    #[cfg(unix)]
     if guarded {
         let req = initial
             .clone()
@@ -3010,6 +3016,7 @@ fn main() {
         // touch gpui entities, so it only forwards over a channel to this foreground pump —
         // the terminal `EventProxy` / fs-watcher pattern. The guard lives in the task, so the
         // socket is unlinked when the app goes away.
+        #[cfg(unix)]
         if guarded {
             let (tx, mut rx) = futures::channel::mpsc::unbounded::<instance::Request>();
             if let Some((guard, _thread)) = instance::listen(move |req| {
@@ -5237,6 +5244,49 @@ mod gpui_smoke_tests {
                 assert!(!k.term.panel.open, "closing the last tab hides the panel");
             })
             .unwrap();
+    }
+
+    /// Enter is also bound at the app root (`ConfirmKey`). The deeper Terminal binding must win
+    /// and relay CR to the PTY instead of letting the root action consume the key.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_enter_binding_sends_carriage_return(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let routed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _observer = cx.update(|cx| {
+            let routed = routed.clone();
+            cx.observe_keystrokes(move |event, _window, _cx| {
+                if event
+                    .action
+                    .as_ref()
+                    .is_some_and(|action| action.partial_eq(&TerminalEnter))
+                {
+                    routed.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            })
+        });
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, window, cx| k.focus_active_terminal(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, window, cx| {
+                let enter = gpui::Keystroke::parse("enter").expect("valid Enter keystroke");
+                window.dispatch_keystroke(enter, cx);
+                assert!(k.term.panel.open);
+            })
+            .unwrap();
+        assert!(
+            routed.load(std::sync::atomic::Ordering::Relaxed),
+            "TerminalEnter must shadow the root ConfirmKey binding"
+        );
     }
 
     /// The shell exiting (`^D` / `exit`) makes the IO thread emit `CloseRequested`; the Kyde

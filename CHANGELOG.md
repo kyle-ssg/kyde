@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 See [RELEASING.md](RELEASING.md) for how releases are cut.
 
+## Unreleased
+
+### Bug Fixes
+
+* relay Enter to the embedded terminal instead of consuming it as an app confirmation shortcut
+* keep Windows builds compiling when Unix-only single-instance IPC is unavailable
+* use the system command shell when opening the embedded terminal on Windows
+
 ## [2.5.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.4.0...kyde-v2.5.0) (2026-07-27)
 
 All shipped together in [#69](https://github.com/kyle-ssg/kyde/pull/69) ([588e364](https://github.com/kyle-ssg/kyde/commit/588e364481bb7daf730e664583d26991122382a9)).

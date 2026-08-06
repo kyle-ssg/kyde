@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
+
 /// Everything self-update can fail with. Each variant carries context — which external command
 /// failed and its stderr, or the I/O operation + underlying error. (Library crate → typed
 /// errors via `thiserror`, never `anyhow`.)
@@ -336,9 +338,7 @@ fn curl_security_args(url: &str) -> &'static [&'static str] {
 }
 
 /// Verify `file`'s SHA-256 against the checksum published at `sha256_url` (a text file whose
-/// first whitespace-separated token is the hex digest — `shasum -a 256` output). The local
-/// digest is computed by shelling to `shasum` (ships with macOS), matching this crate's
-/// no-extra-deps philosophy.
+/// first whitespace-separated token is the hex digest — `shasum -a 256` output).
 fn verify_checksum(file: &Path, sha256_url: &str) -> Result<()> {
     let body = curl_text(sha256_url)?;
     let expected = body
@@ -352,27 +352,29 @@ fn verify_checksum(file: &Path, sha256_url: &str) -> Result<()> {
             actual: String::new(),
         });
     }
-    let out = Command::new("shasum")
-        .args(["-a", "256"])
-        .arg(file)
-        .output()
-        .map_err(io_err("spawning shasum"))?;
-    if !out.status.success() {
-        return Err(UpdateError::Command {
-            action: "checksum".into(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        });
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let actual = stdout
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let actual = sha256_file(file)?;
     if actual != expected {
         return Err(UpdateError::ChecksumMismatch { expected, actual });
     }
     Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(io_err(format!("opening {path:?}")))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(io_err(format!("reading {path:?}")))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Download `zip_url`, verify it against `sha256_url`, unzip, and swap the new `Kyde.app`
@@ -609,18 +611,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let payload = dir.join("payload.bin");
         std::fs::write(&payload, b"hello update\n").unwrap();
-        // Compute the real digest the same way the verifier does (shasum ships on macOS
-        // and the Linux CI runners alike).
-        let out = Command::new("shasum")
-            .args(["-a", "256"])
-            .arg(&payload)
-            .output()
-            .expect("shasum available");
-        let digest = String::from_utf8_lossy(&out.stdout)
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_string();
+        let digest = "85ebff07175145475a29610a59842c3f0e9b74d72ce23b3c535bd01eeca62027";
         let good = dir.join("payload.bin.sha256");
         std::fs::write(&good, format!("{digest}  payload.bin\n")).unwrap();
         let good_url = format!("file://{}", good.display());

@@ -150,6 +150,7 @@ mod tests {
         (exe, bin)
     }
 
+    #[cfg(unix)]
     #[test]
     fn available_then_installed_roundtrip() {
         let (exe, bin) = setup();
@@ -177,6 +178,7 @@ mod tests {
         assert_eq!(state_in(&exe, &[bin]), State::NameTaken);
     }
 
+    #[cfg(unix)]
     #[test]
     fn our_symlink_elsewhere_on_path_counts_as_installed() {
         let (exe, bin) = setup();
