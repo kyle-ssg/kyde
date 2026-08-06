@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <title>Kyde — fast native Git client &amp; diff editor</title>
-  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. macOS, Linux and Windows.">
+  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. Prebuilt for macOS; builds from source on Linux and Windows.">
   <link rel="canonical" href="https://kyle-ssg.github.io/Kyde/">
 
   <!-- Open Graph / social card -->
@@ -149,13 +149,23 @@
       </div>
       <div class="card">
         <span class="ic">⎇</span>
-        <h3>Branches &amp; rollback</h3>
-        <p>Searchable branch switcher, commit, push, and a native rollback window with a checkbox tree of changes.</p>
+        <h3>Branches, merge &amp; rollback</h3>
+        <p>Searchable branch and worktree switchers, commit, push/pull/fetch, a 3-pane conflict resolver, and a native rollback window with a checkbox tree of changes.</p>
+      </div>
+      <div class="card">
+        <span class="ic">🕘</span>
+        <h3>Local history</h3>
+        <p>Per-file snapshots independent of git — a timeline, a before/after diff, and per-hunk or whole-file revert for anything you edited, deleted or rolled back.</p>
+      </div>
+      <div class="card">
+        <span class="ic">▮</span>
+        <h3>Built-in terminal</h3>
+        <p>A real PTY-backed multi-tab shell docked at the bottom, with full colour, selection and copy/paste. Your shell, your prompt.</p>
       </div>
       <div class="card">
         <span class="ic">🎨</span>
-        <h3>Familiar dark theme</h3>
-        <p>A hand-tuned dark palette that feels at home to anyone who's lived in a modern IDE. Configurable at runtime.</p>
+        <h3>Familiar themes</h3>
+        <p>Hand-tuned dark and light palettes that feel at home to anyone who's lived in a modern IDE, plus colour-vision-deficiency variants. Configurable at runtime.</p>
       </div>
       <div class="card">
         <span class="ic">⌨️</span>
@@ -168,14 +178,16 @@
   <section class="wrap">
     <h2>Install</h2>
     <div class="platforms">
-      <span class="pill">macOS</span>
-      <span class="pill">Linux</span>
-      <span class="pill">Windows</span>
+      <span class="pill">macOS — prebuilt</span>
+      <span class="pill">Linux — from source</span>
+      <span class="pill">Windows — from source</span>
     </div>
-    <pre><code># macOS — download kyde-macos.zip from Releases, then:
-xattr -dr com.apple.quarantine /Applications/Kyde.app
+    <pre><code># macOS — download from Releases and drag Kyde.app to /Applications:
+#   kyde-macos.zip          Apple Silicon
+#   kyde-macos-x86_64.zip   Intel
+# The build is Developer ID signed and notarized — no quarantine dance.
 
-# or build from source
+# or build from source (any platform)
 cargo build --release</code></pre>
   </section>
 

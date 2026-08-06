@@ -14,9 +14,12 @@ Kyde follows [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`.
    version from the commits since the last release.
 3. When you're ready to ship, **merge the release PR**. release-please then creates
    the `vX.Y.Z` git tag and the GitHub Release.
-4. In the same workflow run, the `build` job packages the three platform artifacts
-   (macOS `.app` zip, Linux AppImage, Windows `.exe` zip) and attaches them to the
-   release.
+4. In the same workflow run, the `build` job packages the macOS artifacts — an
+   Apple-Silicon `kyde-macos.zip` and an Intel `kyde-macos-x86_64.zip`, each with a
+   `.sha256` — Developer ID signs, notarizes and staples them (a no-op that leaves the
+   ad-hoc signature if the signing secrets aren't set), and attaches them to the release.
+   Linux and Windows packaging exists in `scripts/`, but its matrix entries and package
+   steps are **commented out** in `release.yml`; uncomment both to revive a platform.
 
 That's it. Cutting a release = merging one PR.
 
@@ -32,15 +35,16 @@ The commit messages on `main` decide the version bump:
 | `chore:`, `docs:`, `refactor:`, `test:`, `ci:` | none | housekeeping, no release |
 
 A breaking change is anything that breaks a config format (theme/keymap/plugins/
-projects JSON), the `ky` CLI, or removes a feature. While Kyde is `0.x` SemVer makes
-no compatibility promise; the practical convention is `0.MINOR` may break and
-`0.MINOR.PATCH` does not. Save `1.0.0` for when the config formats and the
-commit/diff workflow are stable enough to promise it.
+projects/history JSON), the `ky` CLI, or removes a feature. Kyde is past `1.0`, so a
+`feat!:` / `BREAKING CHANGE:` really does mean the next MAJOR — reach for it only when a
+config format or the `ky` CLI genuinely changes shape.
 
-The version lives in exactly one place release-please owns: `Cargo.toml` `version`
-(mirrored into the binary via `CARGO_PKG_VERSION`, the macOS Info.plist, and the
-Windows `.exe` metadata). The git tag always matches it — release-please guarantees
-the lockstep that used to be manual.
+release-please owns the version in two places, kept in lockstep: the root `Cargo.toml`
+`[package].version` (its `rust` strategy needs a literal string there) and
+`[workspace.package].version`, which the member crates inherit — the latter updated via
+the `extra-files` entry in `release-please-config.json`. The version is mirrored into the
+binary through `CARGO_PKG_VERSION`, the macOS `Info.plist`, and the Windows `.exe`
+metadata. The git tag always matches it.
 
 ## After a release
 
@@ -54,8 +58,9 @@ If you ever need to release without release-please (e.g. the action is down), no
 that pushing a tag by hand will **not** trigger the build — the `build` job in
 `release.yml` is gated on release-please's `release_created` output, and tags created
 with the default token don't fire it. So a manual release means doing the packaging
-yourself too: bump `Cargo.toml`, update `CHANGELOG.md`, push a `vX.Y.Z` tag and create
-the GitHub Release yourself, then run the `build` matrix locally (the bundle scripts:
-`scripts/bundle-macos.sh`, `scripts/bundle-linux.sh`, and a `cargo build --release` on
-Windows) and `gh release upload` each artifact. The automated path is strongly
-preferred.
+yourself too: bump both `version` fields in `Cargo.toml` (and `Cargo.lock`), update
+`CHANGELOG.md`, push a `vX.Y.Z` tag and create the GitHub Release yourself, then build
+the artifacts locally (`TARGET=aarch64-apple-darwin ./scripts/bundle-macos.sh`, then
+again for `x86_64-apple-darwin`, zipping each `dist/Kyde.app` as `kyde-macos.zip` /
+`kyde-macos-x86_64.zip`) and `gh release upload` each one. Locally built apps are
+ad-hoc-signed, not notarized. The automated path is strongly preferred.
