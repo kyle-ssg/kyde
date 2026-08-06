@@ -14,6 +14,14 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.6.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.5.0...kyde-v2.6.0) (2026-08-06)
+
+
+### Features
+
+* **changelog:** add a What's New window mirroring GitHub releases ([#74](https://github.com/kyle-ssg/kyde/issues/74)) ([f39bb3d](https://github.com/kyle-ssg/kyde/commit/f39bb3d96acb544b2d3749194c768dbcdfd3fa7e))
+* **instance:** restrict Kyde to one instance, opening later launches as tabs ([#75](https://github.com/kyle-ssg/kyde/issues/75)) ([8de700e](https://github.com/kyle-ssg/kyde/commit/8de700e8d75d373ef078ab10ed99e0a3388dd52d))
+
 ## [2.5.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.4.0...kyde-v2.5.0) (2026-07-27)
 
 All shipped together in [#69](https://github.com/kyle-ssg/kyde/pull/69) ([588e364](https://github.com/kyle-ssg/kyde/commit/588e364481bb7daf730e664583d26991122382a9)).
