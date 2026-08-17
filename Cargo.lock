@@ -57,7 +57,7 @@ version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bda177466b9524d59f1b12f0dd30b68696788e9992a7e959021c4a0ed96fcf59"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bitflags 2.13.0",
  "home",
  "libc",
@@ -524,6 +524,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "bindgen"
@@ -3023,14 +3029,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-color"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "kyde-config"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3038,21 +3044,21 @@ dependencies = [
 
 [[package]]
 name = "kyde-diff"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "similar",
 ]
 
 [[package]]
 name = "kyde-git"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "kyde-local-history"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3062,14 +3068,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-markdown"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "kyde-syntax"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "codebook-tree-sitter-latex",
  "kyde-color",
@@ -3093,7 +3099,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-theme"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "kyde-color",
  "serde",
@@ -3102,11 +3108,11 @@ dependencies = [
 
 [[package]]
 name = "kyde-tree"
-version = "2.5.0"
+version = "2.6.0"
 
 [[package]]
 name = "kyde-ui"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "gpui",
  "kyde-color",
@@ -3115,10 +3121,10 @@ dependencies = [
 
 [[package]]
 name = "kyde-update"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
 
@@ -6336,11 +6342,11 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "ureq"
-version = "3.3.0"
+version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
+checksum = "972d7902c8735f2695410b8aed7df6ed12a47394aa1c8d7af49f0497b731a94d"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "flate2",
  "log",
  "percent-encoding",
@@ -6353,11 +6359,11 @@ dependencies = [
 
 [[package]]
 name = "ureq-proto"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e994ba84b0bd1b1b0cf92878b7ef898a5c1760108fe7b6010327e274917a808c"
+checksum = "da5f78b09e6941e1a0f2e30e695e4b120377b54d5e0aec11b594bb57b3971613"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "http",
  "httparse",
  "log",
@@ -6382,7 +6388,7 @@ version = "0.45.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80be9b06fbae3b8b303400ab20778c80bbaf338f563afe567cf3c9eea17b47ef"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "data-url",
  "flate2",
  "fontdb 0.23.0",
@@ -7581,7 +7587,7 @@ version = "0.12.15-zed"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2d05756ff48539950c3282ad7acf3817ad3f08797c205ad1c34a2ce03b9970"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "encoding_rs",
  "futures-core",
