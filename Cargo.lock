@@ -3023,14 +3023,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-color"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "kyde-config"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3038,21 +3038,21 @@ dependencies = [
 
 [[package]]
 name = "kyde-diff"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "similar",
 ]
 
 [[package]]
 name = "kyde-git"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "thiserror 2.0.19",
 ]
 
 [[package]]
 name = "kyde-local-history"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3062,14 +3062,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-markdown"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "kyde-syntax"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "codebook-tree-sitter-latex",
  "kyde-color",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-theme"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "kyde-color",
  "serde",
@@ -3102,11 +3102,11 @@ dependencies = [
 
 [[package]]
 name = "kyde-tree"
-version = "2.5.0"
+version = "2.6.0"
 
 [[package]]
 name = "kyde-ui"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "gpui",
  "kyde-color",
@@ -3115,10 +3115,10 @@ dependencies = [
 
 [[package]]
 name = "kyde-update"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
 
@@ -5236,9 +5236,9 @@ dependencies = [
 
 [[package]]
 name = "similar"
-version = "3.1.1"
+version = "3.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6505efef05804732ed8a3f2d4f279429eb485bd69d5b0cc6b19cc02005cda16"
+checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
 dependencies = [
  "bstr",
  "unicode-segmentation",
