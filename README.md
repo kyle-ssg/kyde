@@ -62,10 +62,10 @@ by lightness instead of hue) — switch in Settings.
 * **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace.
 * **Editor tabs** that scroll and follow the active file.
 * **Image preview** for PNG/JPG/GIF/WebP/BMP/ICO/AVIF/TIFF.
-* **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
+* **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, Java, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
 * **Code folding** for grammar-backed languages.
 * **Error highlighting** — wavy red squiggles under parse errors, on by default for every installed pack, opt-out per pack.
-* **⌘-click navigation** — ⌘-click an import to open the file it points at, a symbol to jump to its definition (same file, or the file it was imported from). Rust, TypeScript/TSX, JavaScript, Python.
+* **⌘-click navigation** — ⌘-click an import to open the file it points at, a symbol to jump to its definition (same file, or the file it was imported from). Rust, TypeScript/TSX, JavaScript, Python, Java.
 * **Sort Lines** (`⌥⌘L`) and **Sort Object Keys** (`⌥⌘S`) — a line sort inside a JSON/JS/TS object delegates to the key sort, so entries move with their commas.
 * **Markdown preview** — a live rendered pane alongside the editor.
 

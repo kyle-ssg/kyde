@@ -78,6 +78,7 @@ pub fn file_badge(path: &std::path::Path) -> Badge {
         "toml" => Badge::Tag("tml", rgb(0x9C4221)),
         "py" | "pyi" => Badge::Tag("py", rgb(0x3572A5)),
         "go" => Badge::Tag("go", rgb(0x00ADD8)),
+        "java" => Badge::Tag("jv", rgb(0xE76F00)),
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "avif" | "tiff" | "tif"
         | "svg" => Badge::Icon("icons/image.svg", rgb(0xB180D7)),
         // Generic file (incl. no extension): IntelliJ-style plain-text lines icon.
