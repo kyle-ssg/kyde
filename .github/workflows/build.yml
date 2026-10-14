@@ -58,9 +58,10 @@ jobs:
 
       # --workspace lints all ten member crates (without it, only the `kyde` binary is linted
       # and the libs' `unwrap_used`/`expect_used` denies never run). --all-features also lints
-      # the #[cfg(feature)]-gated paths (grammars, terminal, remote-images).
+      # the #[cfg(feature)]-gated paths (grammars, terminal, remote-images). --locked fails on a
+      # stale Cargo.lock instead of silently rewriting it (e.g. a release bump that missed it).
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Test (includes perf_* regression guards)
         run: cargo test --all
