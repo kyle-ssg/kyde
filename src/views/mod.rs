@@ -25,6 +25,7 @@ mod settings;
 mod tabs;
 #[cfg(feature = "terminal")]
 mod terminal_panel;
+mod toolbar;
 mod worktree;
 
 pub(crate) use context_menu::MenuEntry;
