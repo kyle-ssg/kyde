@@ -374,7 +374,12 @@ fn sha256_file(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    let mut hex = String::with_capacity(64);
+    for b in hasher.finalize() {
+        // Infallible: writing hex digits into a String cannot fail.
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{b:02x}"));
+    }
+    Ok(hex)
 }
 
 /// Download `zip_url`, verify it against `sha256_url`, unzip, and swap the new `Kyde.app`
