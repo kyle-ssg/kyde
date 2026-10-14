@@ -3,10 +3,10 @@
 //! apply live via `theme::update` (font sizes, row height) / `choose_preset` (keymap).
 
 use crate::{
-    apply_keymap, btn_secondary, btn_secondary_state, div, key_parts, keymap, pretty_key, px, svg,
-    theme, ui, Context, FluentBuilder, InteractiveElement, IntoElement, Kyde, ModalKind,
-    MouseButton, ParentElement, Preset, SettingsSection, SharedString, StatefulInteractiveElement,
-    Styled,
+    apply_keymap, btn_primary, btn_secondary, btn_secondary_state, div, key_parts, keymap,
+    pretty_key, px, svg, theme, ui, Context, FluentBuilder, InteractiveElement, IntoElement, Kyde,
+    ModalKind, MouseButton, ParentElement, Preset, SettingsSection, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
 use gpui::FontWeight;
 
@@ -360,72 +360,96 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// Keymap section, laid out like the IDEs' shortcut editors: a preset dropdown with
-    /// "Reset to `WebStorm` / `IntelliJ` defaults" beside it, a search box, then a grouped
-    /// Action | Shortcut table. Click a row and press the new keys (⌫ clears, Esc cancels);
-    /// changed rows carry a "Custom" tag and a ↺ that resets just that action.
+    /// Keymap section, laid out like the IDEs' shortcut editors: which preset the shortcuts are
+    /// based on, confirmed "Reset to `WebStorm` / `IntelliJ`" / "Reset to VS Code" buttons, a
+    /// search box, then a grouped Action | Shortcut table. Click a row and press the new keys
+    /// (⌫ clears, Esc cancels); changed rows carry a "Custom" tag and a ↺ that resets just
+    /// that action.
     fn settings_keymap(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         let km = &self.keymap;
         let ed = &self.keymap_editor;
         let customised = km.overrides.len();
 
-        let presets = [Preset::WebStorm, Preset::VSCode];
-        let preset_select = ui::select(
-            cx,
-            "keymap-preset",
-            200.0,
-            &["WebStorm / IntelliJ", "VS Code"],
-            presets.iter().position(|&p| p == km.preset),
-            &ed.preset_select,
-            |k: &mut Kyde| &mut k.keymap_editor.preset_select,
-            |this, _cx| this.stop_key_recording(),
-            move |this, i, cx| {
-                if let Some(&p) = presets.get(i) {
-                    this.keymap_editor.note = None;
-                    this.choose_preset(p, cx);
-                }
-            },
-        );
-        let pristine = km.preset == Preset::WebStorm && customised == 0;
-        let reset_all = btn_secondary_state(
-            "keymap-reset-all",
-            "Reset to WebStorm / IntelliJ defaults",
-            pristine,
-        )
-        .py_1()
-        .when(!pristine, |b| {
-            b.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    this.stop_key_recording();
-                    this.keymap_editor.note = None;
-                    this.choose_preset(Preset::WebStorm, cx);
-                }),
-            )
-        });
-        let header = div()
+        // Which preset the shortcuts are based on — changed only through an explicit, confirmed
+        // "Reset to …" (a dropdown that silently swapped every shortcut was too easy to hit).
+        let base = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
+            .gap_1p5()
             .child(
                 div()
-                    .flex_none()
                     .text_color(t.secondary_text)
-                    .child("Preset"),
+                    .child("Shortcuts based on"),
             )
-            .child(preset_select)
-            .child(div().flex_1())
-            .child(reset_all);
-        let preset_hint = (customised > 0).then(|| {
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.text)
+                    .child(preset_name(km.preset)),
+            )
+            .when(customised > 0, |d| {
+                d.child(
+                    div()
+                        .text_color(t.line_number)
+                        .child(SharedString::from(format!("· {customised} custom"))),
+                )
+            });
+        let buttons = div()
+            .flex()
+            .flex_row()
+            .gap_2()
+            .child(self.preset_reset_btn(Preset::WebStorm, "keymap-reset-ws", cx))
+            .child(self.preset_reset_btn(Preset::VSCode, "keymap-reset-vsc", cx));
+        let confirm = ed.confirm.map(|target| {
+            let lost = if customised == 0 {
+                String::new()
+            } else {
+                format!(
+                    " Your {customised} custom shortcut{} will be lost.",
+                    if customised == 1 { "" } else { "s" }
+                )
+            };
             div()
-                .text_color(t.line_number)
-                .child(SharedString::from(format!(
-                    "{customised} custom shortcut{} — switching preset resets {}.",
-                    if customised == 1 { "" } else { "s" },
-                    if customised == 1 { "it" } else { "them" },
-                )))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(t.divider)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(t.text)
+                        .child(SharedString::from(format!(
+                            "Replace every shortcut with the {} defaults?{lost}",
+                            preset_name(target)
+                        ))),
+                )
+                .child(
+                    btn_secondary("keymap-reset-cancel", "Cancel")
+                        .py_1()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| {
+                                this.keymap_editor.confirm = None;
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(
+                    btn_primary("keymap-reset-confirm", "Reset")
+                        .py_1()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| this.confirm_preset_reset(cx)),
+                        ),
+                )
         });
 
         let search = div()
@@ -514,9 +538,19 @@ impl Kyde {
             .flex_col()
             .gap_3()
             .p_4()
+            .track_focus(&ed.focus)
+            .on_modifiers_changed(
+                cx.listener(|this, ev: &gpui::ModifiersChangedEvent, _w, cx| {
+                    if this.keymap_editor.recording.is_some() {
+                        this.keymap_editor.held = ev.modifiers;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(settings_heading("Keymap"))
-            .child(header)
-            .children(preset_hint)
+            .child(base)
+            .child(buttons)
+            .children(confirm)
             .child(search)
             .child(
                 div()
@@ -548,33 +582,20 @@ impl Kyde {
         let recording = self.keymap_editor.recording == Some(name);
         let custom = km.is_customised(name);
 
-        let shortcut: gpui::AnyElement = if recording {
+        let held = held_modifiers(self.keymap_editor.held);
+        let shortcut: gpui::AnyElement = if recording && held.is_empty() {
             div()
                 .text_color(t.primary)
                 .child("Press keys…")
                 .into_any_element()
-        } else if let Some(k) = km.key_for(name) {
-            div()
-                .flex()
-                .flex_row()
-                .gap_1()
-                .children(key_parts(&k).into_iter().map(|cap| {
-                    div()
-                        .min_w(px(22.0))
-                        .h(px(22.0))
-                        .px_1p5()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.0))
-                        .border_1()
-                        .border_color(t.divider)
-                        .bg(t.bg_mid)
-                        .text_size(px(t.ui_font_size - 1.0))
-                        .text_color(t.text)
-                        .child(SharedString::from(cap))
-                }))
+        } else if recording {
+            // The modifiers held so far, translucent until a key completes the shortcut.
+            key_caps(held.join("-").as_str())
+                .opacity(0.5)
+                .child(div().text_color(t.line_number).child("…"))
                 .into_any_element()
+        } else if let Some(k) = km.key_for(name) {
+            key_caps(&k).into_any_element()
         } else {
             div()
                 .text_color(t.line_number)
@@ -623,7 +644,7 @@ impl Kyde {
             .rounded_md()
             .cursor_pointer()
             .border_1()
-            .when(recording, |d| d.border_color(t.primary).bg(t.bg_mid))
+            .when(recording, |d| d.border_color(t.primary))
             .when(!recording, |d| {
                 d.border_color(gpui::transparent_black())
                     .hover(|d| d.bg(t.bg_mid))
@@ -658,17 +679,66 @@ impl Kyde {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _e, _w, cx| this.start_key_recording(name, cx)),
+                cx.listener(move |this, _e, window, cx| {
+                    this.start_key_recording(name, window, cx);
+                }),
             )
             .into_any_element()
+    }
+
+    /// A "Reset to <preset>" button — a no-op (disabled) when the shortcuts already are that
+    /// preset's untouched defaults; otherwise it asks for confirmation first.
+    fn preset_reset_btn(
+        &self,
+        target: Preset,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let noop = self.keymap.preset == target && self.keymap.overrides.is_empty();
+        btn_secondary_state(id, format!("Reset to {}", preset_name(target)), noop)
+            .py_1()
+            .when(!noop, |b| {
+                b.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| this.request_preset_reset(target, cx)),
+                )
+            })
+    }
+
+    /// Ask to replace every shortcut with `preset`'s defaults. Nothing changes until
+    /// [`Kyde::confirm_preset_reset`].
+    pub(crate) fn request_preset_reset(&mut self, preset: Preset, cx: &mut Context<Self>) {
+        self.stop_key_recording();
+        self.keymap_editor.note = None;
+        self.keymap_editor.confirm = Some(preset);
+        cx.notify();
+    }
+
+    /// Apply the reset [`Kyde::request_preset_reset`] asked for.
+    pub(crate) fn confirm_preset_reset(&mut self, cx: &mut Context<Self>) {
+        if let Some(preset) = self.keymap_editor.confirm.take() {
+            self.choose_preset(preset, cx);
+            self.keymap_editor.note = Some(format!(
+                "Shortcuts reset to the {} defaults.",
+                preset_name(preset)
+            ));
+        }
     }
 
     /// Start recording `name`'s new shortcut: the next keystroke in the Settings window is
     /// captured before any binding can fire. A keystroke in another window cancels instead
     /// (and goes through), so a forgotten recording never swallows keys elsewhere.
-    pub(crate) fn start_key_recording(&mut self, name: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn start_key_recording(
+        &mut self,
+        name: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.keymap_editor.note = None;
         self.keymap_editor.recording = Some(name);
+        // Focus the section so modifier presses reach its listener (the live preview).
+        window.focus(&self.keymap_editor.focus);
+        self.keymap_editor.held = window.modifiers();
         let settings = self.settings_win.map(|h| h.window_id());
         let kyde = cx.entity().downgrade();
         self.keymap_editor.intercept = Some(cx.intercept_keystrokes(move |ev, window, cx| {
@@ -715,18 +785,9 @@ impl Kyde {
                 return;
             }
             _ => {
-                let mut combo = String::new();
-                for (on, m) in [
-                    (m.platform, "cmd-"),
-                    (m.control, "ctrl-"),
-                    (m.alt, "alt-"),
-                    (m.shift, "shift-"),
-                ] {
-                    if on {
-                        combo.push_str(m);
-                    }
-                }
-                combo.push_str(key);
+                let mut combo = held_modifiers(*m);
+                combo.push(key);
+                let combo = combo.join("-");
                 let freed = self.keymap.rebind(name, &combo);
                 self.keymap_editor.note = moved_note(&combo, &freed);
                 self.persist_keymap(cx);
@@ -740,6 +801,7 @@ impl Kyde {
     pub(crate) fn stop_key_recording(&mut self) {
         self.keymap_editor.recording = None;
         self.keymap_editor.intercept = None;
+        self.keymap_editor.held = gpui::Modifiers::default();
     }
 
     /// Save the keymap and re-bind every shortcut live.
@@ -748,6 +810,54 @@ impl Kyde {
         apply_keymap(cx, &self.keymap);
         cx.notify();
     }
+}
+
+/// A preset's display name.
+fn preset_name(p: Preset) -> &'static str {
+    match p {
+        Preset::VSCode => "VS Code",
+        // Custom keeps WebStorm defaults for anything it doesn't override.
+        Preset::WebStorm | Preset::Custom => "WebStorm / IntelliJ",
+    }
+}
+
+/// A shortcut as a row of key caps, one per key ("cmd-shift-o" → ⌘ ⇧ O).
+fn key_caps(key: &str) -> gpui::Div {
+    let t = theme::get();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .children(key_parts(key).into_iter().map(|cap| {
+            div()
+                .min_w(px(22.0))
+                .h(px(22.0))
+                .px_1p5()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .border_1()
+                .border_color(t.divider)
+                .bg(t.bg_light)
+                .text_size(px(t.ui_font_size - 1.0))
+                .text_color(t.text)
+                .child(SharedString::from(cap))
+        }))
+}
+
+/// The held modifiers as keymap tokens, in canonical order (`["cmd", "shift"]`).
+fn held_modifiers(m: gpui::Modifiers) -> Vec<&'static str> {
+    [
+        (m.platform, "cmd"),
+        (m.control, "ctrl"),
+        (m.alt, "alt"),
+        (m.shift, "shift"),
+    ]
+    .into_iter()
+    .filter_map(|(on, tok)| on.then_some(tok))
+    .collect()
 }
 
 /// Width of the table's Shortcut column (key caps + the ↺ slot).

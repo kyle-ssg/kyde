@@ -767,8 +767,13 @@ struct KeymapEditor {
     note: Option<String>,
     /// Filters the shortcut table by action name or keystroke.
     query: Entity<CodeEditor>,
-    /// The preset dropdown.
-    preset_select: ui::SelectState,
+    /// A "Reset to <preset>" waiting for confirmation — nothing changes until it's confirmed.
+    confirm: Option<Preset>,
+    /// Focused while recording, so modifier presses reach the section's listener.
+    focus: FocusHandle,
+    /// Modifiers held right now while recording — previewed (translucent) in the row as the
+    /// shortcut is built, IDE-style.
+    held: gpui::Modifiers,
 }
 
 impl KeymapEditor {
@@ -786,7 +791,9 @@ impl KeymapEditor {
             intercept: None,
             note: None,
             query,
-            preset_select: ui::SelectState::new(cx),
+            confirm: None,
+            focus: cx.focus_handle(),
+            held: gpui::Modifiers::default(),
         }
     }
 }
@@ -4573,14 +4580,14 @@ mod gpui_smoke_tests {
 
     /// Settings → Keymap: recording a shortcut rebinds the action (taking the key from the
     /// action that had it, with a note saying so), a bare key is refused with recording left
-    /// on, and "Reset to `WebStorm` / `IntelliJ` defaults" puts every default back.
+    /// on, and a confirmed "Reset to `WebStorm` / `IntelliJ`" puts every default back.
     #[gpui::test]
     fn keymap_editor_records_rebinds_and_resets(cx: &mut TestAppContext) {
         let (handle, _dir) = boot(cx);
         handle
-            .update(cx, |k, _w, cx| {
+            .update(cx, |k, w, cx| {
                 k.choose_preset(Preset::WebStorm, cx);
-                k.start_key_recording("push", cx);
+                k.start_key_recording("push", w, cx);
                 k.record_keystroke(&gpui::Keystroke::parse("cmd-shift-o").unwrap(), cx);
                 assert_eq!(k.keymap.key_for("push").as_deref(), Some("cmd-shift-o"));
                 assert_eq!(k.keymap.key_for("go_to_file"), None);
@@ -4590,13 +4597,19 @@ mod gpui_smoke_tests {
                 );
                 assert_eq!(k.keymap_editor.recording, None);
 
-                k.start_key_recording("pull", cx);
+                k.start_key_recording("pull", w, cx);
                 k.record_keystroke(&gpui::Keystroke::parse("p").unwrap(), cx);
                 assert_eq!(k.keymap_editor.recording, Some("pull"), "bare key refused");
                 assert_eq!(k.keymap.key_for("pull").as_deref(), Some("cmd-t"));
 
                 k.stop_key_recording();
-                k.choose_preset(Preset::WebStorm, cx);
+                k.request_preset_reset(Preset::WebStorm, cx);
+                assert_eq!(
+                    k.keymap.key_for("push").as_deref(),
+                    Some("cmd-shift-o"),
+                    "nothing changes until the reset is confirmed"
+                );
+                k.confirm_preset_reset(cx);
                 assert_eq!(
                     k.keymap.key_for("go_to_file").as_deref(),
                     Some("cmd-shift-o")
