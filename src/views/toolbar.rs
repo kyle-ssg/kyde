@@ -53,7 +53,11 @@ impl Kyde {
                 tool_btn(
                     "tb-pull",
                     "icons/arrow-down.svg",
-                    busy_tip(sync.pulling, "Pulling", "Pull (rebase)".into()),
+                    busy_tip(
+                        sync.pulling,
+                        "Pulling",
+                        format!("Pull (rebase){}", shortcut("pull")),
+                    ),
                     sync.pulling,
                     behind,
                 )
@@ -79,7 +83,11 @@ impl Kyde {
                 tool_btn(
                     "tb-push",
                     "icons/arrow-up.svg",
-                    busy_tip(sync.pushing, "Pushing", "Push…".into()),
+                    busy_tip(
+                        sync.pushing,
+                        "Pushing",
+                        format!("Push…{}", shortcut("push")),
+                    ),
                     sync.pushing,
                     ahead,
                 )
@@ -102,6 +110,20 @@ impl Kyde {
                 ),
             );
         Some(row.into_any_element())
+    }
+
+    /// ⌘⇧K (`WebStorm` preset): the push confirmation, same as the toolbar's Push button.
+    pub(crate) fn act_push(&mut self, _: &GitPush, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_git {
+            self.open_push_modal(cx);
+        }
+    }
+
+    /// ⌘T (`WebStorm` preset, `IntelliJ`'s Update Project): pull, same as the toolbar's Pull.
+    pub(crate) fn act_pull(&mut self, _: &GitPull, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_git {
+            self.do_pull(cx);
+        }
     }
 }
 

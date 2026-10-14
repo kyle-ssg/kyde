@@ -89,6 +89,20 @@ pub const ACTIONS: &[ActionDef] = &[
         vscode: "cmd-alt-right",
         label: "Forward (next file)",
     },
+    // Git: `IntelliJ`'s Push (⌘⇧K) and Update Project (⌘T). `VSCode` ships no default keys for
+    // either, so that preset leaves them unbound (bindable via `keymap.json` overrides).
+    ActionDef {
+        name: "push",
+        webstorm: "cmd-shift-k",
+        vscode: "",
+        label: "Push…",
+    },
+    ActionDef {
+        name: "pull",
+        webstorm: "cmd-t",
+        vscode: "",
+        label: "Pull (Update Project)",
+    },
 ];
 
 /// A configurable action: its stable name, the default keystroke under each preset, and a
@@ -98,7 +112,7 @@ pub struct ActionDef {
     pub name: &'static str,
     /// Default keystroke under the `WebStorm`/`IntelliJ` preset.
     pub webstorm: &'static str,
-    /// Default keystroke under the `VSCode` preset.
+    /// Default keystroke under the `VSCode` preset (`""` = unbound by default).
     pub vscode: &'static str,
     /// Human-readable label shown in Settings.
     pub label: &'static str,
@@ -147,7 +161,8 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// Preset default keystroke for a named action.
+    /// Preset default keystroke for a named action — `None` when the preset leaves it
+    /// unbound.
     pub fn preset_key(&self, name: &str) -> Option<&'static str> {
         ACTIONS
             .iter()
@@ -156,6 +171,7 @@ impl Keymap {
                 Preset::VSCode => a.vscode,
                 _ => a.webstorm, // Custom falls back to WebStorm defaults for unset actions
             })
+            .filter(|k| !k.is_empty())
     }
 
     /// Effective keystroke for a named action (override wins over preset).
@@ -205,6 +221,19 @@ mod tests {
         assert_eq!(km.key_for("go_to_file").as_deref(), Some("cmd-shift-o"));
         km.set_preset(Preset::VSCode);
         assert_eq!(km.key_for("go_to_file").as_deref(), Some("cmd-p"));
+    }
+
+    /// Push / Pull follow the preset: `IntelliJ` keys under `WebStorm`, unbound (not an empty
+    /// keystroke) under `VSCode` until the user binds one.
+    #[test]
+    fn git_actions_follow_the_preset() {
+        let mut km = Keymap::default();
+        assert_eq!(km.key_for("push").as_deref(), Some("cmd-shift-k"));
+        assert_eq!(km.key_for("pull").as_deref(), Some("cmd-t"));
+        km.set_preset(Preset::VSCode);
+        assert_eq!(km.key_for("push"), None);
+        km.overrides.insert("push".into(), "cmd-alt-p".into());
+        assert_eq!(km.key_for("push").as_deref(), Some("cmd-alt-p"));
     }
 
     #[test]

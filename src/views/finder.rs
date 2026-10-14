@@ -518,6 +518,10 @@ impl Kyde {
             PaletteAction::FindInFiles => self.open_finder(FinderMode::Content, window, cx),
             PaletteAction::NewScratch => self.open_finder(FinderMode::Scratch, window, cx),
             PaletteAction::CommitView => self.enter_commit(cx),
+            PaletteAction::Push => self.act_push(&GitPush, window, cx),
+            PaletteAction::Pull => self.act_pull(&GitPull, window, cx),
+            PaletteAction::Fetch if self.is_git => self.do_fetch(cx),
+            PaletteAction::Fetch => {}
             // The log with the keyboard in its commit list (↑↓ walk, → into the files).
             PaletteAction::HistoryView => {
                 self.switch_mode(Mode::History, cx);

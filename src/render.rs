@@ -299,6 +299,8 @@ impl Render for Kyde {
                 }
             })
             .on_action(cx.listener(Self::act_go_to_file))
+            .on_action(cx.listener(Self::act_push))
+            .on_action(cx.listener(Self::act_pull))
             .on_action(cx.listener(Self::act_find_in_files))
             .on_action(cx.listener(Self::act_actions))
             .on_action(cx.listener(Self::act_new_scratch))

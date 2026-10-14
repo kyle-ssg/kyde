@@ -15,13 +15,17 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let preset_card = |preset: Preset, cx: &mut Context<Self>| {
             let selected = self.onboarding.choice == preset;
+            // Only the actions this preset binds (VSCode leaves Push / Pull unbound).
             let sample: Vec<gpui::AnyElement> = keymap::ACTIONS
                 .iter()
-                .map(|a| {
+                .filter_map(|a| {
                     let key = match preset {
                         Preset::VSCode => a.vscode,
                         _ => a.webstorm,
                     };
+                    (!key.is_empty()).then_some((a, key))
+                })
+                .map(|(a, key)| {
                     div()
                         .flex()
                         .flex_row()
