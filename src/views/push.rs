@@ -2,10 +2,10 @@
 //! Crate-root child module.
 
 use crate::{
-    badge_inner, btn_primary_state, btn_secondary, div, file_badge, px, status_color, theme, ui,
-    Context, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde, MenuTarget,
-    ModalKind, Mode, MouseButton, ParentElement, Repo, SharedString, StatefulInteractiveElement,
-    Styled,
+    badge_inner, btn_primary_state, btn_secondary, div, file_badge, nav_keys, px, status_color,
+    theme, ui, Context, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde,
+    MenuTarget, ModalKind, Mode, MouseButton, NavTarget, ParentElement, Repo, SharedString,
+    StatefulInteractiveElement, Styled,
 };
 
 impl Kyde {
@@ -62,7 +62,10 @@ impl Kyde {
                     })
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.select_push_file(i, cx)),
+                        cx.listener(move |this, _e, window, cx| {
+                            window.focus(&this.commit.push_focus);
+                            this.select_push_file(i, cx);
+                        }),
                     )
                     .into_any_element()
             })
@@ -78,15 +81,21 @@ impl Kyde {
             } else {
                 format!("{n} file{} to push", if n == 1 { "" } else { "s" })
             }));
-        let list = div()
-            .id("push-list")
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .py_1()
-            .children(rows);
+        let list = nav_keys(
+            div()
+                .id("push-list")
+                .track_focus(&self.commit.push_focus)
+                .key_context("NavList NavTree"),
+            NavTarget::PushList,
+            cx,
+        )
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .py_1()
+        .children(rows);
         let list_island = div()
             .flex()
             .flex_col()

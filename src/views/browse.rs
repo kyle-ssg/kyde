@@ -8,7 +8,7 @@ impl Kyde {
     /// the root is open), then a virtual "Scratches" folder + its files at the bottom.
     /// Depths are offset by one so everything nests under the root row. The "Scratches"
     /// sentinel path can't collide with a real file.
-    fn browse_visible_rows(&self) -> Vec<tree::Row> {
+    pub(crate) fn browse_visible_rows(&self) -> Vec<tree::Row> {
         let mut visible = vec![tree::Row {
             path: PathBuf::new(),
             is_dir: true,
@@ -436,10 +436,9 @@ impl Kyde {
                         // click opens a permanent tab.
                         this.browse.multi_selected.clear();
                         this.browse.selected_path = Some(p_act.clone());
-                        // Focus the app root so the "Kyde"-context Backspace (delete) binding
-                        // is live on the selected row. (open_file/preview_file re-focus the
-                        // editor below, which is what we want there.)
-                        window.focus(&this.focus_handle);
+                        // Focus the tree: the arrow keys walk it, and the "Kyde"-context
+                        // Backspace (delete) / ⌘C / ⌘V bindings act on the selected row.
+                        window.focus(&this.browse.tree_focus);
                         if is_dir {
                             this.toggle_dir(p_act.clone(), cx);
                         } else if e.click_count >= 2 {
@@ -484,46 +483,53 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let tree = div()
-            .id("browse-tree-pane")
-            .flex()
-            .flex_col()
-            .relative()
-            .w(px(self.browse.tree_width))
-            .flex_none()
-            .h_full()
-            .py_1()
-            .bg(t.panel_bg)
-            .rounded(px(theme::ISLAND_RADIUS))
-            .text_color(t.text)
-            .font_family(ui)
-            // A touch larger than the editor/code size for readability.
-            .text_size(px(theme::get().ui_font_size + 3.0))
-            // Catch-all for Finder files dropped on the tree's EMPTY area (below the rows):
-            // they go to the repo root. Drops onto a row are handled per-row (with that
-            // row highlighted) — see `on_ext_drop` above (issue #67). No pane-wide tint here,
-            // so the highlight only ever marks the specific target folder.
-            .on_drop(cx.listener(|this, ep: &gpui::ExternalPaths, _w, cx| {
-                this.drop_external_paths(ep.paths().to_vec(), PathBuf::new(), cx);
-            }))
-            .child({
-                let rows_pane = div()
-                    .id("browse-tree")
-                    .overflow_y_scroll()
-                    .track_scroll(&self.browse.tree_scroll)
-                    .flex()
-                    .flex_col()
-                    .children(rows);
-                self.with_scrollbars(
-                    rows_pane,
-                    self.browse.tree_scroll.clone(),
-                    self.browse.tree_width,
-                    SbView::Tree,
-                    window,
-                    cx,
-                )
-            })
-            .child(tree_minimize);
+        // Keyboard: arrows walk + fold, ⏎ opens, space previews, ⇧F10 menu (issue #81).
+        let tree = nav_keys(
+            div()
+                .id("browse-tree-pane")
+                .track_focus(&self.browse.tree_focus)
+                .key_context("NavList NavTree"),
+            NavTarget::BrowseTree,
+            cx,
+        )
+        .flex()
+        .flex_col()
+        .relative()
+        .w(px(self.browse.tree_width))
+        .flex_none()
+        .h_full()
+        .py_1()
+        .bg(t.panel_bg)
+        .rounded(px(theme::ISLAND_RADIUS))
+        .text_color(t.text)
+        .font_family(ui)
+        // A touch larger than the editor/code size for readability.
+        .text_size(px(theme::get().ui_font_size + 3.0))
+        // Catch-all for Finder files dropped on the tree's EMPTY area (below the rows):
+        // they go to the repo root. Drops onto a row are handled per-row (with that
+        // row highlighted) — see `on_ext_drop` above (issue #67). No pane-wide tint here,
+        // so the highlight only ever marks the specific target folder.
+        .on_drop(cx.listener(|this, ep: &gpui::ExternalPaths, _w, cx| {
+            this.drop_external_paths(ep.paths().to_vec(), PathBuf::new(), cx);
+        }))
+        .child({
+            let rows_pane = div()
+                .id("browse-tree")
+                .overflow_y_scroll()
+                .track_scroll(&self.browse.tree_scroll)
+                .flex()
+                .flex_col()
+                .children(rows);
+            self.with_scrollbars(
+                rows_pane,
+                self.browse.tree_scroll.clone(),
+                self.browse.tree_width,
+                SbView::Tree,
+                window,
+                cx,
+            )
+        })
+        .child(tree_minimize);
         // Collapsed: a thin strip with an expand button where the tree was.
         let collapsed_strip = div()
             .flex_none()
@@ -826,32 +832,11 @@ impl Kyde {
             self.browse.expanded.insert(anc.to_path_buf());
         }
         self.browse.selected_path = Some(target.clone());
-        // Find the target's index in the same flattened order render_browse uses
-        // (root row, then tree rows, then scratches) and scroll it into view.
-        let mut idx = if target.as_os_str().is_empty() {
-            Some(0)
-        } else {
-            None
-        };
-        if idx.is_none() {
-            let mut i = 1usize;
-            for r in self.browse.tree.visible(&self.browse.expanded) {
-                if r.path == target {
-                    idx = Some(i);
-                    break;
-                }
-                i += 1;
-            }
-            if idx.is_none() {
-                for s in &self.browse.scratches {
-                    if *s == target {
-                        idx = Some(i);
-                        break;
-                    }
-                    i += 1;
-                }
-            }
-        }
+        // Scroll its row (same flattened order render_browse uses) into view.
+        let idx = self
+            .browse_visible_rows()
+            .iter()
+            .position(|r| r.path == target);
         if let Some(i) = idx {
             self.browse.tree_scroll.scroll_to_item(i);
         }

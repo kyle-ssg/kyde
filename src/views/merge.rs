@@ -168,8 +168,8 @@ impl Kyde {
         self.merge.selected = Some(idx);
         self.merge.list_sel = Some(idx);
         self.merge.compare = MergeCompare::MergeView3;
-        self.merge.compare_open = false;
-        self.merge.ws_open = false;
+        self.merge.compare_sel.close();
+        self.merge.ws_sel.close();
         let lang = self.effective_lang(&entry.path);
         let (ours_text, theirs_text) =
             (self.merge.ours_text.clone(), self.merge.theirs_text.clone());
@@ -304,7 +304,7 @@ impl Kyde {
     /// Switch the whitespace comparison mode and recompute the open file's model under
     /// it (chunk boundaries change, so per-chunk decisions reset).
     pub(crate) fn merge_set_ws(&mut self, ws: WhitespaceMode, cx: &mut Context<Self>) {
-        self.merge.ws_open = false;
+        self.merge.ws_sel.close();
         if self.merge.ws == ws {
             cx.notify();
             return;
@@ -325,7 +325,7 @@ impl Kyde {
     /// (Left/Right and Middle — the live merge panes + their apply gutter, just without
     /// the third pane), or a read-only comparison pair (Base pairs, Left and Right).
     pub(crate) fn merge_set_compare(&mut self, mode: MergeCompare, cx: &mut Context<Self>) {
-        self.merge.compare_open = false;
+        self.merge.compare_sel.close();
         self.merge.compare = mode;
         // Only the read-only pairs need the separate compare editors loaded; the Middle
         // pairs reuse the live 3-pane editors (already loaded + decorated).
@@ -1269,7 +1269,7 @@ impl Kyde {
         // overlay painted above the panes (a hand-rolled absolute panel was clipped by
         // the later-painted pane siblings).
         let cmp_labels: Vec<&'static str> = MergeCompare::ALL.iter().map(|(_, l)| *l).collect();
-        let cmp_sel = MergeCompare::ALL
+        let cmp_idx = MergeCompare::ALL
             .iter()
             .position(|(m, _)| *m == self.merge.compare);
         let cmp_select = ui::select(
@@ -1277,13 +1277,10 @@ impl Kyde {
             "merge-compare-select",
             180.0,
             &cmp_labels,
-            cmp_sel,
-            self.merge.compare_open,
-            |this, cx| {
-                this.merge.compare_open = !this.merge.compare_open;
-                this.merge.ws_open = false;
-                cx.notify();
-            },
+            cmp_idx,
+            &self.merge.compare_sel,
+            |k: &mut Kyde| &mut k.merge.compare_sel,
+            |this, _cx| this.merge.ws_sel.close(),
             |this, i, cx| {
                 if let Some((mode, _)) = MergeCompare::ALL.get(i) {
                     this.merge_set_compare(*mode, cx);
@@ -1298,19 +1295,16 @@ impl Kyde {
             (WhitespaceMode::IgnoreAll, "Ignore whitespaces"),
         ];
         let ws_labels: Vec<&'static str> = WS.iter().map(|(_, l)| *l).collect();
-        let ws_sel = WS.iter().position(|(m, _)| *m == self.merge.ws);
+        let ws_idx = WS.iter().position(|(m, _)| *m == self.merge.ws);
         let ws_select = ui::select(
             cx,
             "merge-ws-select",
             230.0,
             &ws_labels,
-            ws_sel,
-            self.merge.ws_open,
-            |this, cx| {
-                this.merge.ws_open = !this.merge.ws_open;
-                this.merge.compare_open = false;
-                cx.notify();
-            },
+            ws_idx,
+            &self.merge.ws_sel,
+            |k: &mut Kyde| &mut k.merge.ws_sel,
+            |this, _cx| this.merge.compare_sel.close(),
             |this, i, cx| {
                 if let Some((mode, _)) = WS.get(i) {
                     this.merge_set_ws(*mode, cx);

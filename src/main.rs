@@ -36,6 +36,7 @@ pub(crate) use kyde_ui::{
 
 // ── per-feature views (impl Kyde blocks; see src/views/) ──
 mod views;
+pub(crate) use views::{nav_keys, MenuEntry, NavTarget};
 
 // ── gpui-coupled widgets; re-aliased so `editor::`/`mdview::`/… paths stay unchanged ──
 mod widgets;
@@ -114,6 +115,18 @@ actions!(
         CopyFiles,
         CutFiles,
         PasteFiles
+    ]
+);
+// Context-menu keyboard navigation (fixed keys, context "ContextMenu" — the open panel).
+actions!(
+    kyde_menu_nav,
+    [
+        MenuUp,
+        MenuDown,
+        MenuLeft,
+        MenuRight,
+        MenuConfirm,
+        MenuDismiss
     ]
 );
 // File-finder navigation (fixed keys, context "FileFinder").
@@ -226,11 +239,20 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.clear_key_bindings();
     editor::bind_keys(cx);
     mdview::bind_keys(cx);
+    // Lists, trees + popup lists: ↑↓←→ ⏎ space ⇧F10 ⎋ (issue #81).
+    ui::nav::bind_nav_keys(cx);
     cx.bind_keys([
         KeyBinding::new("up", FinderUp, Some("FileFinder")),
         KeyBinding::new("down", FinderDown, Some("FileFinder")),
         KeyBinding::new("enter", FinderConfirm, Some("FileFinder")),
         KeyBinding::new("escape", FinderClose, Some("FileFinder")),
+        KeyBinding::new("up", MenuUp, Some("ContextMenu")),
+        KeyBinding::new("down", MenuDown, Some("ContextMenu")),
+        KeyBinding::new("left", MenuLeft, Some("ContextMenu")),
+        KeyBinding::new("right", MenuRight, Some("ContextMenu")),
+        KeyBinding::new("enter", MenuConfirm, Some("ContextMenu")),
+        KeyBinding::new("space", MenuConfirm, Some("ContextMenu")),
+        KeyBinding::new("escape", MenuDismiss, Some("ContextMenu")),
     ]);
     bind_app(cx, km, "go_to_file", GoToFile);
     bind_app(cx, km, "find_in_files", FindInFiles);
@@ -428,6 +450,7 @@ enum PaletteAction {
     NewScratch,
     CommitView,
     BrowseView,
+    HistoryView,
     SelectInTree,
     Rollback,
     Settings,
@@ -471,6 +494,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
         PaletteAction::BrowseView,
         "mode_browse",
     ),
+    ("Git History (log)", PaletteAction::HistoryView, ""),
     ("Rollback changes", PaletteAction::Rollback, ""),
     ("Local History", PaletteAction::LocalHistory, ""),
     ("Clear Local History", PaletteAction::ClearLocalHistory, ""),
@@ -522,6 +546,12 @@ struct ContextMenu {
     /// Which flyout submenu is expanded, if any (file/editor menu — New / Git). Only one
     /// opens at a time.
     submenu: Option<Submenu>,
+    /// The rows, built when the menu opened (see `views/context_menu.rs`).
+    entries: Vec<MenuEntry>,
+    /// Highlighted top-level row (keyboard or hover).
+    hl: Option<usize>,
+    /// Highlighted row inside the open submenu — `Some` once the keyboard is in it.
+    sub_hl: Option<usize>,
 }
 
 /// A context-menu flyout submenu (the "New ▸" / "Git ▸" rows).
@@ -636,8 +666,15 @@ struct HistoryView {
     compare: CompareMode,
     /// Compare-mode dropdown open in the history view.
     compare_open: bool,
+    /// Keyboard highlight in the compare-mode dropdown (index into `CompareMode::ALL`).
+    compare_hl: Option<usize>,
+    /// The open compare-mode dropdown's focus (it takes ↑↓ ⏎ ⎋).
+    compare_focus: FocusHandle,
     /// Branch-picker dropdown open in the history view.
     branch_open: bool,
+    /// Keyboard highlight in the branch dropdown (index into `history_rev_items`; reset as
+    /// the search changes).
+    rev_hl: Option<usize>,
     /// Local branches for the history branch picker (loaded when the dropdown opens).
     locals: Vec<String>,
     /// Remote-tracking branches for the history branch picker.
@@ -651,6 +688,14 @@ struct HistoryView {
     /// Fraction (0..1) of the history panel width given to the commit-list pane on the left
     /// (resizable); the changed-files pane fills the rest on the right. Defaults to 2/3.
     commit_frac: f32,
+    /// Keyboard focus of the commit list (↑↓ walk commits, → / ⏎ into the files pane).
+    list_focus: FocusHandle,
+    /// Keyboard focus of the changed-files tree (← on a top-level row returns to commits).
+    files_focus: FocusHandle,
+    /// The files tree's keyboard cursor when it's on a FOLDER (`None` = on the selected file).
+    files_dir_cursor: Option<PathBuf>,
+    /// Scroll position of the changed-files tree (keeps the keyboard cursor in view).
+    files_scroll: ScrollHandle,
 }
 
 impl HistoryView {
@@ -661,6 +706,7 @@ impl HistoryView {
         let branch_query = cx.new(|cx| CodeEditor::single_line(cx, "Search branches…"));
         cx.subscribe(&branch_query, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) && this.history.branch_open {
+                this.history.rev_hl = None;
                 cx.notify();
             }
         })
@@ -693,13 +739,20 @@ impl HistoryView {
             panel_collapsed: false,
             compare: CompareMode::Local,
             compare_open: false,
+            compare_hl: None,
+            compare_focus: cx.focus_handle(),
             branch_open: false,
+            rev_hl: None,
             locals: Vec::new(),
             remotes: Vec::new(),
             branch_query,
             commit_query,
             scroll: ScrollHandle::new(),
             commit_frac: 2.0 / 3.0,
+            list_focus: cx.focus_handle(),
+            files_focus: cx.focus_handle(),
+            files_dir_cursor: None,
+            files_scroll: ScrollHandle::new(),
         }
     }
 }
@@ -727,6 +780,11 @@ struct BranchPopup {
     counts: std::collections::HashMap<String, (usize, usize)>,
     /// Guards `counts` against a superseded gather (bumped per popup open).
     counts_gen: u64,
+    /// Keyboard highlight over [New Branch, Pull, ...tree rows] (`None` until an arrow key;
+    /// reset as the search changes).
+    hl: Option<usize>,
+    /// Scroll position of the popup's list (keeps the highlight in view).
+    scroll: ScrollHandle,
 }
 
 impl BranchPopup {
@@ -736,6 +794,7 @@ impl BranchPopup {
         let query = cx.new(|cx| CodeEditor::single_line(cx, "Search / new branch name"));
         cx.subscribe(&query, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) && this.branch.popup_open {
+                this.branch.hl = None;
                 cx.notify();
             }
         })
@@ -748,6 +807,8 @@ impl BranchPopup {
             expanded: std::collections::HashSet::new(),
             counts: std::collections::HashMap::new(),
             counts_gen: 0,
+            hl: None,
+            scroll: ScrollHandle::new(),
         }
     }
 }
@@ -769,15 +830,21 @@ struct WorktreePopup {
     /// Bumped on each popup open so a stale background count-gather can't overwrite
     /// a newer one.
     counts_gen: u64,
+    /// Keyboard highlight (index into `list`).
+    hl: Option<usize>,
+    /// The open popup's focus — it takes the keyboard (↑↓ ⏎ ⎋).
+    focus: FocusHandle,
 }
 
 impl WorktreePopup {
-    fn new() -> Self {
+    fn new(cx: &mut App) -> Self {
         Self {
             popup_open: false,
             list: Vec::new(),
             counts: std::collections::HashMap::new(),
             counts_gen: 0,
+            hl: None,
+            focus: cx.focus_handle(),
         }
     }
 }
@@ -1014,6 +1081,8 @@ struct BrowseView {
     /// Cut/Copy clipboard for the file tree (issue #67). `None` = nothing copied; a paste
     /// then falls back to the OS clipboard (Finder file copies, image data).
     clipboard: Option<TreeClip>,
+    /// Keyboard focus of the file tree (arrows walk/fold it, ⏎ opens — issue #81).
+    tree_focus: FocusHandle,
 }
 
 /// A pending cut/copy of tree paths (issue #67). `cut` moves on paste; otherwise it copies.
@@ -1090,6 +1159,7 @@ impl BrowseView {
             md_view: None,
             md_editor_w: 480.0,
             clipboard: None,
+            tree_focus: cx.focus_handle(),
         }
     }
 }
@@ -1125,6 +1195,14 @@ struct CommitView {
     collapsed: bool,
     /// True while a `git commit` is in flight (disables the button, shows "Committing…").
     committing: bool,
+    /// Keyboard focus of the changed-files tree (arrows, space ticks, ⏎ — issue #81).
+    tree_focus: FocusHandle,
+    /// The tree's keyboard cursor when it's on a FOLDER (`None` = on the selected file).
+    dir_cursor: Option<PathBuf>,
+    /// Scroll position of the changed-files tree (keeps the keyboard cursor in view).
+    tree_scroll: ScrollHandle,
+    /// Keyboard focus of the Push tab's file list.
+    push_focus: FocusHandle,
 }
 
 impl CommitView {
@@ -1155,6 +1233,10 @@ impl CommitView {
             search,
             collapsed: false,
             committing: false,
+            tree_focus: cx.focus_handle(),
+            dir_cursor: None,
+            tree_scroll: ScrollHandle::new(),
+            push_focus: cx.focus_handle(),
         }
     }
 }
@@ -1307,12 +1389,12 @@ struct MergeView {
     theirs_text: String,
     /// How lines are compared (exact / trim / ignore-all-whitespace).
     ws: kyde_diff::merge::WhitespaceMode,
-    /// Whether the whitespace dropdown is expanded.
-    ws_open: bool,
+    /// The whitespace dropdown.
+    ws_sel: ui::SelectState,
     /// Which contents the resolve stage is showing (3-pane merge or a 2-pane pair).
     compare: MergeCompare,
-    /// Whether the Compare Contents dropdown is expanded.
-    compare_open: bool,
+    /// The Compare Contents dropdown.
+    compare_sel: ui::SelectState,
     /// Left pane: the current branch's version ("yours").
     ours: Entity<CodeEditor>,
     /// Center pane: the live merge result (rebuilt as conflicts are resolved).
@@ -1360,9 +1442,9 @@ impl MergeView {
             // Default to ignoring whitespace: formatting-only divergence shouldn't read
             // as a conflict (switchable per-file from the toolbar dropdown).
             ws: kyde_diff::merge::WhitespaceMode::IgnoreAll,
-            ws_open: false,
+            ws_sel: ui::SelectState::new(cx),
             compare: MergeCompare::MergeView3,
-            compare_open: false,
+            compare_sel: ui::SelectState::new(cx),
             ours: mk(cx),
             result: mk(cx),
             theirs: mk(cx),
@@ -1450,6 +1532,8 @@ struct Kyde {
     // Projects landing
     recents: Recents,
     project_search: Entity<CodeEditor>,
+    /// Keyboard highlight in the Projects landing list (index into the filtered recents).
+    projects_hl: Option<usize>,
 
     // Commit mode
     files: Vec<ChangedFile>,
@@ -1512,8 +1596,8 @@ struct Kyde {
     settings_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Which Settings category the sidebar has selected.
     settings_section: SettingsSection,
-    /// Whether the Appearance → Theme select dropdown is expanded.
-    settings_theme_open: bool,
+    /// The Appearance → Theme select dropdown.
+    settings_theme: ui::SelectState,
     /// Cached `(path, registered family name)` for the open font file's preview.
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
@@ -1532,6 +1616,12 @@ struct Kyde {
     pending_error: Option<String>,
     /// Open right-click context menu, if any.
     context_menu: Option<ContextMenu>,
+    /// The open menu panel's focus (it takes the keyboard while open — issue #81).
+    menu_focus: FocusHandle,
+    /// A menu just opened: focus it on the hosting window's next render.
+    menu_focus_pending: bool,
+    /// What had focus before the menu took it — restored when the menu closes.
+    menu_return_focus: Option<FocusHandle>,
     /// Show-Diff viewer — its own native OS window (`None` when closed).
     diff_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// True while the Show-Diff modal window is open. The modal renders the shared
@@ -1855,9 +1945,13 @@ impl Focusable for ModalWindow {
 }
 
 impl Render for ModalWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let kyde = self.kyde.clone();
         let kind = self.kind;
+        // A context menu opened in this window takes the keyboard (issue #81).
+        kyde.update(cx, |k, kcx| {
+            k.focus_menu_if_pending(Some(kind), window, kcx);
+        });
         let body = kyde.update(cx, |k, kcx| match kind {
             ModalKind::Rollback => k.render_rollback_body(kcx),
             ModalKind::Push => k.render_push_body(kcx),
@@ -2949,7 +3043,9 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.merge_set_compare(mode, cx);
                 // For the default pair, leave the dropdown open too — this shot doubles
                 // as the check that the deferred select panel paints ABOVE the panes.
-                view.merge.compare_open = mode == MergeCompare::LeftRight;
+                if mode == MergeCompare::LeftRight {
+                    view.merge.compare_sel.show();
+                }
             }
         }
         // Branch popup with a row's actions menu open (manual debug shot for the
@@ -5452,6 +5548,91 @@ mod gpui_smoke_tests {
             routed.load(std::sync::atomic::Ordering::Relaxed),
             "TerminalEnter must shadow the root ConfirmKey binding"
         );
+    }
+
+    /// Keyboard navigation end to end (issue #81), through the real bindings + key contexts:
+    /// the Browse tree walks and opens with arrows/⏎, ⇧F10 opens the row's menu where →/←
+    /// enter and leave the "New ▸" submenu and ⎋ closes it, space ticks a Commit-tree row,
+    /// and the branch popup's ⏎ folds a section from its search box.
+    #[gpui::test]
+    fn keyboard_drives_trees_menus_and_popups(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let (handle, _dir) = boot(cx);
+        let press = |cx: &mut TestAppContext, keys: &str| {
+            for k in keys.split(' ') {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    let ks = gpui::Keystroke::parse(k).expect("valid keystroke");
+                    window.dispatch_keystroke(ks, cx);
+                })
+                .unwrap();
+                cx.refresh().unwrap(); // a just-opened menu takes focus on its first render
+                cx.run_until_parked();
+            }
+        };
+
+        // Browse tree: root, app.tsx, new.txt.
+        handle
+            .update(cx, |k, w, cx| k.act_mode_browse(&ModeBrowse, w, cx))
+            .unwrap();
+        press(cx, "down down enter");
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
+            })
+            .unwrap();
+
+        // ⇧F10 on the row → its menu, first entry ("New ▸") lit; → steps into the flyout.
+        handle
+            .update(cx, |k, w, cx| k.act_mode_browse(&ModeBrowse, w, cx))
+            .unwrap();
+        press(cx, "shift-f10 right");
+        handle
+            .update(cx, |k, _w, _cx| {
+                let m = k.context_menu.as_ref().expect("menu open");
+                assert!(matches!(&m.target, MenuTarget::BrowseFile(p, false) if p == &PathBuf::from("app.tsx")));
+                assert!(m.submenu == Some(Submenu::New) && m.sub_hl == Some(0));
+            })
+            .unwrap();
+        press(cx, "left escape");
+        handle
+            .update(cx, |k, w, _cx| {
+                assert!(k.context_menu.is_none(), "⎋ after ← closes the menu");
+                assert!(
+                    k.browse.tree_focus.is_focused(w),
+                    "focus returns to the tree"
+                );
+            })
+            .unwrap();
+
+        // Commit tree: cursor onto new.txt, space ticks it out of the commit.
+        handle.update(cx, |k, _w, cx| k.enter_commit(cx)).unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        // Entering lands the caret in the message box; ⌘9 again hops to the tree.
+        press(cx, "cmd-9");
+        let new_txt = PathBuf::from("new.txt");
+        let was = handle
+            .update(cx, |k, _w, _cx| k.commit.checked.contains(&new_txt))
+            .unwrap();
+        press(cx, "down space"); // enter_commit selected the first change, app.tsx
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.files[k.selected.unwrap()].path, new_txt);
+                assert_ne!(k.commit.checked.contains(&new_txt), was, "space toggled it");
+            })
+            .unwrap();
+
+        // Branch popup (focus stays in its search box): ↓↓↓ past New Branch + Pull onto the
+        // Local section; ⏎ unfolds it.
+        handle.update(cx, super::Kyde::toggle_branch_popup).unwrap();
+        cx.run_until_parked();
+        press(cx, "down down down enter");
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.branch.hl, Some(2));
+                assert!(k.branch.expanded.contains("sec:local"));
+            })
+            .unwrap();
     }
 
     /// The shell exiting (`^D` / `exit`) makes the IO thread emit `CloseRequested`; the Kyde

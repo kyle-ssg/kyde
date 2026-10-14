@@ -84,8 +84,15 @@ impl Kyde {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
+                cx.listener(|this, _e, window, cx| {
                     this.history.compare_open = !this.history.compare_open;
+                    if this.history.compare_open {
+                        // The list takes the keyboard (↑↓ ⏎ ⎋); it lands next frame.
+                        this.history.compare_hl = None;
+                        let focus = this.history.compare_focus.clone();
+                        window.focus(&focus);
+                        window.defer(cx, move |window, _cx| window.focus(&focus));
+                    }
                     cx.notify();
                 }),
             );
@@ -125,21 +132,26 @@ impl Kyde {
             .font_family(ui)
             .child(branch_chip)
             .children(scope_chip)
-            // Commit search box, immediately right of the branch dropdown.
+            // Commit search box, immediately right of the branch dropdown. ↑↓ / ⏎ from it
+            // walk the (filtered) commit list (issue #81).
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    // Right margin matches the branch chip's left inset (header px_1).
-                    .mr_1()
-                    .px_2()
-                    // py_1 + 18px editor line + 2px border = 28px, matching the chip's h(28).
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(t.divider)
-                    .text_size(px(t.ui_font_size))
-                    .child(self.history.commit_query.clone()),
+                nav_keys(
+                    div().key_context(ui::nav::NAV_LIST),
+                    NavTarget::HistoryCommits,
+                    cx,
+                )
+                .flex_1()
+                .min_w_0()
+                // Right margin matches the branch chip's left inset (header px_1).
+                .mr_1()
+                .px_2()
+                // py_1 + 18px editor line + 2px border = 28px, matching the chip's h(28).
+                .py_1()
+                .rounded_md()
+                .border_1()
+                .border_color(t.divider)
+                .text_size(px(t.ui_font_size))
+                .child(self.history.commit_query.clone()),
             )
             .child(compare_chip)
             // Minimise / expand the bottom panel (IDE tool-window style).
@@ -189,25 +201,10 @@ impl Kyde {
             });
 
         // ── commit list (filtered by the commit search box) ──
-        let cq = self
-            .history
-            .commit_query
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
         let commit_rows: Vec<gpui::AnyElement> = self
-            .history
-            .commits
-            .iter()
-            .enumerate()
-            // Keep the original index (drives selection); match subject / author / hash.
-            .filter(|(_, c)| {
-                cq.is_empty()
-                    || c.subject.to_lowercase().contains(&cq)
-                    || c.author.to_lowercase().contains(&cq)
-                    || c.short.to_lowercase().contains(&cq)
-            })
+            .history_visible_commits(cx)
+            .into_iter()
+            .filter_map(|i| self.history.commits.get(i).map(|c| (i, c)))
             .map(|(i, c)| {
                 let selected = self.history.selected == Some(i);
                 let subject: SharedString = c.subject.clone().into();
@@ -256,7 +253,10 @@ impl Kyde {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.select_history_commit(i, cx)),
+                        cx.listener(move |this, _e, window, cx| {
+                            window.focus(&this.history.list_focus);
+                            this.select_history_commit(i, cx);
+                        }),
                     )
                     // Right-click → the same compare options as the header dropdown.
                     .on_mouse_down(
@@ -271,17 +271,23 @@ impl Kyde {
         // Scrollable commit list, wrapped in a flex-basis sizer (the basis must live on a
         // plain wrapper, NOT on the scroll element itself — that's why it collapsed before;
         // mirrors how render_diff sizes its two panes). Default 2/3 of the panel width.
-        let commit_pane = div()
-            .id("hist-commits")
-            .overflow_y_scroll()
-            .track_scroll(&self.history.scroll)
-            .size_full()
-            .flex()
-            .flex_col()
-            .py_1()
-            .font_family(ui)
-            .text_size(px(t.ui_font_size + 1.0))
-            .children(commit_rows);
+        let commit_pane = nav_keys(
+            div()
+                .id("hist-commits")
+                .track_focus(&self.history.list_focus)
+                .key_context("NavList NavTree"),
+            NavTarget::HistoryCommits,
+            cx,
+        )
+        .overflow_y_scroll()
+        .track_scroll(&self.history.scroll)
+        .size_full()
+        .flex()
+        .flex_col()
+        .py_1()
+        .font_family(ui)
+        .text_size(px(t.ui_font_size + 1.0))
+        .children(commit_rows);
         // Commit list = a resizable share of the panel width on the LEFT (defaults to 2/3); the
         // files pane fills the rest (flex_1). Sized in EXPLICIT pixels from the same formula the
         // divider drag inverts (`Divider::HistCommit`), so the bar tracks the cursor exactly 1:1.
@@ -295,41 +301,7 @@ impl Kyde {
             .child(commit_pane);
 
         // ── changed files of the selected commit, as a folder tree + a search box ──
-        let fq = self
-            .history
-            .files_query
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if self.history.files_expanded.contains(&PathBuf::new()) {
-            for mut r in self
-                .history
-                .files_tree
-                .visible(&self.history.files_expanded)
-            {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
-        // Filter by the search box: keep root, matching files, and dirs containing a match.
-        if !fq.is_empty() {
-            let files = &self.history.files;
-            visible.retain(|r| {
-                r.path.as_os_str().is_empty()
-                    || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&fq))
-                    || (r.is_dir
-                        && files.iter().any(|f| {
-                            f.path.starts_with(&r.path)
-                                && f.path.to_string_lossy().to_lowercase().contains(&fq)
-                        }))
-            });
-        }
+        let visible = self.history_visible_files(cx);
         // Root row shows the project name (like the Browse tree), not a generic "Files".
         let root_name: SharedString = self
             .repo_root
@@ -344,7 +316,11 @@ impl Kyde {
                 let file_idx = (!r.is_dir)
                     .then(|| self.history.files.iter().position(|f| f.path == r.path))
                     .flatten();
-                let selected = file_idx.is_some() && self.history.file_selected == file_idx;
+                // The keyboard cursor: a folder when it's on one, else the selected file.
+                let selected = match &self.history.files_dir_cursor {
+                    Some(dir) => *dir == r.path,
+                    None => file_idx.is_some() && self.history.file_selected == file_idx,
+                };
                 let name_color = file_idx
                     .and_then(|i| self.history.files.get(i))
                     .map_or(t.text, |f| status_color(f.status));
@@ -376,11 +352,13 @@ impl Kyde {
                     false,
                     None,
                     None,
-                    move |this, _e, _w, cx| {
+                    move |this, _e, window, cx| {
+                        window.focus(&this.history.files_focus);
                         if is_dir {
                             if !this.history.files_expanded.remove(&p_act) {
                                 this.history.files_expanded.insert(p_act.clone());
                             }
+                            this.history.files_dir_cursor = Some(p_act.clone());
                             cx.notify();
                         } else if let Some(i) =
                             this.history.files.iter().position(|f| f.path == p_act)
@@ -401,12 +379,16 @@ impl Kyde {
                 )
             })
             .collect();
-        let files_search = div()
-            .flex_none()
-            .px_2()
-            .py_1p5()
-            .text_size(px(t.ui_font_size))
-            .child(self.history.files_query.clone());
+        let files_search = nav_keys(
+            div().key_context(ui::nav::NAV_LIST),
+            NavTarget::HistoryFiles,
+            cx,
+        )
+        .flex_none()
+        .px_2()
+        .py_1p5()
+        .text_size(px(t.ui_font_size))
+        .child(self.history.files_query.clone());
         let files_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
         // No changed files (e.g. "Compare with Local" when the working tree matches the
         // commit) → an explicit empty-state instead of a lone, childless root folder row.
@@ -421,17 +403,24 @@ impl Kyde {
                 .child("No changes")
                 .into_any_element()
         } else {
-            div()
-                .id("hist-files")
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .px_1()
-                .py_1()
-                .children(file_rows)
-                .into_any_element()
+            nav_keys(
+                div()
+                    .id("hist-files")
+                    .track_focus(&self.history.files_focus)
+                    .key_context("NavList NavTree"),
+                NavTarget::HistoryFiles,
+                cx,
+            )
+            .overflow_y_scroll()
+            .track_scroll(&self.history.files_scroll)
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .px_1()
+            .py_1()
+            .children(file_rows)
+            .into_any_element()
         };
         let files_wrap = div()
             .flex_1()
@@ -528,32 +517,16 @@ impl Kyde {
         // bottom-panel toolbar (it grows up over the diff so it isn't clipped by the panel).
         // A transparent backdrop closes it.
         if self.history.branch_open {
-            let q = self
-                .history
-                .branch_query
-                .read(cx)
-                .text()
-                .trim()
-                .to_lowercase();
-            let matches = |n: &str| q.is_empty() || n.to_lowercase().contains(&q);
             let cur = self.history.rev.clone();
-            let locals: Vec<String> = self
-                .history
-                .locals
-                .iter()
-                .filter(|n| matches(n))
-                .cloned()
-                .collect();
-            let remotes: Vec<String> = self
-                .history
-                .remotes
-                .iter()
-                .filter(|n| matches(n))
-                .cloned()
-                .collect();
+            let (locals, remotes) = self.history_rev_choices(cx);
+            let head = self.history_rev_matches("HEAD", cx);
+            // Keyboard highlight runs over HEAD, the locals, then the remotes (render order).
+            let hl = self.history.rev_hl;
+            let mut row_ix = 0usize;
             // One clickable branch row → re-log that ref.
-            let mk = |b: String, cx: &mut Context<Self>| {
-                let selected = b == cur;
+            let mut mk = |b: String, cx: &mut Context<Self>| {
+                let selected = hl.map_or(b == cur, |h| h == row_ix);
+                row_ix += 1;
                 let label: SharedString = b.clone().into();
                 ui::picker::row(
                     SharedString::from(format!("hist-rev-{b}")),
@@ -578,30 +551,34 @@ impl Kyde {
                     .text_color(t.line_number)
                     .child(label)
             };
-            let mut menu = div()
-                .id("hist-rev-list")
-                .absolute()
-                // Anchor just above the bottom panel's toolbar; grows upward over the diff.
-                .bottom(px(panel_visible_h + 2.0))
-                .left(px(2.0))
-                .flex()
-                .flex_col()
-                .max_h(px(380.0))
-                .overflow_y_scroll()
-                .min_w(px(260.0))
-                .p_1()
-                .bg(t.panel_bg)
-                .border_1()
-                .border_color(t.divider)
-                .rounded_md()
-                .font_family(ui)
-                .text_size(px(t.ui_font_size))
-                // Clicks inside the menu must not fall through to the backdrop (which closes).
-                .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
-                    cx.stop_propagation();
-                })
-                .child(div().px_1().pb_1().child(self.history.branch_query.clone()));
-            if matches("HEAD") {
+            // The search box keeps focus: ↑↓ / ⏎ bubble from it, ⎋ closes (issue #81).
+            let mut menu = nav_keys(
+                div().id("hist-rev-list").key_context("NavList NavPopup"),
+                NavTarget::HistoryRevs,
+                cx,
+            )
+            .absolute()
+            // Anchor just above the bottom panel's toolbar; grows upward over the diff.
+            .bottom(px(panel_visible_h + 2.0))
+            .left(px(2.0))
+            .flex()
+            .flex_col()
+            .max_h(px(380.0))
+            .overflow_y_scroll()
+            .min_w(px(260.0))
+            .p_1()
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded_md()
+            .font_family(ui)
+            .text_size(px(t.ui_font_size))
+            // Clicks inside the menu must not fall through to the backdrop (which closes).
+            .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
+                cx.stop_propagation();
+            })
+            .child(div().px_1().pb_1().child(self.history.branch_query.clone()));
+            if head {
                 menu = menu.child(mk("HEAD".to_string(), cx));
             }
             if !locals.is_empty() {
@@ -637,26 +614,33 @@ impl Kyde {
         // top-right). Each row = label + one-line description so the taxonomy is self-explaining.
         if self.history.compare_open {
             let cur = self.history.compare;
-            let mut menu = div()
-                .id("hist-compare-list")
-                .absolute()
-                .bottom(px(panel_visible_h + 2.0))
-                .right(px(2.0))
-                .flex()
-                .flex_col()
-                .min_w(px(300.0))
-                .p_1()
-                .bg(t.panel_bg)
-                .border_1()
-                .border_color(t.divider)
-                .rounded_md()
-                .font_family(ui)
-                .text_size(px(t.ui_font_size))
-                .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
-                    cx.stop_propagation();
-                });
-            for mode in CompareMode::ALL {
-                let selected = mode == cur;
+            let hl = self.history.compare_hl;
+            let mut menu = nav_keys(
+                div()
+                    .id("hist-compare-list")
+                    .track_focus(&self.history.compare_focus)
+                    .key_context("NavList NavTree NavPopup"),
+                NavTarget::HistoryCompareModes,
+                cx,
+            )
+            .absolute()
+            .bottom(px(panel_visible_h + 2.0))
+            .right(px(2.0))
+            .flex()
+            .flex_col()
+            .min_w(px(300.0))
+            .p_1()
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded_md()
+            .font_family(ui)
+            .text_size(px(t.ui_font_size))
+            .on_mouse_down(MouseButton::Left, |_e, _w, cx: &mut App| {
+                cx.stop_propagation();
+            });
+            for (i, mode) in CompareMode::ALL.into_iter().enumerate() {
+                let selected = hl.map_or(mode == cur, |h| h == i);
                 menu = menu.child(
                     ui::picker::row(mode.key(), selected, t.bg_mid)
                         .flex()
@@ -743,6 +727,42 @@ impl Kyde {
         }
     }
 
+    /// Whether `name` passes the branch dropdown's search.
+    fn history_rev_matches(&self, name: &str, cx: &App) -> bool {
+        let q = self
+            .history
+            .branch_query
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        q.is_empty() || name.to_lowercase().contains(&q)
+    }
+
+    /// The branch dropdown's `(locals, remotes)` matching its search.
+    fn history_rev_choices(&self, cx: &App) -> (Vec<String>, Vec<String>) {
+        let pick = |list: &[String]| -> Vec<String> {
+            list.iter()
+                .filter(|n| self.history_rev_matches(n, cx))
+                .cloned()
+                .collect()
+        };
+        (pick(&self.history.locals), pick(&self.history.remotes))
+    }
+
+    /// Every row of the branch dropdown, in render order (HEAD, locals, remotes) — what
+    /// the keyboard highlight indexes.
+    pub(crate) fn history_rev_items(&self, cx: &App) -> Vec<String> {
+        let (locals, remotes) = self.history_rev_choices(cx);
+        let mut items = Vec::new();
+        if self.history_rev_matches("HEAD", cx) {
+            items.push("HEAD".to_string());
+        }
+        items.extend(locals);
+        items.extend(remotes);
+        items
+    }
+
     /// Toggle the history branch dropdown, loading local + remote branches when opening it
     /// and resetting the search box.
     pub(crate) fn toggle_history_branches(&mut self, cx: &mut Context<Self>) {
@@ -799,9 +819,75 @@ impl Kyde {
         }
     }
 
+    /// Indices into `history.commits` shown by the commit list — filtered by the search box
+    /// on subject / author / hash.
+    pub(crate) fn history_visible_commits(&self, cx: &App) -> Vec<usize> {
+        let cq = self
+            .history
+            .commit_query
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        self.history
+            .commits
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                cq.is_empty()
+                    || c.subject.to_lowercase().contains(&cq)
+                    || c.author.to_lowercase().contains(&cq)
+                    || c.short.to_lowercase().contains(&cq)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// The history files tree's visible rows: root + expanded descendants, filtered by the
+    /// files search box (keeping the root, matching files, and dirs containing a match).
+    pub(crate) fn history_visible_files(&self, cx: &App) -> Vec<tree::Row> {
+        let fq = self
+            .history
+            .files_query
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        let mut visible = vec![tree::Row {
+            path: PathBuf::new(),
+            is_dir: true,
+            depth: 0,
+        }];
+        if self.history.files_expanded.contains(&PathBuf::new()) {
+            for mut r in self
+                .history
+                .files_tree
+                .visible(&self.history.files_expanded)
+            {
+                r.depth += 1;
+                visible.push(r);
+            }
+        }
+        // Filter by the search box: keep root, matching files, and dirs containing a match.
+        if !fq.is_empty() {
+            let files = &self.history.files;
+            visible.retain(|r| {
+                r.path.as_os_str().is_empty()
+                    || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&fq))
+                    || (r.is_dir
+                        && files.iter().any(|f| {
+                            f.path.starts_with(&r.path)
+                                && f.path.to_string_lossy().to_lowercase().contains(&fq)
+                        }))
+            });
+        }
+        visible
+    }
+
     /// Select a commit → recompute its changed files (per compare mode) + open the first.
     pub(crate) fn select_history_commit(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.history.selected = Some(idx);
+        self.history.files_dir_cursor = None;
         self.recompute_history_files();
         self.history.file_selected = None;
         if self.history.files.is_empty() {
@@ -857,6 +943,7 @@ impl Kyde {
     /// Load a file's diff for the selected commit + compare mode (read-only).
     pub(crate) fn select_history_file(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.history.file_selected = Some(idx);
+        self.history.files_dir_cursor = None;
         let (Some(cidx), Some(repo)) = (self.history.selected, self.repo()) else {
             return;
         };

@@ -4,7 +4,7 @@
 //! Browse pane turns `visible()` into IntelliJ-style indented rows.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One child entry under a directory.
 #[derive(Clone)]
@@ -104,6 +104,85 @@ impl Tree {
     }
 }
 
+/// An arrow key pressed over a tree (see [`nav`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NavKey {
+    /// Previous row.
+    Up,
+    /// Next row.
+    Down,
+    /// Collapse the folder, else move to the parent row.
+    Left,
+    /// Expand the folder, else move to its first child.
+    Right,
+}
+
+/// What an arrow key does to a tree: move the cursor, or fold a folder in place.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Nav {
+    /// Move the cursor (selection) to this row.
+    Select(PathBuf),
+    /// Expand this folder.
+    Expand(PathBuf),
+    /// Collapse this folder.
+    Collapse(PathBuf),
+    /// Nothing to do (an edge, or a file has no children).
+    Stay,
+}
+
+/// Keyboard navigation over the visible `rows` (IDE tree semantics): ↑/↓ step through rows
+/// (from no cursor, ↓ lands on the first row and ↑ on the last); → expands a collapsed
+/// folder or steps into an expanded one; ← collapses an expanded folder or jumps to the
+/// parent row. A cursor that's no longer visible restarts from the top.
+///
+/// ```
+/// use kyde_tree::{nav, Nav, NavKey, Row};
+/// use std::{collections::HashSet, path::{Path, PathBuf}};
+/// let rows = vec![
+///     Row { path: "src".into(), is_dir: true, depth: 0 },
+///     Row { path: "src/a.rs".into(), is_dir: false, depth: 1 },
+/// ];
+/// let open = HashSet::from([PathBuf::from("src")]);
+/// assert_eq!(nav(&rows, Some(Path::new("src/a.rs")), &open, NavKey::Left), Nav::Select("src".into()));
+/// ```
+pub fn nav<S: std::hash::BuildHasher>(
+    rows: &[Row],
+    cursor: Option<&Path>,
+    expanded: &HashSet<PathBuf, S>,
+    key: NavKey,
+) -> Nav {
+    let at = cursor.and_then(|c| rows.iter().position(|r| r.path == c));
+    let select = |i: usize| {
+        rows.get(i)
+            .map_or(Nav::Stay, |r| Nav::Select(r.path.clone()))
+    };
+    let Some(i) = at else {
+        return match key {
+            NavKey::Up => rows.len().checked_sub(1).map_or(Nav::Stay, select),
+            _ => select(0),
+        };
+    };
+    let row = &rows[i];
+    match key {
+        NavKey::Up => i.checked_sub(1).map_or(Nav::Stay, select),
+        NavKey::Down => select(i + 1),
+        NavKey::Right if row.is_dir && !expanded.contains(&row.path) => {
+            Nav::Expand(row.path.clone())
+        }
+        NavKey::Right => match rows.get(i + 1) {
+            Some(next) if row.is_dir && next.depth > row.depth => Nav::Select(next.path.clone()),
+            _ => Nav::Stay,
+        },
+        NavKey::Left if row.is_dir && expanded.contains(&row.path) => {
+            Nav::Collapse(row.path.clone())
+        }
+        NavKey::Left => rows[..i]
+            .iter()
+            .rposition(|r| r.depth < row.depth)
+            .map_or(Nav::Stay, select),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +244,40 @@ mod tests {
             ]
         );
         assert_eq!(rows[2].depth, 1);
+    }
+
+    /// ↑↓ walk the rows, ← / → fold or hop between a folder and its children, and both
+    /// stop at the edges.
+    #[test]
+    fn nav_walks_folds_and_hops() {
+        let rows = vec![
+            Row {
+                path: p("src"),
+                is_dir: true,
+                depth: 0,
+            },
+            Row {
+                path: p("src/a.rs"),
+                is_dir: false,
+                depth: 1,
+            },
+            Row {
+                path: p("lib"),
+                is_dir: true,
+                depth: 0,
+            },
+        ];
+        let exp = HashSet::from([p("src")]);
+        let at = |c: &str, k| nav(&rows, Some(Path::new(c)), &exp, k);
+        assert_eq!(nav(&rows, None, &exp, NavKey::Down), Nav::Select(p("src")));
+        assert_eq!(nav(&rows, None, &exp, NavKey::Up), Nav::Select(p("lib")));
+        assert_eq!(at("src", NavKey::Up), Nav::Stay);
+        assert_eq!(at("lib", NavKey::Down), Nav::Stay);
+        assert_eq!(at("src", NavKey::Down), Nav::Select(p("src/a.rs")));
+        assert_eq!(at("src", NavKey::Right), Nav::Select(p("src/a.rs")));
+        assert_eq!(at("src", NavKey::Left), Nav::Collapse(p("src")));
+        assert_eq!(at("lib", NavKey::Right), Nav::Expand(p("lib")));
+        assert_eq!(at("src/a.rs", NavKey::Left), Nav::Select(p("src")));
+        assert_eq!(at("src/a.rs", NavKey::Right), Nav::Stay);
     }
 }

@@ -518,13 +518,18 @@ impl Kyde {
             PaletteAction::FindInFiles => self.open_finder(FinderMode::Content, window, cx),
             PaletteAction::NewScratch => self.open_finder(FinderMode::Scratch, window, cx),
             PaletteAction::CommitView => self.enter_commit(cx),
+            // The log with the keyboard in its commit list (↑↓ walk, → into the files).
+            PaletteAction::HistoryView => {
+                self.switch_mode(Mode::History, cx);
+                window.focus(&self.history.list_focus);
+            }
             PaletteAction::BrowseView => {
                 self.mode = Mode::Browse;
-                window.focus(&self.focus_handle);
+                window.focus(&self.browse.tree_focus);
                 cx.notify();
             }
             PaletteAction::SelectInTree => {
-                window.focus(&self.focus_handle);
+                window.focus(&self.browse.tree_focus);
                 self.reveal_in_tree(cx);
             }
             PaletteAction::Rollback => {

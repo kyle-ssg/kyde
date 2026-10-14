@@ -9,6 +9,8 @@ mod checkbox;
 mod color;
 mod footer;
 mod menu;
+/// Keyboard navigation for lists, trees and popups: the shared actions + key contexts.
+pub mod nav;
 mod panel;
 /// Shared list-picker mechanics (bounded nav + the selected/hover row pill). Call sites
 /// use the explicit `ui::picker::…`.

@@ -168,16 +168,9 @@ impl Kyde {
         row.into_any_element()
     }
 
-    /// Left column of the Commit tab: the changed-files tree (search + checkboxes) + the
-    /// commit-message bar.
-    fn render_commit_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let t = theme::get();
-        let root_name = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
-        // Changed files as a folder tree (root + everything expanded by rebuild_commit_view).
+    /// The Commit tab's visible tree rows: the root, its expanded descendants, filtered by
+    /// the search box (keeping the root, matching files, and folders holding a match).
+    pub(crate) fn commit_visible_rows(&self, cx: &App) -> Vec<tree::Row> {
         let mut visible = vec![tree::Row {
             path: PathBuf::new(),
             is_dir: true,
@@ -204,6 +197,19 @@ impl Kyde {
                         }))
             });
         }
+        visible
+    }
+
+    /// Left column of the Commit tab: the changed-files tree (search + checkboxes) + the
+    /// commit-message bar.
+    fn render_commit_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let root_name = self
+            .repo_root
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let visible = self.commit_visible_rows(cx);
         let rows: Vec<gpui::AnyElement> = visible
             .into_iter()
             .map(|r| {
@@ -216,7 +222,11 @@ impl Kyde {
                 let file_idx = (!r.is_dir)
                     .then(|| self.files.iter().position(|f| f.path == r.path))
                     .flatten();
-                let selected = file_idx.is_some() && self.selected == file_idx;
+                // The keyboard cursor: a folder when it's on one, else the selected file.
+                let selected = match &self.commit.dir_cursor {
+                    Some(dir) => *dir == r.path,
+                    None => file_idx.is_some() && self.selected == file_idx,
+                };
                 let name_color = file_idx
                     .and_then(|i| self.files.get(i))
                     .map_or(t.text, |f| status_color(f.status));
@@ -258,13 +268,13 @@ impl Kyde {
                     false,
                     None,
                     None,
-                    move |this, _e, _w, cx| {
+                    move |this, _e, window, cx| {
+                        window.focus(&this.commit.tree_focus);
                         if is_dir {
                             this.toggle_commit_dir(p_act.clone(), cx);
-                        } else if let Some(i) = this.files.iter().position(|f| f.path == p_act) {
-                            this.select_with(i, Some(cx));
-                            cx.notify();
                         }
+                        this.commit_cursor_to(p_act.clone(), cx);
+                        cx.notify();
                     },
                     move |this, cx| this.toggle_commit_check(p_check.clone(), is_dir, cx),
                     move |this, pos, cx| {
@@ -298,28 +308,40 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let search_header = div()
-            .flex_none()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .px_2()
-            .py_1p5()
-            .text_size(px(theme::get().ui_font_size))
-            .child(div().flex_1().min_w_0().child(self.commit.search.clone()))
-            .child(collapse_btn);
+        // ↑↓ / ⏎ from the filter box walk the filtered tree (issue #81).
+        let search_header = nav_keys(
+            div().key_context(ui::nav::NAV_LIST),
+            NavTarget::CommitTree,
+            cx,
+        )
+        .flex_none()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_2()
+        .py_1p5()
+        .text_size(px(theme::get().ui_font_size))
+        .child(div().flex_1().min_w_0().child(self.commit.search.clone()))
+        .child(collapse_btn);
         let search_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
-        let file_list = div()
-            .id("commit-tree")
-            .overflow_y_scroll()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .px_1()
-            .py_1()
-            .children(rows);
+        let file_list = nav_keys(
+            div()
+                .id("commit-tree")
+                .track_focus(&self.commit.tree_focus)
+                .key_context("NavList NavTree"),
+            NavTarget::CommitTree,
+            cx,
+        )
+        .overflow_y_scroll()
+        .track_scroll(&self.commit.tree_scroll)
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .px_1()
+        .py_1()
+        .children(rows);
         let list_island = div()
             .flex()
             .flex_col()
@@ -428,6 +450,7 @@ impl Kyde {
     pub(crate) fn select_with(&mut self, idx: usize, cx: Option<&mut Context<Self>>) {
         self.selected = Some(idx);
         self.commit.focus.clear(); // a single selection drops any folder-group highlight
+        self.commit.dir_cursor = None; // …and the tree's cursor lands on the file
         let Some(file) = self.files.get(idx).cloned() else {
             return;
         };
@@ -715,13 +738,28 @@ impl Kyde {
         self.enter_commit(cx);
     }
 
+    /// ⌘9 / ⌃⇧G — the Commit view (caret in the message box). Pressed again while there,
+    /// it hops the keyboard between the message box and the changed-files list.
     pub(crate) fn act_mode_commit(
         &mut self,
         _: &ModeCommit,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.switch_mode(Mode::Commit, cx);
+        if self.mode != Mode::Commit || self.diff_view_open {
+            self.switch_mode(Mode::Commit, cx);
+            return;
+        }
+        let msg = self.commit.editor.read(cx).focus_handle.clone();
+        let list = match self.git_tab {
+            GitTab::Commit => self.commit.tree_focus.clone(),
+            GitTab::Push => self.commit.push_focus.clone(),
+        };
+        if msg.is_focused(window) || self.git_tab == GitTab::Push {
+            window.focus(&list);
+        } else {
+            window.focus(&msg);
+        }
     }
 
     /// Switch to Commit mode: re-read git status (so edits made in Browse show up) and

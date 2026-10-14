@@ -940,17 +940,9 @@ impl Kyde {
         .into_any_element()
     }
 
-    /// The Local History window's context-menu items — `render_context_menu`'s match
-    /// delegates `LhRow`/`LhPath` here so the feature module owns its menu. `item`
-    /// is the shared menu-row builder.
-    pub(crate) fn lh_menu_items(
-        &self,
-        panel: gpui::Div,
-        target: &MenuTarget,
-        item: &dyn Fn(&'static str) -> gpui::Div,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let t = theme::get();
+    /// The Local History window's context-menu entries — `menu_entries` delegates
+    /// `LhRow`/`LhPath` here so the feature module owns its menu.
+    pub(crate) fn lh_menu_entries(&self, target: &MenuTarget) -> Vec<MenuEntry> {
         match target {
             // Timeline row: undo this change and everything newer — every file in the
             // changed panel returns to its state just before this change. On the virtual
@@ -965,10 +957,9 @@ impl Kyde {
                     (false, true) => "Revert This Change and After (deletes created files)",
                     (false, false) => "Revert This Change and After",
                 };
-                panel.child(item(label).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.lh_revert_since(cx)),
-                ))
+                vec![MenuEntry::item(label, |this, _w, cx| {
+                    this.lh_revert_since(cx);
+                })]
             }
             // Changed-files row: revert JUST this file (or this folder's files). A
             // file that didn't exist before this change is deleted by the revert — say
@@ -983,24 +974,16 @@ impl Kyde {
                 };
                 if self.lh_has_base_under(p) {
                     let p = p.clone();
-                    panel.child(item(label).on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.lh_revert_path(p.clone(), cx)),
-                    ))
+                    vec![MenuEntry::item(label, move |this, _w, cx| {
+                        this.lh_revert_path(p.clone(), cx);
+                    })]
                 } else {
                     // Every known snapshot already matches the current content — a
                     // revert would change nothing.
-                    panel.child(
-                        div()
-                            .px_3()
-                            .py_1()
-                            .cursor(gpui::CursorStyle::Arrow)
-                            .text_color(t.line_number)
-                            .child("Nothing to revert to"),
-                    )
+                    vec![MenuEntry::Note("Nothing to revert to".into())]
                 }
             }
-            _ => panel,
+            _ => Vec::new(),
         }
     }
 

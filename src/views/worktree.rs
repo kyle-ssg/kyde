@@ -43,6 +43,11 @@ impl Kyde {
         }
         self.branch.popup_open = false;
         self.worktree.popup_open = true;
+        // The popup takes the keyboard (↑↓ ⏎ ⎋); its element lands next frame.
+        self.worktree.hl = None;
+        let focus = self.worktree.focus.clone();
+        window.focus(&focus);
+        window.defer(cx, move |window, _cx| window.focus(&focus));
         self.worktree.counts.clear();
         self.worktree.counts_gen = self.worktree.counts_gen.wrapping_add(1);
         let generation = self.worktree.counts_gen;
@@ -157,7 +162,9 @@ impl Kyde {
             .worktree
             .list
             .iter()
-            .map(|w| {
+            .enumerate()
+            .map(|(i, w)| {
+                let lit = self.worktree.hl == Some(i);
                 let is_current = root.as_deref().is_some_and(|r| same_dir(r, &w.path));
                 let name = dir_name(&w.path).unwrap_or_else(|| w.path.display().to_string());
                 let branch = w
@@ -176,6 +183,7 @@ impl Kyde {
                     .px_2()
                     .rounded_md()
                     .cursor_pointer()
+                    .when(lit, |d| d.bg(t.selected_bg))
                     .hover(|s| s.bg(t.selected_bg))
                     .text_color(t.text)
                     .child(
@@ -221,31 +229,37 @@ impl Kyde {
             })
             .collect();
 
-        let panel = div()
-            .absolute()
-            .right(px(8.0))
-            .bottom(px(28.0))
-            .w(px(340.0))
-            .max_h(px(460.0))
-            .flex()
-            .flex_col()
-            .py_1()
-            .bg(t.bg_mid)
-            .border_1()
-            .border_color(gpui::rgb(0x595D60))
-            .rounded_md()
-            .shadow_lg()
-            .occlude()
-            .font_family(ui)
-            .text_size(fs)
-            .child(
-                div()
-                    .id("worktree-list")
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .children(rows),
-            );
+        let panel = nav_keys(
+            div()
+                .track_focus(&self.worktree.focus)
+                .key_context("NavList NavTree NavPopup"),
+            NavTarget::WorktreePopup,
+            cx,
+        )
+        .absolute()
+        .right(px(8.0))
+        .bottom(px(28.0))
+        .w(px(340.0))
+        .max_h(px(460.0))
+        .flex()
+        .flex_col()
+        .py_1()
+        .bg(t.bg_mid)
+        .border_1()
+        .border_color(gpui::rgb(0x595D60))
+        .rounded_md()
+        .shadow_lg()
+        .occlude()
+        .font_family(ui)
+        .text_size(fs)
+        .child(
+            div()
+                .id("worktree-list")
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .children(rows),
+        );
 
         div()
             .absolute()

@@ -6,11 +6,13 @@ mod browse;
 mod changelog;
 mod commit;
 mod compare;
+mod context_menu;
 mod diff_view;
 mod file_ops;
 mod find;
 mod finder;
 mod history;
+mod keyboard;
 mod local_history;
 mod merge;
 mod modals;
@@ -24,3 +26,6 @@ mod tabs;
 #[cfg(feature = "terminal")]
 mod terminal_panel;
 mod worktree;
+
+pub(crate) use context_menu::MenuEntry;
+pub(crate) use keyboard::{nav_keys, NavTarget};
