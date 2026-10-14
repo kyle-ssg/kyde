@@ -338,15 +338,12 @@ enum Mode {
     History,
 }
 
-/// Which editor the in-editor find/replace bar acts on (set from focus when it opens).
-#[derive(Clone, Copy, PartialEq)]
-enum FindTarget {
-    /// The Browse file editor.
-    File,
-    /// The diff's left (base) pane — read-only, so replace is disabled.
-    DiffLeft,
-    /// The diff's right (working) pane.
-    DiffRight,
+/// Which window hosts the find/replace bar: the main window or one of the native modals.
+/// The bar renders only in its host, over the editor it searches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FindHost {
+    Main,
+    Modal(ModalKind),
 }
 
 /// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
@@ -793,8 +790,16 @@ struct FindBar {
     open: bool,
     /// Whether the replace row is shown.
     replace: bool,
-    /// Which editor the search acts on (Browse file editor vs a diff pane).
-    target: FindTarget,
+    /// The editor being searched — the focused one when the bar opened (file editor, any
+    /// diff/merge/compare/local-history pane). `None` until first opened.
+    target: Option<Entity<CodeEditor>>,
+    /// The window the bar (and `target`) lives in.
+    host: FindHost,
+    /// `target`'s `content_gen` at the last scan, so a burst of change events for text
+    /// already scanned (Replace All emits one per replacement) re-scans nothing.
+    scanned_gen: u64,
+    /// Re-scans when `target`'s text changes (a file switch, an edit, a reload).
+    target_sub: Option<gpui::Subscription>,
     /// Search box.
     query: Entity<CodeEditor>,
     /// Replace box.
@@ -828,7 +833,10 @@ impl FindBar {
         Self {
             open: false,
             replace: false,
-            target: FindTarget::File,
+            target: None,
+            host: FindHost::Main,
+            scanned_gen: 0,
+            target_sub: None,
             query,
             replace_query,
             matches: Vec::new(),
@@ -1825,6 +1833,13 @@ impl ModalWindow {
             })
             .detach();
         }
+        // A find bar hosted here goes with the window (it would otherwise linger "open"
+        // with nowhere to render, eating the main window's Escape).
+        let host_of = kyde.clone();
+        cx.on_release(move |_, cx| {
+            host_of.update(cx, |k, kcx| k.find_host_closed(FindHost::Modal(kind), kcx));
+        })
+        .detach();
         Self {
             kyde,
             kind,
@@ -1858,10 +1873,50 @@ impl Render for ModalWindow {
             ModalKind::ClearLocalHistory => k.render_clear_local_history_body(kcx),
             ModalKind::Changelog => k.render_changelog_body(kcx),
         });
+        let host = FindHost::Modal(kind);
+        let find_bar = kyde.update(cx, |k, kcx| k.find_bar(host, theme::font::UI_FAMILY, kcx));
+        let body = match find_bar {
+            // The find bar (⌘F over a pane in this window) sits atop the body, which fills
+            // the rest.
+            Some(bar) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(bar)
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element(),
+            None => body,
+        };
         div()
             .track_focus(&self.focus)
             .key_context("Modal")
             .size_full()
+            // ⌘F / ⌘R / ⌘G & co. resolve against this window's panes. The handlers are
+            // `Kyde`'s; the bar's own Escape/Enter fire from its "FindBar" key context
+            // (dispatched before `on_key_down`, so Escape closes the bar, not the window).
+            .on_action(cx.listener(move |this, _: &FindInFile, w, cx| {
+                this.kyde
+                    .update(cx, |k, kcx| k.open_find(host, false, w, kcx));
+            }))
+            .on_action(cx.listener(move |this, _: &ReplaceInFile, w, cx| {
+                this.kyde
+                    .update(cx, |k, kcx| k.open_find(host, true, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &FindNext, w, cx| {
+                this.kyde.update(cx, |k, kcx| k.find_next(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &FindPrev, w, cx| {
+                this.kyde.update(cx, |k, kcx| k.find_prev(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &CloseFind, w, cx| {
+                this.kyde.update(cx, |k, kcx| k.close_find(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &ReplaceOne, w, cx| {
+                this.kyde.update(cx, |k, kcx| k.replace_one(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &ReplaceAll, w, cx| {
+                this.kyde.update(cx, |k, kcx| k.replace_all(a, w, kcx));
+            }))
             .bg(theme::get().panel_bg)
             .text_color(theme::get().text)
             .font_family(theme::font::UI_FAMILY)
@@ -2744,6 +2799,35 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             ) {
                 view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
             }
+        }
+        // Find (⌘F) over a diff pane (issue #86): `find-diff` = the commit view's working
+        // pane, `find-compare` = the Compare window over KYDE_SHOT_FILE ↔ KYDE_SHOT_FILE_B.
+        // KYDE_SHOT_QUERY sets the search (default "fn").
+        "find-diff" | "find-compare" => {
+            set_packs(view, &["rust", "json"]);
+            let host = if name == "find-diff" {
+                if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                    view.open_project(PathBuf::from(repo), cx);
+                }
+                view.enter_commit(cx);
+                if let Some(i) = diff_pick(view) {
+                    view.select_with(i, Some(cx));
+                }
+                FindHost::Main
+            } else {
+                if let (Ok(a), Ok(b)) = (
+                    std::env::var("KYDE_SHOT_FILE"),
+                    std::env::var("KYDE_SHOT_FILE_B"),
+                ) {
+                    view.open_compare(PathBuf::from(a), PathBuf::from(b), cx);
+                }
+                FindHost::Modal(ModalKind::Compare)
+            };
+            view.open_find(host, true, window, cx);
+            let q = std::env::var("KYDE_SHOT_QUERY").unwrap_or_else(|_| "fn".into());
+            view.find
+                .query
+                .update(cx, |e, cx| e.set_content(q, Lang::PlainText, cx));
         }
         // The "What's New" changelog window (issue #71). Seeded with fixed release notes so
         // the shot is deterministic and needs no network; `KYDE_SHOT_RELEASES=<file>` renders
@@ -3804,6 +3888,87 @@ mod gpui_smoke_tests {
                     "one\nTWO\nthree\n"
                 );
                 assert!(k.compare.diff.as_ref().unwrap().hunks.is_empty());
+            })
+            .unwrap();
+    }
+
+    /// Find in every diff view (issue #86): ⌘R over the editable working pane opens
+    /// replace, over the read-only base pane it downgrades to find; matches paint on the
+    /// find layer without clobbering the diff's word tint; and a bar hosted by a modal
+    /// (Compare) goes away with its window.
+    #[gpui::test]
+    fn find_targets_any_diff_pane_and_modal(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let set_query = |k: &mut Kyde, q: &str, cx: &mut Context<Kyde>| {
+            k.find
+                .query
+                .update(cx, |e, cx| e.set_content(q.into(), Lang::PlainText, cx));
+        };
+        handle
+            .update(cx, |k, w, cx| {
+                k.enter_commit(cx);
+                let i = k.files.iter().position(|f| f.path.ends_with("app.tsx"));
+                k.select_with(i.unwrap(), Some(cx));
+                k.open_find(FindHost::Main, true, w, cx);
+                assert_eq!(k.find.target.as_ref(), Some(&k.diff.right));
+                assert!(k.find.replace, "working pane is editable → replace row");
+                set_query(k, "const", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                assert_eq!(k.find.matches.len(), 1);
+                let right = k.diff.right.read(cx);
+                assert!(right.find_bg.contains_key(&0), "match painted on line 0");
+                assert_eq!(
+                    right.find_current,
+                    Some((0, 0..5)),
+                    "current match outlined"
+                );
+                assert!(!right.word_bg.is_empty(), "diff word tint kept");
+                // Focus the base pane → ⌘R there is find-only, and the old pane's
+                // highlights are cleared.
+                let left_focus = k.diff.left.read(cx).focus_handle.clone();
+                w.focus(&left_focus);
+                k.open_find(FindHost::Main, true, w, cx);
+                assert_eq!(k.find.target.as_ref(), Some(&k.diff.left));
+                assert!(!k.find.replace, "read-only pane → find only");
+                assert!(k.diff.right.read(cx).find_bg.is_empty());
+            })
+            .unwrap();
+
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "one\nTWO\ntwo\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_compare(PathBuf::from("a.txt"), PathBuf::from("b.txt"), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_find(FindHost::Modal(ModalKind::Compare), false, w, cx);
+                assert_eq!(k.find.target.as_ref(), Some(&k.compare.right));
+                set_query(k, "two", cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.find.matches.len(), 2, "case-insensitive: TWO + two");
+                assert!(
+                    !k.find_shown(FindHost::Main),
+                    "the bar lives in the Compare window"
+                );
+                k.close_modal_window(ModalKind::Compare, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(!k.find.open, "closing the host window closes its find bar");
+                assert!(k.compare.right.read(cx).find_bg.is_empty());
             })
             .unwrap();
     }
@@ -5036,7 +5201,7 @@ mod gpui_smoke_tests {
 
         // Find bar (cmd-F) over the open file.
         handle
-            .update(cx, |k, w, cx| k.open_find(false, w, cx))
+            .update(cx, |k, w, cx| k.open_find(FindHost::Main, false, w, cx))
             .unwrap();
         settle(cx);
 

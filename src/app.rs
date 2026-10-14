@@ -800,7 +800,7 @@ impl Kyde {
     ) {
         if self.context_menu.is_some() {
             self.context_menu = None;
-        } else if self.find.open {
+        } else if self.find_shown(FindHost::Main) {
             self.close_find(&CloseFind, window, cx);
             return;
         } else if self.diff_view_open {

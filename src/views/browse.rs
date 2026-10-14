@@ -300,8 +300,8 @@ impl Kyde {
                 if let Some(pack) = self.pending_pack() {
                     r = r.child(self.render_install_banner(pack, ui, fs, cx));
                 }
-                if self.find.open {
-                    r = r.child(self.render_find_bar(ui, cx));
+                if let Some(bar) = self.find_bar(FindHost::Main, ui, cx) {
+                    r = r.child(bar);
                 }
             }
             r.child(editor_area)

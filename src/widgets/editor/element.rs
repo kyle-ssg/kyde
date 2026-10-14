@@ -472,7 +472,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus, line_bg, line_numbers, word_bg, word_bg_color) = {
+        let (focus, line_bg, line_numbers, word_bg, word_bg_color, find_bg, find_current) = {
             let ed = self.editor.read(cx);
             (
                 ed.focus_handle.clone(),
@@ -480,6 +480,8 @@ impl Element for EditorElement {
                 ed.line_numbers,
                 ed.word_bg.clone(),
                 ed.word_bg_color,
+                ed.find_bg.clone(),
+                ed.find_current.clone(),
             )
         };
         window.handle_input(
@@ -562,14 +564,19 @@ impl Element for EditorElement {
                 }
             }
         }
-        // Word-level diff highlight: a stronger tint over just the changed bytes within a
-        // modified line (inline word diff). Painted after the line tint, before text.
-        if !word_bg.is_empty() {
+        // Byte-range highlights within lines, painted after the line tint, before text:
+        // the word-level diff (a stronger tint over just the changed bytes), then find-bar
+        // matches on top so a match inside a changed word still reads.
+        let find_color = theme::get().find_match_bg;
+        for (ranges_by_line, color) in [(&word_bg, word_bg_color), (&find_bg, find_color)] {
+            if ranges_by_line.is_empty() {
+                continue;
+            }
             for (i, &b) in pre.visible_lines.iter().enumerate() {
                 if b == usize::MAX || !on_screen(i) {
                     continue;
                 }
-                let (Some(ranges), Some(line)) = (word_bg.get(&b), pre.lines.get(&i)) else {
+                let (Some(ranges), Some(line)) = (ranges_by_line.get(&b), pre.lines.get(&i)) else {
                     continue;
                 };
                 let y = bounds.top() + lh * i as f32;
@@ -581,13 +588,35 @@ impl Element for EditorElement {
                             point(text_x + x0, y),
                             point(text_x + x1.max(x0 + px(1.0)), y + lh),
                         ),
-                        word_bg_color,
+                        color,
                     ));
                 }
             }
         }
         for sel in pre.selections.drain(..) {
             window.paint_quad(sel);
+        }
+        // The find bar's current match is also the selection — repaint it ABOVE the selection
+        // in the match tint with a caret-coloured outline, so it reads on any diff tint.
+        if let Some((line_ix, r)) = &find_current {
+            let row = pre
+                .visible_lines
+                .iter()
+                .position(|b| b == line_ix)
+                .filter(|&i| on_screen(i));
+            if let Some((i, line)) = row.and_then(|i| pre.lines.get(&i).map(|l| (i, l))) {
+                let y = bounds.top() + lh * i as f32;
+                let x0 = line.x_for_index(r.start);
+                let x1 = line.x_for_index(r.end).max(x0 + px(1.0));
+                window.paint_quad(
+                    fill(
+                        Bounds::from_corners(point(text_x + x0, y), point(text_x + x1, y + lh)),
+                        find_color,
+                    )
+                    .border_widths(px(1.0))
+                    .border_color(theme::get().caret),
+                );
+            }
         }
         // Line numbers, right-aligned in their column. A LEFT gutter paints here (before the
         // text — they don't overlap). A RIGHT (pinned) gutter paints AFTER the text instead,
