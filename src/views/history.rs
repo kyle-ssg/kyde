@@ -4,6 +4,80 @@
 
 use crate::*;
 
+/// Width of one commit-graph lane (px).
+const LANE_W: f32 = 12.0;
+/// The graph column never grows past this many lanes; wider histories clip on the right.
+const MAX_LANES: usize = 10;
+
+/// Commit-graph lane colours — theme accents, so every palette (light, dark, CVD) holds.
+fn lane_color(i: usize) -> kyde_color::Color {
+    let t = theme::get();
+    let palette = [
+        t.status_modified,
+        t.status_added,
+        t.syn_keyword,
+        t.syn_field,
+        t.syn_number,
+        t.status_conflict,
+    ];
+    palette[i % palette.len()]
+}
+
+/// One commit's slice of the graph: lines through the row (straight down, or an S-curve
+/// between lanes) and the commit's node. Fills the row's height, so the slices of
+/// consecutive rows join into continuous lines.
+fn graph_cell(row: git::graph::GraphRow, lanes: usize) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| (),
+        move |bounds, (), window, _cx| {
+            // The log isn't virtualized — skip tessellating rows scrolled out of view.
+            if !window.content_mask().bounds.intersects(&bounds) {
+                return;
+            }
+            let x = |lane: usize| bounds.left() + px(LANE_W * lane as f32 + LANE_W / 2.0);
+            let (top, bottom) = (bounds.top(), bounds.bottom());
+            let mid = top + bounds.size.height / 2.0;
+            let mut line = |from: gpui::Point<Pixels>, to: gpui::Point<Pixels>, color| {
+                let mut path = gpui::PathBuilder::stroke(px(1.5));
+                path.move_to(from);
+                if from.x == to.x {
+                    path.line_to(to);
+                } else {
+                    // Leave and arrive vertically: two quadratic halves.
+                    let y = (from.y + to.y) / 2.0;
+                    let x_mid = (from.x + to.x) / 2.0;
+                    path.curve_to(gpui::point(x_mid, y), gpui::point(from.x, y));
+                    path.curve_to(to, gpui::point(to.x, y));
+                }
+                if let Ok(path) = path.build() {
+                    window.paint_path(path, lane_color(color));
+                }
+            };
+            for e in &row.up {
+                line(
+                    gpui::point(x(e.from), top),
+                    gpui::point(x(e.to), mid),
+                    e.color,
+                );
+            }
+            for e in &row.down {
+                line(
+                    gpui::point(x(e.from), mid),
+                    gpui::point(x(e.to), bottom),
+                    e.color,
+                );
+            }
+            let node = gpui::Bounds::centered_at(
+                gpui::point(x(row.lane), mid),
+                gpui::size(px(7.0), px(7.0)),
+            );
+            window.paint_quad(gpui::fill(node, lane_color(row.color)).corner_radii(px(3.5)));
+        },
+    )
+    .w(px(LANE_W * lanes as f32))
+    .flex_none()
+}
+
 impl Kyde {
     /// History (git log) view: a commit list (left), the selected commit's changed files
     /// (middle), and a read-only side-by-side diff (right). A branch dropdown picks which
@@ -210,11 +284,18 @@ impl Kyde {
                 let subject: SharedString = c.subject.clone().into();
                 let meta: SharedString = format!("{} · {} · {}", c.short, c.author, c.date).into();
                 let refs = c.refs.clone();
-                ui::picker::row(("hist-commit", i), selected, t.bg_mid)
+                // The graph only means something over the full, unfiltered log.
+                let graph = cq
+                    .is_empty()
+                    .then(|| self.history.graph.get(i))
+                    .flatten()
+                    .map(|g| graph_cell(g.clone(), self.history.graph_lanes));
+                let text = div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(px(1.0))
-                    .mx_1()
                     .px_2()
                     .py_1()
                     .child(
@@ -250,7 +331,14 @@ impl Kyde {
                             .text_color(t.line_number)
                             .truncate()
                             .child(meta),
-                    )
+                    );
+                ui::picker::row(("hist-commit", i), selected, t.bg_mid)
+                    .flex()
+                    .flex_row()
+                    .mx_1()
+                    .pl_1()
+                    .children(graph)
+                    .child(text)
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, window, cx| {
@@ -717,6 +805,27 @@ impl Kyde {
             .repo()
             .and_then(|r| r.log(&self.history.rev, 300, path.as_deref()).ok())
             .unwrap_or_default();
+        // Lay the graph out once per load — never on the render path.
+        let links: Vec<(&str, Vec<&str>)> = self
+            .history
+            .commits
+            .iter()
+            .map(|c| {
+                (
+                    c.hash.as_str(),
+                    c.parents.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        self.history.graph = git::graph::layout(&links);
+        self.history.graph_lanes = self
+            .history
+            .graph
+            .iter()
+            .map(git::graph::GraphRow::width)
+            .max()
+            .unwrap_or(0)
+            .min(MAX_LANES);
         self.history.selected = None;
         self.history.files.clear();
         self.history.file_selected = None;

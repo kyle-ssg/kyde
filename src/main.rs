@@ -645,6 +645,10 @@ struct HistoryView {
     path: Option<PathBuf>,
     /// Commits shown in the log list (newest first).
     commits: Vec<git::Commit>,
+    /// The commit graph, one row per entry of `commits` (laid out when they load).
+    graph: Vec<git::graph::GraphRow>,
+    /// Graph column width in lanes — the widest row, capped (see `history::MAX_LANES`).
+    graph_lanes: usize,
     /// Selected commit index into `commits`.
     selected: Option<usize>,
     /// Files changed by the selected commit under the current compare mode.
@@ -729,6 +733,8 @@ impl HistoryView {
             rev: "HEAD".to_string(),
             path: None,
             commits: Vec::new(),
+            graph: Vec::new(),
+            graph_lanes: 0,
             selected: None,
             files: Vec::new(),
             file_selected: None,
@@ -5327,6 +5333,10 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, cx| k.close_modal_window(ModalKind::Diff, cx))
             .unwrap();
+        settle(cx);
+
+        // History view: the commit log with its graph column + the selected commit's diff.
+        handle.update(cx, |k, _w, cx| k.enter_history(cx)).unwrap();
         settle(cx);
 
         // Branch popup.
