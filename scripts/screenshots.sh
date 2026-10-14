@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.cargo/bin:$PATH"
 
-OUT="$ROOT/assets/screenshots"
+DEST="$ROOT/assets/screenshots"
 WINID="$ROOT/scripts/winid.swift"
 FIX="$ROOT/target/shot-fixtures"
 LOCK="$FIX/package-lock.json"
@@ -31,6 +31,11 @@ CFG="$CFG_ROOT/config"
 # lives under XDG_DATA_HOME — never let a shot write into the user's real history.
 DATA="$CFG_ROOT/data"
 PROFILE="${PROFILE:-release}"
+# Shots land here first and are copied into $DEST at the end: writing straight into the repo
+# being photographed would dirty its tree mid-run, and every later shot would then show
+# those files as changes (the title-bar Commit count, the Commit view).
+OUT="$CFG_ROOT/shots"
+mkdir -p "$OUT"
 
 # Throwaway config: seed a keymap so first-run onboarding doesn't cover the shot.
 mkdir -p "$CFG/kyde"
@@ -45,6 +50,11 @@ osascript -e 'tell application "System Events" to set autohide of dock preferenc
 # Apps visible right now → restore exactly these (un-hide) when we're done.
 PRIOR_VISIBLE="$(osascript -e 'tell application "System Events" to get name of (every process whose visible is true and background only is false)' 2>/dev/null || true)"
 cleanup() {
+    # Copy whatever was captured (even on a failed / interrupted run) into the repo.
+    if ls "$OUT"/* >/dev/null 2>&1; then
+        cp "$OUT"/* "$DEST"/
+        echo "==> copied $(ls "$OUT" | wc -l | tr -d ' ') shot(s) into $DEST"
+    fi
     rm -rf "$CFG_ROOT"
     osascript -e "tell application \"System Events\" to set autohide of dock preferences to $DOCK_AUTOHIDE_WAS" >/dev/null 2>&1 || true
     if [ -n "${PRIOR_VISIBLE:-}" ]; then

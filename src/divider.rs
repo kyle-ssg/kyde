@@ -21,7 +21,7 @@ pub(crate) fn full_island_w(vw: f32) -> f32 {
 }
 
 /// Width of the History branches sidebar (fixed) + its 1px edge.
-pub(crate) const HIST_BRANCHES_W: f32 = 200.0;
+pub(crate) const HIST_BRANCHES_W: f32 = 232.0;
 
 /// Width the History commit-list | files split shares — the island minus the branches
 /// sidebar. Both the layout and the `HistCommit` drag use it, so the drag stays 1:1.

@@ -763,7 +763,9 @@ impl Repo {
             &[
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--format=%(refname:short)",
+                // `lstrip=2`, not `:short`: `:short` abbreviates `origin/HEAD` to a bare
+                // `origin`, which then slips past the `/HEAD` filter as a fake branch.
+                "--format=%(refname:lstrip=2)",
                 "refs/remotes/",
             ],
         )?;
@@ -1605,6 +1607,38 @@ mod tests {
     /// A freshly-created local branch (no upstream) must measure a push from where it forked
     /// off the remote mainline — NOT the empty tree (which used to report the whole repo as
     /// "to push"). Builds a real repo + bare remote and checks `ahead_count`/`push_files`.
+    /// A clone's `origin/HEAD` symref is not a branch — it must not be listed (as `origin`).
+    #[test]
+    fn remote_branches_skip_the_origin_head_symref() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let base = std::env::temp_dir().join(format!("kyde-remotes-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (remote, work) = (base.join("remote.git"), base.join("work"));
+        fs::create_dir_all(&remote).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        g(&remote, &["init", "--bare", "-b", "main"]);
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("a.txt"), "1\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+        g(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        g(&work, &["push", "-u", "origin", "main"]);
+        g(&work, &["remote", "set-head", "origin", "main"]);
+
+        let repo = Repo::discover(&work).unwrap();
+        assert_eq!(repo.remote_branches().unwrap(), ["origin/main"]);
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn new_branch_pushes_only_its_own_commits_not_whole_repo() {
         use std::fs;
