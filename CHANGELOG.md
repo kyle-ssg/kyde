@@ -14,6 +14,24 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.7.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.6.0...kyde-v2.7.0) (2026-10-14)
+
+
+### Features
+
+* **find:** ⌘F / ⌘R in every diff view, with visible match highlights ([#97](https://github.com/kyle-ssg/kyde/issues/97)) ([7a7fac0](https://github.com/kyle-ssg/kyde/commit/7a7fac077f9e9a9fae29990f0f5f3e5d8f2c02e1))
+* IntelliJ-style git log (graph + branches sidebar), Java pack, git toolbar ([#101](https://github.com/kyle-ssg/kyde/issues/101)) ([3d48016](https://github.com/kyle-ssg/kyde/commit/3d48016cc2090a9a1f9080dda39d4c44b36bcea3))
+* **keyboard:** navigate menus, submenus, trees, lists and popups by keyboard ([#100](https://github.com/kyle-ssg/kyde/issues/100)) ([f37a090](https://github.com/kyle-ssg/kyde/commit/f37a090d427ad8c76cecbb0fd0dacf4c264b6bf2))
+* **keymap:** Push / Pull shortcuts that follow the keymap preset ([#105](https://github.com/kyle-ssg/kyde/issues/105)) ([5d61750](https://github.com/kyle-ssg/kyde/commit/5d6175066cf0d5e5a66cf27fe284518a6b313fee))
+* **keymap:** shortcut editor in Settings → Keymap ([#106](https://github.com/kyle-ssg/kyde/issues/106)) ([4e81bd1](https://github.com/kyle-ssg/kyde/commit/4e81bd1246917bc42e1593aee5d8e2afe78119e4))
+* **plugins:** offer a missing language pack over diffs, not just the editor ([#104](https://github.com/kyle-ssg/kyde/issues/104)) ([94abdbd](https://github.com/kyle-ssg/kyde/commit/94abdbd8ba82c2642eb43d398a3e8221a58eb116))
+
+
+### Bug Fixes
+
+* **ci:** get main green and roll up pending dependency bumps ([#95](https://github.com/kyle-ssg/kyde/issues/95)) ([c200a20](https://github.com/kyle-ssg/kyde/commit/c200a20bd12a51881d7b833f2e3d1e4197832821))
+* **commit:** don't fail a commit when an untracked file is left unticked ([#96](https://github.com/kyle-ssg/kyde/issues/96)) ([104271f](https://github.com/kyle-ssg/kyde/commit/104271f4c22e8d0314003746744267c984c36c66))
+
 ## [2.6.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.5.0...kyde-v2.6.0) (2026-08-06)
 
 
