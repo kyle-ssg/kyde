@@ -3921,6 +3921,11 @@ mod gpui_smoke_tests {
                 assert_eq!(k.find.matches.len(), 1);
                 let right = k.diff.right.read(cx);
                 assert!(right.find_bg.contains_key(&0), "match painted on line 0");
+                assert_eq!(
+                    right.find_current,
+                    Some((0, 0..5)),
+                    "current match outlined"
+                );
                 assert!(!right.word_bg.is_empty(), "diff word tint kept");
                 // Focus the base pane → ⌘R there is find-only, and the old pane's
                 // highlights are cleared.

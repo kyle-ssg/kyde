@@ -201,6 +201,7 @@ impl Kyde {
         if let Some(old) = self.find.target.take().filter(|old| *old != target) {
             old.update(cx, |e, cx| {
                 e.find_bg.clear();
+                e.find_current = None;
                 cx.notify();
             });
         }
@@ -277,6 +278,7 @@ impl Kyde {
         let ed = self.find.target.clone()?;
         ed.update(cx, |e, cx| {
             e.find_bg.clear();
+            e.find_current = None;
             cx.notify();
         });
         cx.notify();
@@ -306,12 +308,11 @@ impl Kyde {
         if self.find.idx >= self.find.matches.len() {
             self.find.idx = 0;
         }
-        let current = select
-            .then(|| self.find.matches.get(self.find.idx).cloned())
-            .flatten();
+        let current = self.find.matches.get(self.find.idx).cloned();
         ed.update(cx, |e, cx| {
             e.find_bg = by_line;
-            if let Some(r) = current {
+            e.find_current = current.clone().map(|r| line_range(e.text(), r));
+            if let Some(r) = current.filter(|_| select) {
                 e.select_range(r, cx);
             }
             cx.notify();
@@ -327,7 +328,10 @@ impl Kyde {
         ) else {
             return;
         };
-        ed.update(cx, |e, cx| e.select_range(r, cx));
+        ed.update(cx, |e, cx| {
+            e.find_current = Some(line_range(e.text(), r.clone()));
+            e.select_range(r, cx);
+        });
         cx.notify();
     }
 
@@ -416,6 +420,16 @@ fn matches_by_line(content: &str, matches: &[std::ops::Range<usize>]) -> LineWor
             .push(r.start - line_start..r.end.min(line_end) - line_start);
     }
     out
+}
+
+/// A match's `(buffer line, byte range within that line)`, clipped at the line end — the
+/// shape the editor paints `find_current` from.
+fn line_range(content: &str, r: std::ops::Range<usize>) -> (usize, std::ops::Range<usize>) {
+    let before = &content[..r.start];
+    let line = before.bytes().filter(|&b| b == b'\n').count();
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let line_end = memchr_newline(content.as_bytes(), line_start).unwrap_or(content.len());
+    (line, r.start - line_start..r.end.min(line_end) - line_start)
 }
 
 /// Index of the first `\n` at or after `from`.

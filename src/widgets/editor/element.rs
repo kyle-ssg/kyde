@@ -472,7 +472,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus, line_bg, line_numbers, word_bg, word_bg_color, find_bg) = {
+        let (focus, line_bg, line_numbers, word_bg, word_bg_color, find_bg, find_current) = {
             let ed = self.editor.read(cx);
             (
                 ed.focus_handle.clone(),
@@ -481,6 +481,7 @@ impl Element for EditorElement {
                 ed.word_bg.clone(),
                 ed.word_bg_color,
                 ed.find_bg.clone(),
+                ed.find_current.clone(),
             )
         };
         window.handle_input(
@@ -594,6 +595,28 @@ impl Element for EditorElement {
         }
         for sel in pre.selections.drain(..) {
             window.paint_quad(sel);
+        }
+        // The find bar's current match is also the selection — repaint it ABOVE the selection
+        // in the match tint with a caret-coloured outline, so it reads on any diff tint.
+        if let Some((line_ix, r)) = &find_current {
+            let row = pre
+                .visible_lines
+                .iter()
+                .position(|b| b == line_ix)
+                .filter(|&i| on_screen(i));
+            if let Some((i, line)) = row.and_then(|i| pre.lines.get(&i).map(|l| (i, l))) {
+                let y = bounds.top() + lh * i as f32;
+                let x0 = line.x_for_index(r.start);
+                let x1 = line.x_for_index(r.end).max(x0 + px(1.0));
+                window.paint_quad(
+                    fill(
+                        Bounds::from_corners(point(text_x + x0, y), point(text_x + x1, y + lh)),
+                        find_color,
+                    )
+                    .border_widths(px(1.0))
+                    .border_color(theme::get().caret),
+                );
+            }
         }
         // Line numbers, right-aligned in their column. A LEFT gutter paints here (before the
         // text — they don't overlap). A RIGHT (pinned) gutter paints AFTER the text instead,

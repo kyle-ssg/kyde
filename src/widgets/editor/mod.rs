@@ -349,6 +349,10 @@ pub struct CodeEditor {
     /// Find-bar matches (⌘F), same shape as `word_bg` but its own layer — painted OVER the
     /// word tint in the theme's `find_match_bg`, so matches show in diff panes too.
     pub find_bg: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>,
+    /// The find bar's CURRENT match as `(buffer line, byte range within it)` — painted above
+    /// the selection (which it also is) with a `caret`-coloured outline, so it stays visible
+    /// on a diff-tinted line instead of turning selection-blue.
+    pub find_current: Option<(usize, std::ops::Range<usize>)>,
     /// Diff alignment: insert N blank display rows BEFORE buffer line `b` (`filler[b]=N`),
     /// so this pane lines up row-for-row with the other side. `filler_end` = trailing blanks.
     pub filler: std::collections::HashMap<usize, usize>,
@@ -443,6 +447,7 @@ impl CodeEditor {
                 a: 0.0,
             },
             find_bg: std::collections::HashMap::new(),
+            find_current: None,
             filler: std::collections::HashMap::new(),
             filler_end: 0,
         }
