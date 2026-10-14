@@ -147,6 +147,10 @@ by lightness instead of hue) — switch in Settings.
   <img src="assets/screenshots/find-in-files.png" alt="Find in Files — full-text content search across the repo, results listed with file and line for the query “kyde”" width="900">
 </p>
 
+<p align="center">
+  <img src="assets/screenshots/find-diff.png" alt="Find &amp; replace over a diff — ⌘R on the Commit view's working pane, every match of “chan” highlighted and the current one outlined" width="900">
+</p>
+
 ### Look & feel
 
 * **Islands layout** — rounded panels, draggable dividers, activity rail, native title bar (double-click to zoom), status bar.

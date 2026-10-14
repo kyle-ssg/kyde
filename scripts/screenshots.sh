@@ -103,7 +103,7 @@ fi
 #      diff so the changed-files list reads like real WIP.
 # Passed to the shot via KYDE_SHOT_REPO; apply_shot opens it + selects color.rs.
 case "${1:-all}" in
-all | git-diff | light | rollback)
+all | git-diff | light | rollback | find-diff)
     echo "==> generating git-diff fixture (clone of this repo)"
     # Clone into a dir literally named `kyde` so the commit tree's root row reads authentically.
     DIFF_REPO="$FIX/kyde"
@@ -326,7 +326,7 @@ shoot_welcome_gif() {
 # (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
 #   ./scripts/screenshots.sh welcome-gif
-declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history local-history merge-conflicts merge terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files find-diff rollback history local-history merge-conflicts merge terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -355,6 +355,7 @@ run_one() {
         markdown-support) shoot_until markdown-support markdown-support.png window ;;
         go-to-file)       shoot_until go-to-file       go-to-file.png       window ;;
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
+        find-diff)        shoot_until find-diff        find-diff.png        window KYDE_SHOT_REPO="$DIFF_REPO" KYDE_SHOT_QUERY="chan" ;;
         rollback)         shoot_until rollback         rollback.png         region KYDE_SHOT_REPO="$DIFF_REPO" ;;
         history)          shoot_until history          history.png          window KYDE_SHOT_REPO="$HIST_REPO" ;;
         local-history)    shoot_until local-history    local-history.png    region KYDE_SHOT_FILE="release-please-config.json" ;;
