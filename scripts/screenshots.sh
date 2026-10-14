@@ -21,7 +21,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.cargo/bin:$PATH"
 
-OUT="$ROOT/assets/screenshots"
+DEST="$ROOT/assets/screenshots"
 WINID="$ROOT/scripts/winid.swift"
 FIX="$ROOT/target/shot-fixtures"
 LOCK="$FIX/package-lock.json"
@@ -31,6 +31,11 @@ CFG="$CFG_ROOT/config"
 # lives under XDG_DATA_HOME — never let a shot write into the user's real history.
 DATA="$CFG_ROOT/data"
 PROFILE="${PROFILE:-release}"
+# Shots land here first and are copied into $DEST at the end: writing straight into the repo
+# being photographed would dirty its tree mid-run, and every later shot would then show
+# those files as changes (the title-bar Commit count, the Commit view).
+OUT="$CFG_ROOT/shots"
+mkdir -p "$OUT"
 
 # Throwaway config: seed a keymap so first-run onboarding doesn't cover the shot.
 mkdir -p "$CFG/kyde"
@@ -45,6 +50,11 @@ osascript -e 'tell application "System Events" to set autohide of dock preferenc
 # Apps visible right now → restore exactly these (un-hide) when we're done.
 PRIOR_VISIBLE="$(osascript -e 'tell application "System Events" to get name of (every process whose visible is true and background only is false)' 2>/dev/null || true)"
 cleanup() {
+    # Copy whatever was captured (even on a failed / interrupted run) into the repo.
+    if ls "$OUT"/* >/dev/null 2>&1; then
+        cp "$OUT"/* "$DEST"/
+        echo "==> copied $(ls "$OUT" | wc -l | tr -d ' ') shot(s) into $DEST"
+    fi
     rm -rf "$CFG_ROOT"
     osascript -e "tell application \"System Events\" to set autohide of dock preferences to $DOCK_AUTOHIDE_WAS" >/dev/null 2>&1 || true
     if [ -n "${PRIOR_VISIBLE:-}" ]; then
@@ -93,7 +103,7 @@ fi
 #      diff so the changed-files list reads like real WIP.
 # Passed to the shot via KYDE_SHOT_REPO; apply_shot opens it + selects color.rs.
 case "${1:-all}" in
-all | git-diff | light)
+all | git-diff | light | rollback | find-diff)
     echo "==> generating git-diff fixture (clone of this repo)"
     # Clone into a dir literally named `kyde` so the commit tree's root row reads authentically.
     DIFF_REPO="$FIX/kyde"
@@ -159,6 +169,39 @@ all | merge | merge-conflicts)
     # Start the merge — it must stop on the conflict and stay in progress.
     if git -C "$MERGE_REPO" merge --no-edit feature/eased-lerp >/dev/null 2>&1; then
         echo "    !! merge fixture did not conflict (anchors moved?) — fix screenshots.sh" >&2
+        exit 1
+    fi
+    ;;
+esac
+
+# history fixture: a clone of this repo with a short feature branch merged back `--no-ff`, so
+# the History log's graph shows a real branch + merge (main itself is squash-merged and draws
+# as a single line). The branch edits crates/kyde-ui/src/color.rs in two commits while the
+# mainline gets one commit of its own; apply_shot selects the branch's first commit.
+case "${1:-all}" in
+all | history)
+    echo "==> generating history fixture (clone with a merged feature branch)"
+    HIST_REPO="$FIX/kyde-history/kyde"
+    rm -rf "$FIX/kyde-history"
+    mkdir -p "$FIX/kyde-history"
+    git clone --quiet --no-hardlinks "$ROOT" "$HIST_REPO"
+    git -C "$HIST_REPO" config user.email "shot@example.com"
+    git -C "$HIST_REPO" config user.name "Kyde Screenshots"
+    git -C "$HIST_REPO" config commit.gpgsign false
+    git -C "$HIST_REPO" checkout -qB main
+    HCOLOR="$HIST_REPO/crates/kyde-ui/src/color.rs"
+    HTAB="$HIST_REPO/crates/kyde-ui/src/tab.rs"
+    git -C "$HIST_REPO" checkout -qb feature/eased-lerp
+    perl -0pi -e 's/(\n    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    let t = t * t * (3.0 - 2.0 * t); \/\/ smoothstep so the shimmer eases\n/' "$HCOLOR"
+    git -C "$HIST_REPO" commit -qam "feat: ease the shimmer lerp with smoothstep"
+    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$HCOLOR"
+    git -C "$HIST_REPO" commit -qam "docs: describe the eased lerp"
+    git -C "$HIST_REPO" checkout -q main
+    sed -i '' '1s;^;// Segmented tab strip (keyboard-focus ring).\n;' "$HTAB"
+    git -C "$HIST_REPO" commit -qam "chore: note the tab strip's focus ring"
+    git -C "$HIST_REPO" merge -q --no-ff -m "Merge branch 'feature/eased-lerp'" feature/eased-lerp
+    if git -C "$HIST_REPO" diff --quiet HEAD~1 HEAD -- crates/kyde-ui/src/color.rs; then
+        echo "    !! history fixture edit did not apply (anchors moved?) — fix screenshots.sh" >&2
         exit 1
     fi
     ;;
@@ -283,7 +326,7 @@ shoot_welcome_gif() {
 # (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
 #   ./scripts/screenshots.sh welcome-gif
-declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files rollback history local-history merge-conflicts merge terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files find-diff rollback history local-history merge-conflicts merge terminal)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -312,8 +355,9 @@ run_one() {
         markdown-support) shoot_until markdown-support markdown-support.png window ;;
         go-to-file)       shoot_until go-to-file       go-to-file.png       window ;;
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
-        rollback)         shoot_until rollback         rollback.png         region ;;
-        history)          shoot_until history          history.png          window ;;
+        find-diff)        shoot_until find-diff        find-diff.png        window KYDE_SHOT_REPO="$DIFF_REPO" KYDE_SHOT_QUERY="chan" ;;
+        rollback)         shoot_until rollback         rollback.png         region KYDE_SHOT_REPO="$DIFF_REPO" ;;
+        history)          shoot_until history          history.png          window KYDE_SHOT_REPO="$HIST_REPO" ;;
         local-history)    shoot_until local-history    local-history.png    region KYDE_SHOT_FILE="release-please-config.json" ;;
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
