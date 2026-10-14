@@ -113,6 +113,8 @@ pub enum Lang {
     Html,
     /// Go (`.go`).
     Go,
+    /// Java (`.java`).
+    Java,
     /// R (`.r`/`.R`).
     R,
     /// LaTeX (`.tex`/`.sty`/`.cls`).
@@ -222,6 +224,11 @@ pub const PACKS: &[Pack] = &[
         id: "go",
         name: "Go",
     },
+    #[cfg(feature = "java")]
+    Pack {
+        id: "java",
+        name: "Java",
+    },
     #[cfg(feature = "r")]
     Pack { id: "r", name: "R" },
     #[cfg(feature = "latex")]
@@ -277,6 +284,7 @@ impl Lang {
             Some("py" | "pyi") => Lang::Python,
             Some("html" | "htm") => Lang::Html,
             Some("go") => Lang::Go,
+            Some("java") => Lang::Java,
             Some("r" | "R") => Lang::R,
             Some("tex" | "sty" | "cls" | "latex") => Lang::Latex,
             _ => Lang::PlainText,
@@ -300,6 +308,7 @@ impl Lang {
             Lang::Python => "python",
             Lang::Html => "html",
             Lang::Go => "go",
+            Lang::Java => "java",
             Lang::R => "r",
             Lang::Latex => "latex",
             // Env / Gitignore are always-on builtin line-highlighters (no grammar, nothing to
@@ -434,6 +443,13 @@ impl Lang {
                 "",
                 "",
             ),
+            #[cfg(feature = "java")]
+            Lang::Java => (
+                tree_sitter_java::LANGUAGE.into(),
+                tree_sitter_java::HIGHLIGHTS_QUERY,
+                "",
+                "",
+            ),
             #[cfg(feature = "r")]
             Lang::R => (
                 tree_sitter_r::LANGUAGE.into(),
@@ -508,6 +524,8 @@ impl Lang {
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
             #[cfg(feature = "go")]
             Lang::Go => tree_sitter_go::LANGUAGE.into(),
+            #[cfg(feature = "java")]
+            Lang::Java => tree_sitter_java::LANGUAGE.into(),
             #[cfg(feature = "r")]
             Lang::R => tree_sitter_r::LANGUAGE.into(),
             #[cfg(feature = "latex")]
@@ -828,8 +846,9 @@ pub fn sort_object_keys(
 /// What kind of import an [`ImportLink`] came from — drives resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportKind {
-    /// A module specifier: a quoted path in TS/JS (`import x from "./y"`) or a
-    /// dotted module path in Python (`import a.b`, `from .rel import c`).
+    /// A module specifier: a quoted path in TS/JS (`import x from "./y"`), a dotted
+    /// module path in Python (`import a.b`, `from .rel import c`), or a Java import
+    /// (`import a.b.C;`).
     Specifier,
     /// Rust `mod name;` (no body) — the module lives in a sibling file.
     RustMod,
@@ -851,8 +870,9 @@ pub struct ImportLink {
 /// Extract the import references of `source` for cmd+click navigation.
 /// Supported: Rust (`mod x;` without a body, `use` paths), TypeScript/TSX/
 /// JavaScript (`import`/`export … from "x"`, `require("x")`, dynamic
-/// `import("x")`), and Python (`import a.b`, `from .rel import c`). Other
-/// languages (or a feature-trimmed build) return no links.
+/// `import("x")`), Python (`import a.b`, `from .rel import c`), and Java
+/// (`import a.b.C;`, `import static …`). Other languages (or a feature-trimmed
+/// build) return no links.
 ///
 /// ```
 /// use kyde_syntax::{import_links, Lang};
@@ -871,8 +891,9 @@ pub fn import_links(source: &str, lang: Lang) -> Vec<ImportLink> {
 /// The local names each import binds, paired with that import's [`ImportLink`]
 /// — so ⌘-clicking a USE of an imported symbol can jump through to the file it
 /// came from. Rust `use` names/aliases/lists, TS/JS default + named (incl.
-/// `as`) + namespace imports, Python module first-segments and `from`-names.
-/// Wildcards bind nothing knowable and are skipped.
+/// `as`) + namespace imports, Python module first-segments and `from`-names,
+/// Java imported class / static member names. Wildcards bind nothing knowable and
+/// are skipped.
 #[must_use]
 pub fn import_bindings(source: &str, lang: Lang) -> Vec<(String, ImportLink)> {
     imports_with_bindings(source, lang)
@@ -886,7 +907,7 @@ pub fn import_bindings(source: &str, lang: Lang) -> Vec<(String, ImportLink)> {
 fn imports_with_bindings(source: &str, lang: Lang) -> Vec<(ImportLink, Vec<String>)> {
     if !matches!(
         lang,
-        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python
+        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python | Lang::Java
     ) {
         return Vec::new();
     }
@@ -1078,6 +1099,29 @@ fn imports_with_bindings(source: &str, lang: Lang) -> Vec<(ImportLink, Vec<Strin
                     }
                 }
             }
+            // Java: `import a.b.C;` binds `C`; `import static a.b.C.m;` binds `m`; a
+            // wildcard (`a.b.*`) binds nothing knowable.
+            (Lang::Java, "import_declaration") => {
+                let mut path = None;
+                let mut wildcard = false;
+                for i in 0..node.named_child_count() {
+                    match node.named_child(i) {
+                        Some(c) if matches!(c.kind(), "scoped_identifier" | "identifier") => {
+                            path = Some(c);
+                        }
+                        Some(c) if c.kind() == "asterisk" => wildcard = true,
+                        _ => {}
+                    }
+                }
+                if let Some(p) = path {
+                    if let Some(l) = link(p, ImportKind::Specifier) {
+                        let bound = (!wildcard)
+                            .then(|| l.target.rsplit('.').next().map(str::to_string))
+                            .flatten();
+                        out.push((l, bound.into_iter().collect()));
+                    }
+                }
+            }
             _ => {}
         }
         for i in 0..node.child_count() {
@@ -1094,7 +1138,8 @@ fn imports_with_bindings(source: &str, lang: Lang) -> Vec<(ImportLink, Vec<Strin
 /// position — the go-to-definition index behind ⌘-clicking a variable/type.
 /// Covers the declaration forms of the supported languages (Rust items +
 /// `let`/params, TS/JS declarations + declarators/params/methods, Python
-/// `def`/`class`/assignments/params); other languages return no sites.
+/// `def`/`class`/assignments/params, Java types/methods/fields/locals/params);
+/// other languages return no sites.
 ///
 /// ```
 /// use kyde_syntax::{definition_sites, Lang};
@@ -1106,7 +1151,7 @@ fn imports_with_bindings(source: &str, lang: Lang) -> Vec<(ImportLink, Vec<Strin
 pub fn definition_sites(source: &str, lang: Lang) -> Vec<(String, std::ops::Range<usize>)> {
     if !matches!(
         lang,
-        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python
+        Lang::Rust | Lang::Ts | Lang::Tsx | Lang::Js | Lang::Python | Lang::Java
     ) {
         return Vec::new();
     }
@@ -1166,9 +1211,34 @@ pub fn definition_sites(source: &str, lang: Lang) -> Vec<(String, std::ops::Rang
                 | "enum_declaration"
                 | "method_definition",
             )
-            | (Lang::Python, "function_definition" | "class_definition") => {
+            | (Lang::Python, "function_definition" | "class_definition")
+            | (
+                Lang::Java,
+                "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "annotation_type_declaration"
+                | "method_declaration"
+                | "constructor_declaration"
+                | "enum_constant"
+                | "variable_declarator"
+                | "formal_parameter"
+                | "catch_formal_parameter"
+                | "enhanced_for_statement",
+            ) => {
                 if let Some(name) = node.child_by_field_name("name") {
                     push(&mut out, name);
+                }
+            }
+            // Java lambda parameters: `x -> …` or `(x, y) -> …`.
+            (Lang::Java, "lambda_expression") => {
+                if let Some(p) = node.child_by_field_name("parameters") {
+                    match p.kind() {
+                        "identifier" => push(&mut out, p),
+                        "inferred_parameters" => bind_pattern(&mut out, p),
+                        _ => {}
+                    }
                 }
             }
             // Rust `let` bindings + parameters (incl. destructuring patterns).
@@ -1319,6 +1389,25 @@ pub fn resolve_import(
                 }
             }
             first(cands)
+        }
+        // Java: `a.b.C` lives at `<source root>/a/b/C.java` — the root varies by build
+        // layout (`src/main/java/`, `src/`, a module dir…), so match on the path suffix.
+        // Static imports and nested types name a member under the class: drop trailing
+        // segments until a file matches.
+        (Lang::Java, ImportKind::Specifier) => {
+            let mut segs: Vec<&str> = link.target.split('.').collect();
+            while segs.len() > 1 {
+                let suffix = format!("{}.java", segs.join("/"));
+                let hit = files.iter().find(|f| {
+                    let s = f.to_string_lossy();
+                    s == suffix || s.ends_with(&format!("/{suffix}"))
+                });
+                if let Some(f) = hit {
+                    return Some(f.clone());
+                }
+                segs.pop();
+            }
+            None
         }
         // Rust `mod name;`: a sibling `name.rs` or `name/mod.rs`.
         (Lang::Rust, ImportKind::RustMod) => first(vec![
@@ -1543,6 +1632,7 @@ mod tests {
             ("def f(x):\n    return x\n", Lang::Python),
             ("<div class=\"a\">hi</div>", Lang::Html),
             ("package main\nfunc main() {}\n", Lang::Go),
+            ("class A { int f() { return 1; } }\n", Lang::Java),
             ("x <- 1  # comment\nf <- function(y) y + 1\n", Lang::R),
             ("\\section{Hi}  % comment\n\\ref{fig:1}\n", Lang::Latex),
         ];
@@ -1786,6 +1876,39 @@ mod tests {
             Some(pb("pkg/up/__init__.py")),
             ".. walks one package up"
         );
+    }
+
+    /// Java (issue #92): imports bind their last segment (wildcards nothing) and resolve
+    /// under any source root by path suffix, a static import landing on its class;
+    /// declarations, fields, locals, params and lambda params are definition sites.
+    #[cfg(feature = "java")]
+    #[test]
+    fn java_imports_resolve_and_definitions_index() {
+        let src = "package app;\nimport com.acme.Util;\nimport static com.acme.Util.max;\n\
+                   import java.util.*;\nclass Main {\n  int count;\n  \
+                   void run(String arg) { var x = 1; list.forEach(y -> y); }\n}\n";
+        let binds: Vec<String> = import_bindings(src, Lang::Java)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(binds, ["Util", "max"]);
+        let links = import_links(src, Lang::Java);
+        let files = [pb("core/src/main/java/com/acme/Util.java")];
+        let cur = pb("app/src/main/java/app/Main.java");
+        for l in &links[..2] {
+            assert_eq!(
+                resolve_import(l, Lang::Java, &cur, &files),
+                Some(files[0].clone()),
+                "{} resolves by suffix under any source root",
+                l.target
+            );
+        }
+        assert_eq!(resolve_import(&links[2], Lang::Java, &cur, &files), None);
+        let names: Vec<String> = definition_sites(src, Lang::Java)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(names, ["Main", "count", "run", "arg", "x", "y"]);
     }
 
     #[test]

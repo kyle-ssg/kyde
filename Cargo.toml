@@ -183,7 +183,7 @@ gpui = { workspace = true, features = ["test-support"] }
 default = ["full", "terminal"]
 full = [
     "rust", "typescript", "javascript", "json", "markdown",
-    "shell", "css", "yaml", "toml", "python", "html", "go", "r", "latex",
+    "shell", "css", "yaml", "toml", "python", "html", "go", "r", "latex", "java",
 ]
 # Embedded multi-tab terminal panel. Pulls alacritty's engine + the futures channel
 # used to wake the UI on new PTY output. Drop with `--no-default-features` (or omit
@@ -208,6 +208,7 @@ toml = ["kyde-syntax/toml"]
 python = ["kyde-syntax/python"]
 html = ["kyde-syntax/html"]
 go = ["kyde-syntax/go"]
+java = ["kyde-syntax/java"]
 r = ["kyde-syntax/r"]
 latex = ["kyde-syntax/latex"]
 

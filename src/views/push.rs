@@ -1,15 +1,18 @@
 //! Push view — the Push tab + push confirmation modal (commits ahead of upstream).
 //! Crate-root child module.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use crate::{
-    badge_inner, btn_primary_state, btn_secondary, div, file_badge, nav_keys, px, status_color,
-    theme, ui, Context, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde,
-    MenuTarget, ModalKind, Mode, MouseButton, NavTarget, ParentElement, Repo, SharedString,
+    btn_primary_state, btn_secondary, div, nav_keys, px, status_color, theme, tree, ui, Context,
+    Divider, FluentBuilder, FontWeight, GitTab, InteractiveElement, IntoElement, Kyde, MenuTarget,
+    ModalKind, Mode, MouseButton, NavTarget, ParentElement, Repo, SharedString,
     StatefulInteractiveElement, Styled,
 };
 
 impl Kyde {
-    /// Left column of the Push tab: a flat list of the files a push would send (click → diff)
+    /// Left column of the Push tab: the files a push would send as a folder tree (click → diff)
     /// + a footer with the Push button. No checkboxes — a push is all-or-nothing.
     pub(crate) fn render_push_left(
         &self,
@@ -18,58 +21,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let n = self.sync.push_files.len();
-        let rows: Vec<gpui::AnyElement> = self
-            .sync
-            .push_files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let selected = self.sync.push_selected == Some(i);
-                let name: SharedString = f
-                    .path
-                    .file_name()
-                    .map_or_else(
-                        || f.path.to_string_lossy().into_owned(),
-                        |s| s.to_string_lossy().into_owned(),
-                    )
-                    .into();
-                let dir = f
-                    .path
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|s| !s.is_empty());
-                let name_color = status_color(f.status);
-                let path = f.path.clone();
-                ui::picker::row(("push-file", i), selected, t.bg_mid)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .mx(px(6.0))
-                    .px_2()
-                    .py_1()
-                    .child(div().flex_none().child(badge_inner(file_badge(&path), 2.0)))
-                    .child(div().flex_none().text_color(name_color).child(name))
-                    .when_some(dir, |d, dir| {
-                        d.child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(t.line_number)
-                                .child(SharedString::from(dir)),
-                        )
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, window, cx| {
-                            window.focus(&this.commit.push_focus);
-                            this.select_push_file(i, cx);
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        let rows = self.push_tree_rows(true, cx);
 
         let count_header = div()
             .flex_none()
@@ -90,6 +42,7 @@ impl Kyde {
             cx,
         )
         .overflow_y_scroll()
+        .track_scroll(&self.sync.push_scroll)
         .flex()
         .flex_col()
         .flex_1()
@@ -168,62 +121,9 @@ impl Kyde {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
         let n = self.sync.push_files.len();
-        // Flat file list, styled like the commit/rollback rows (badge + name + status
-        // color), right-click → "View Diff". No checkboxes — a push is all-or-nothing.
-        let rows: Vec<gpui::AnyElement> = self
-            .sync
-            .push_files
-            .iter()
-            .enumerate()
-            .map(|(i, f)| {
-                let name: SharedString = f
-                    .path
-                    .file_name()
-                    .map_or_else(
-                        || f.path.to_string_lossy().into_owned(),
-                        |s| s.to_string_lossy().into_owned(),
-                    )
-                    .into();
-                let dir = f
-                    .path
-                    .parent()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .filter(|s| !s.is_empty());
-                let name_color = status_color(f.status);
-                let path = f.path.clone();
-                div()
-                    .id(("push-file", i))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .mx(px(6.0))
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(t.bg_mid))
-                    .child(div().flex_none().child(badge_inner(file_badge(&path), 2.0)))
-                    .child(div().flex_none().text_color(name_color).child(name))
-                    .when_some(dir, |d, dir| {
-                        d.child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(t.line_number)
-                                .child(SharedString::from(dir)),
-                        )
-                    })
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
-                            this.open_menu(e.position, MenuTarget::PushFile(i), cx);
-                        }),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+        // Same folder tree as the Push tab; right-click a file → "View Diff". No checkboxes —
+        // a push is all-or-nothing.
+        let rows = self.push_tree_rows(false, cx);
 
         let list = div()
             .id("push-list")
@@ -293,15 +193,125 @@ impl Kyde {
         panel.into_any_element()
     }
 
+    /// The push files as a folder tree (root row = the repo, every folder expanded on load),
+    /// shared by the Push tab and the Push window. In the tab (`in_tab`) clicking a file
+    /// shows its diff; in the window a right-click offers "View Diff".
+    fn push_tree_rows(&self, in_tab: bool, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let t = theme::get();
+        let sync = &self.sync;
+        let root_name = self
+            .repo_root
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let index: HashMap<&std::path::Path, usize> = sync
+            .push_files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.path.as_path(), i))
+            .collect();
+        let suppress_hover = in_tab && self.dragging(Divider::Tree);
+        self.push_visible_rows()
+            .into_iter()
+            .map(|r| {
+                let is_root = r.path.as_os_str().is_empty();
+                let file_idx = (!r.is_dir)
+                    .then(|| index.get(r.path.as_path()).copied())
+                    .flatten();
+                // The keyboard cursor: a folder when it's on one, else the selected file.
+                let selected = in_tab
+                    && match &sync.push_dir_cursor {
+                        Some(dir) => *dir == r.path,
+                        None => file_idx.is_some() && sync.push_selected == file_idx,
+                    };
+                let name_color = file_idx
+                    .and_then(|i| sync.push_files.get(i))
+                    .map_or(t.text, |f| status_color(f.status));
+                let name: SharedString = if is_root {
+                    root_name.clone().into()
+                } else {
+                    r.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        .into()
+                };
+                let expanded = sync.push_expanded.contains(&r.path);
+                let is_dir = r.is_dir;
+                let dir = r.path.clone();
+                ui::tree::item(
+                    cx,
+                    suppress_hover,
+                    &r.path,
+                    is_dir,
+                    expanded,
+                    r.depth,
+                    selected,
+                    name,
+                    name_color,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    move |this, _e, window, cx| {
+                        if in_tab {
+                            window.focus(&this.commit.push_focus);
+                        }
+                        if is_dir {
+                            if in_tab {
+                                this.sync.push_dir_cursor = Some(dir.clone());
+                            }
+                            this.toggle_push_dir(dir.clone(), cx);
+                        } else if let (true, Some(i)) = (in_tab, file_idx) {
+                            this.select_push_file(i, cx);
+                        }
+                    },
+                    |_, _| {},
+                    move |this, pos, cx| {
+                        if let (false, Some(i)) = (in_tab, file_idx) {
+                            this.open_menu(pos, MenuTarget::PushFile(i), cx);
+                        }
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The push tree's visible rows: the root (the repo) + every expanded folder's children.
+    pub(crate) fn push_visible_rows(&self) -> Vec<tree::Row> {
+        let sync = &self.sync;
+        let mut visible = vec![tree::Row {
+            path: PathBuf::new(),
+            is_dir: true,
+            depth: 0,
+        }];
+        if sync.push_expanded.contains(&PathBuf::new()) {
+            for mut r in sync.push_tree.visible(&sync.push_expanded) {
+                r.depth += 1;
+                visible.push(r);
+            }
+        }
+        visible
+    }
+
+    /// Expand / collapse a folder in the push tree.
+    pub(crate) fn toggle_push_dir(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if !self.sync.push_expanded.remove(&path) {
+            self.sync.push_expanded.insert(path);
+        }
+        cx.notify();
+    }
+
     /// Open the push confirmation modal (lists the files that would be pushed, like the
     /// commit/rollback views). Push doesn't fire until the user confirms.
     pub(crate) fn open_push_modal(&mut self, cx: &mut Context<Self>) {
         self.context_menu = None;
         if let Some(repo) = self.repo() {
             self.sync.push_base = repo.push_base();
-            self.sync.push_files = repo.push_files();
+            self.sync.set_push_files(repo.push_files());
         } else {
-            self.sync.push_files.clear();
+            self.sync.set_push_files(Vec::new());
         }
         self.open_modal_window(ModalKind::Push, "Push", 520.0, 560.0, cx);
         cx.notify();
@@ -365,6 +375,7 @@ impl Kyde {
     /// read-only into the diff panes (no working-tree edit, so no revert chevrons/autosave).
     pub(crate) fn select_push_file(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.sync.push_selected = Some(idx);
+        self.sync.push_dir_cursor = None;
         let Some(file) = self.sync.push_files.get(idx).cloned() else {
             return;
         };

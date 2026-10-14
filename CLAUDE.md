@@ -263,7 +263,7 @@ per-language capabilities — implement what the grammar supports, and note the 
 Also: `Lang::from_path` extension mapping, `Lang::pack` id, `PACKS` entry behind the
 Cargo feature, `pack_ext`/`pack_size` in `views/modals.rs`, and tests for each capability
 added (the `every_lang_with_a_pack_actually_highlights` style). Langs 4+5 currently
-cover: Rust, TS/TSX, JS, Python. JSON additionally has `sort_object_keys` (with JS/TS).
+cover: Rust, TS/TSX, JS, Python, Java. JSON additionally has `sort_object_keys` (with JS/TS).
 
 Error highlighting and ⌘-click navigation are **ON by default** for every installed pack that
 supports them, with a per-pack opt-OUT persisted in `plugins.json` (`errors_disabled` /

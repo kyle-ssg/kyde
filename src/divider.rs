@@ -20,6 +20,15 @@ pub(crate) fn full_island_w(vw: f32) -> f32 {
     (vw - RAIL_W - theme::FRAME_GAP).max(1.0)
 }
 
+/// Width of the History branches sidebar (fixed) + its 1px edge.
+pub(crate) const HIST_BRANCHES_W: f32 = 200.0;
+
+/// Width the History commit-list | files split shares — the island minus the branches
+/// sidebar. Both the layout and the `HistCommit` drag use it, so the drag stays 1:1.
+pub(crate) fn hist_split_w(vw: f32) -> f32 {
+    (full_island_w(vw) - HIST_BRANCHES_W - 1.0).max(1.0)
+}
+
 /// Every draggable resize divider in the app. They ALL share one drag mechanism
 /// (`Kyde::start_divider_drag` + `drag_divider`): the pane each controls is laid out at an
 /// explicit pixel size, and the grab offset captured on mouse-down cancels the (context-
@@ -67,7 +76,7 @@ impl Kyde {
             Divider::DiffPane => {
                 self.diff.split.clamp(0.15, 0.85) * (full_island_w(vw) - DIFF_GUTTER_W).max(1.0)
             }
-            Divider::HistCommit => self.history.commit_frac.clamp(0.15, 0.85) * full_island_w(vw),
+            Divider::HistCommit => self.history.commit_frac.clamp(0.15, 0.85) * hist_split_w(vw),
             Divider::HistPanel => self.history.panel_h,
             Divider::Term => {
                 #[cfg(feature = "terminal")]
@@ -96,7 +105,7 @@ impl Kyde {
                 self.diff.split = (size / avail).clamp(0.15, 0.85);
             }
             Divider::HistCommit => {
-                self.history.commit_frac = (size / full_island_w(vw)).clamp(0.15, 0.85);
+                self.history.commit_frac = (size / hist_split_w(vw)).clamp(0.15, 0.85);
             }
             Divider::HistPanel => {
                 self.history.panel_h = size.clamp(140.0, (vh - 180.0).max(140.0));

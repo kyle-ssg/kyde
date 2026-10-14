@@ -5,6 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// Commit-graph lane layout for the History log.
+pub mod graph;
+
 /// Everything `kyde-git` can fail with. Each variant carries the context needed to act on it
 /// — the offending path, the git command + its stderr, or the underlying I/O error + what we
 /// were doing. (Library crate → typed errors via `thiserror`, never `anyhow`.)
@@ -103,6 +106,9 @@ pub struct Commit {
     pub subject: String,
     /// Decoration refs (`%D`): e.g. "HEAD -> main, origin/main, tag: v1". Empty if none.
     pub refs: String,
+    /// Parent hashes — rewritten to the logged path's simplified history when the log is
+    /// path-scoped, so the graph connects the commits actually listed.
+    pub parents: Vec<String>,
 }
 
 /// One working tree of a repository (`git worktree list`): the main checkout or a
@@ -669,9 +675,19 @@ impl Repo {
     pub fn log(&self, rev: &str, limit: usize, path: Option<&Path>) -> Result<Vec<Commit>> {
         let rev = valid_ref(rev)?;
         // \x1f (unit separator) between fields; one commit per line (%s/%D are single-line).
-        let fmt = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D";
+        // `--date-order` keeps every parent below all its children (what the graph lays out
+        // from); `--parents` rewrites %P to the path-simplified history on a scoped log.
+        let fmt = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
         let n = format!("-n{limit}");
-        let mut args = vec!["log", rev, "--date=relative", &n, fmt];
+        let mut args = vec![
+            "log",
+            rev,
+            "--date=relative",
+            "--date-order",
+            "--parents",
+            &n,
+            fmt,
+        ];
         let path_str = path.map(|p| p.to_string_lossy().into_owned());
         if let Some(p) = &path_str {
             args.push("--");
@@ -689,6 +705,12 @@ impl Repo {
                     date: f.next()?.to_string(),
                     subject: f.next()?.to_string(),
                     refs: f.next().unwrap_or("").trim().to_string(),
+                    parents: f
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect(),
                 })
             })
             .collect())

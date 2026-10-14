@@ -133,7 +133,9 @@ impl Render for Kyde {
                             }
                         }),
                     ),
-            );
+            )
+            // Git quick-access buttons, right-aligned (issue #92).
+            .children(self.render_git_toolbar(cx));
 
         // Left activity rail with the mode icons.
         let rail = div()

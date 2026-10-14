@@ -21,7 +21,7 @@ use term_panel::TermPanel;
 #[cfg(feature = "terminal")]
 use term_panel::ToggleAction;
 mod render;
-pub(crate) use divider::{full_island_w, Divider, DIFF_GUTTER_W};
+pub(crate) use divider::{full_island_w, hist_split_w, Divider, DIFF_GUTTER_W, HIST_BRANCHES_W};
 // Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
 // resolves) and glob-re-exported so call sites use `btn_primary`/`file_badge`/… unqualified.
 pub(crate) use app::{
@@ -645,6 +645,10 @@ struct HistoryView {
     path: Option<PathBuf>,
     /// Commits shown in the log list (newest first).
     commits: Vec<git::Commit>,
+    /// The commit graph, one row per entry of `commits` (laid out when they load).
+    graph: Vec<git::graph::GraphRow>,
+    /// Graph column width in lanes — the widest row, capped (see `history::MAX_LANES`).
+    graph_lanes: usize,
     /// Selected commit index into `commits`.
     selected: Option<usize>,
     /// Files changed by the selected commit under the current compare mode.
@@ -696,6 +700,11 @@ struct HistoryView {
     files_dir_cursor: Option<PathBuf>,
     /// Scroll position of the changed-files tree (keeps the keyboard cursor in view).
     files_scroll: ScrollHandle,
+    /// Expanded folder keys in the branches sidebar (`branch_rows` keys). Every folder opens
+    /// when the branches load, minus the ones in `branches_collapsed`.
+    branches_expanded: std::collections::HashSet<String>,
+    /// Folders the user collapsed in the branches sidebar — kept across reloads.
+    branches_collapsed: std::collections::HashSet<String>,
 }
 
 impl HistoryView {
@@ -729,6 +738,8 @@ impl HistoryView {
             rev: "HEAD".to_string(),
             path: None,
             commits: Vec::new(),
+            graph: Vec::new(),
+            graph_lanes: 0,
             selected: None,
             files: Vec::new(),
             file_selected: None,
@@ -753,6 +764,8 @@ impl HistoryView {
             files_focus: cx.focus_handle(),
             files_dir_cursor: None,
             files_scroll: ScrollHandle::new(),
+            branches_expanded: std::collections::HashSet::new(),
+            branches_collapsed: std::collections::HashSet::new(),
         }
     }
 }
@@ -1480,6 +1493,14 @@ struct SyncState {
     push_base: String,
     /// Selected file index in the Push tab's list.
     push_selected: Option<usize>,
+    /// Folder tree of `push_files` (Push tab + Push window), rebuilt by `set_push_files`.
+    push_tree: tree::Tree,
+    /// Expanded dirs in the push tree (`""` = the root row).
+    push_expanded: std::collections::HashSet<PathBuf>,
+    /// The push tree's keyboard cursor when it's on a FOLDER (`None` = on the selected file).
+    push_dir_cursor: Option<PathBuf>,
+    /// Scroll position of the push tree (keeps the keyboard cursor in view).
+    push_scroll: ScrollHandle,
 }
 
 impl SyncState {
@@ -1494,6 +1515,35 @@ impl SyncState {
             push_files: Vec::new(),
             push_base: String::new(),
             push_selected: None,
+            push_tree: tree::Tree::default(),
+            push_expanded: std::collections::HashSet::new(),
+            push_dir_cursor: None,
+            push_scroll: ScrollHandle::new(),
+        }
+    }
+
+    /// Replace the files a push would send. The tree is only rebuilt (fully expanded, like
+    /// the Commit tree) when the set of paths changes, so a periodic refresh doesn't undo
+    /// the user's folder collapses.
+    fn set_push_files(&mut self, files: Vec<ChangedFile>) {
+        let same = files.len() == self.push_files.len()
+            && files
+                .iter()
+                .zip(&self.push_files)
+                .all(|(a, b)| a.path == b.path);
+        self.push_files = files;
+        if same {
+            return;
+        }
+        let paths: Vec<PathBuf> = self.push_files.iter().map(|f| f.path.clone()).collect();
+        self.push_tree = tree::Tree::build(&paths);
+        self.push_dir_cursor = None;
+        self.push_expanded.clear();
+        self.push_expanded.insert(PathBuf::new());
+        for p in &paths {
+            for anc in p.ancestors().skip(1) {
+                self.push_expanded.insert(anc.to_path_buf());
+            }
         }
     }
 }
@@ -4407,6 +4457,57 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// History branches sidebar (#92): branches load off the UI thread when the view opens,
+    /// `/` folders start expanded, and a folder the user collapsed stays collapsed on reload.
+    #[gpui::test]
+    fn history_branches_sidebar_loads_and_remembers_collapse(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        git(&dir, &["branch", "feature/greeting"]);
+        handle.update(cx, |k, _w, cx| k.enter_history(cx)).unwrap();
+        cx.run_until_parked();
+        let folder = "sec:local/feature".to_string();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.history.locals.iter().any(|b| b == "feature/greeting"));
+                assert!(k.history.branches_expanded.contains(&folder));
+                k.toggle_history_branch_folder(folder.clone(), cx);
+                k.enter_history(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    !k.history.branches_expanded.contains(&folder),
+                    "a collapsed folder must stay collapsed when the branches reload"
+                );
+                assert!(k.history.branches_expanded.contains("sec:local"));
+            })
+            .unwrap();
+    }
+
+    /// Push tree (#92): a refresh with the same files keeps the user's folder collapses; a
+    /// changed file set rebuilds the tree fully expanded.
+    #[test]
+    fn push_tree_keeps_collapses_until_files_change() {
+        let f = |p: &str| ChangedFile {
+            path: PathBuf::from(p),
+            status: FileStatus::Modified,
+        };
+        let src = std::path::Path::new("src");
+        let mut s = SyncState::new();
+        s.set_push_files(vec![f("src/a.rs"), f("src/b/c.rs")]);
+        assert!(s.push_expanded.contains(src));
+        s.push_expanded.remove(src);
+        s.set_push_files(vec![f("src/a.rs"), f("src/b/c.rs")]);
+        assert!(
+            !s.push_expanded.contains(src),
+            "a refresh must not re-expand"
+        );
+        s.set_push_files(vec![f("src/a.rs")]);
+        assert!(s.push_expanded.contains(src));
+    }
+
     /// Autosave state machine: a dirty editor buffer flushes to disk, the buffer is marked
     /// clean, and the changed-files list optimistically shows the file as Modified before
     /// the debounced `git status` lands (so tree/tab colors react instantly).
@@ -5327,6 +5428,10 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, cx| k.close_modal_window(ModalKind::Diff, cx))
             .unwrap();
+        settle(cx);
+
+        // History view: the commit log with its graph column + the selected commit's diff.
+        handle.update(cx, |k, _w, cx| k.enter_history(cx)).unwrap();
         settle(cx);
 
         // Branch popup.
