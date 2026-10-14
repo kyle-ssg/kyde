@@ -2806,8 +2806,14 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             cx.notify();
         }
         // Commit view (diff behind) + the Rollback native modal window open over it.
+        // Rollback window over the Commit view. screenshots.sh passes the git-diff fixture
+        // (KYDE_SHOT_REPO, guaranteed working-tree changes): on a clean repo there's nothing
+        // to roll back, the window never opens, and the capture waits on a bare Commit view.
         "rollback" => {
             set_packs(view, &["rust"]);
+            if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                view.open_project(PathBuf::from(repo), cx);
+            }
             view.enter_commit(cx);
             view.open_rollback_path(PathBuf::new(), cx);
         }
