@@ -651,7 +651,14 @@ impl Kyde {
         // Snapshot what to stage vs unstage so the actual git work runs off the UI thread
         // (staging + commit shell out per file — keep the button responsive + show feedback).
         let checked: Vec<PathBuf> = self.commit.checked.iter().cloned().collect();
-        let all: Vec<PathBuf> = self.files.iter().map(|f| f.path.clone()).collect();
+        // An unticked untracked file has nothing staged — skip it rather than shell out an
+        // unstage per file (a fresh scaffold can leave hundreds unticked).
+        let all: Vec<PathBuf> = self
+            .files
+            .iter()
+            .filter(|f| f.status != FileStatus::Untracked || self.commit.checked.contains(&f.path))
+            .map(|f| f.path.clone())
+            .collect();
         let excluded = self.commit.excluded_hunks.clone();
         // For the local-history "Commit: <subject>" stamp on success.
         let committed = checked.clone();
