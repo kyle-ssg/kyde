@@ -773,7 +773,7 @@ impl Kyde {
         if let Some(repo) = self.repo() {
             self.files = repo.status().unwrap_or_default();
             self.sync.push_base = repo.push_base();
-            self.sync.push_files = repo.push_files();
+            self.sync.set_push_files(repo.push_files());
         }
         // Default to the tab that has work: Push if there's nothing to commit but commits
         // are waiting to be pushed; Commit otherwise.

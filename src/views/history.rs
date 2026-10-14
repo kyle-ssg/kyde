@@ -275,8 +275,10 @@ impl Kyde {
             });
 
         // ── commit list (filtered by the commit search box) ──
-        let commit_rows: Vec<gpui::AnyElement> = self
-            .history_visible_commits(cx)
+        let shown = self.history_visible_commits(cx);
+        // The graph only means something over the full, unfiltered log.
+        let unfiltered = shown.len() == self.history.commits.len();
+        let commit_rows: Vec<gpui::AnyElement> = shown
             .into_iter()
             .filter_map(|i| self.history.commits.get(i).map(|c| (i, c)))
             .map(|(i, c)| {
@@ -284,9 +286,7 @@ impl Kyde {
                 let subject: SharedString = c.subject.clone().into();
                 let meta: SharedString = format!("{} · {} · {}", c.short, c.author, c.date).into();
                 let refs = c.refs.clone();
-                // The graph only means something over the full, unfiltered log.
-                let graph = cq
-                    .is_empty()
+                let graph = unfiltered
                     .then(|| self.history.graph.get(i))
                     .flatten()
                     .map(|g| graph_cell(g.clone(), self.history.graph_lanes));
@@ -380,7 +380,7 @@ impl Kyde {
         // files pane fills the rest (flex_1). Sized in EXPLICIT pixels from the same formula the
         // divider drag inverts (`Divider::HistCommit`), so the bar tracks the cursor exactly 1:1.
         let commit_frac = self.history.commit_frac.clamp(0.15, 0.85);
-        let commit_w = commit_frac * full_island_w(f32::from(window.viewport_size().width));
+        let commit_w = commit_frac * hist_split_w(f32::from(window.viewport_size().width));
         let commit_wrap = div()
             .w(px(commit_w))
             .flex_none()
@@ -565,6 +565,8 @@ impl Kyde {
                     .flex_1()
                     .w_full()
                     .min_h_0()
+                    .child(self.render_history_branches(ui, cx))
+                    .child(div().w(px(1.0)).flex_none().h_full().bg(t.divider))
                     .child(commit_wrap)
                     .child(split_divider)
                     .child(files_wrap),
@@ -796,6 +798,7 @@ impl Kyde {
             .clone()
             .unwrap_or_else(|| "HEAD".to_string());
         self.reload_history(cx);
+        self.load_history_branches(cx);
     }
 
     /// Reload the commit list for `history_rev` (scoped to `history_path`), select newest.
@@ -877,8 +880,9 @@ impl Kyde {
     pub(crate) fn toggle_history_branches(&mut self, cx: &mut Context<Self>) {
         if !self.history.branch_open {
             if let Some(r) = self.repo() {
-                self.history.locals = r.branches().unwrap_or_default();
-                self.history.remotes = r.remote_branches().unwrap_or_default();
+                let locals = r.branches().unwrap_or_default();
+                let remotes = r.remote_branches().unwrap_or_default();
+                self.set_history_branches(locals, remotes);
             }
             self.history.branch_query.update(cx, |e, cx| {
                 e.set_content(String::new(), Lang::PlainText, cx);
@@ -893,6 +897,172 @@ impl Kyde {
         self.history.rev = rev;
         self.history.branch_open = false;
         self.reload_history(cx);
+    }
+
+    /// Load local + remote branches for the sidebar off the UI thread.
+    fn load_history_branches(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let (locals, remotes) = cx
+                .background_executor()
+                .spawn(async move {
+                    Repo::discover(&root)
+                        .map(|r| {
+                            (
+                                r.branches().unwrap_or_default(),
+                                r.remote_branches().unwrap_or_default(),
+                            )
+                        })
+                        .unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.set_history_branches(locals, remotes);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Store the branch lists and open every sidebar folder the user hasn't collapsed (computed
+    /// here, once per load — never per frame).
+    fn set_history_branches(&mut self, locals: Vec<String>, remotes: Vec<String>) {
+        let none = std::collections::HashSet::new();
+        let h = &mut self.history;
+        h.branches_expanded = branch_rows(&[], &locals, &remotes, &none, true)
+            .into_iter()
+            .filter_map(|r| match r.node {
+                BranchNode::Folder { key, .. } if !h.branches_collapsed.contains(&key) => Some(key),
+                _ => None,
+            })
+            .collect();
+        h.locals = locals;
+        h.remotes = remotes;
+    }
+
+    pub(crate) fn toggle_history_branch_folder(&mut self, key: String, cx: &mut Context<Self>) {
+        let h = &mut self.history;
+        if h.branches_expanded.remove(&key) {
+            h.branches_collapsed.insert(key);
+        } else {
+            h.branches_collapsed.remove(&key);
+            h.branches_expanded.insert(key);
+        }
+        cx.notify();
+    }
+
+    /// The branches sidebar left of the commit list (`IntelliJ`'s Log pane): `HEAD`, then the
+    /// Local and Remote branches with `/` segments as folders. Clicking a branch logs it.
+    fn render_history_branches(
+        &self,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let rev = self.history.rev.as_str();
+        let current = self.current_branch.as_deref();
+        let row = |id: (&'static str, usize), selected: bool, depth: usize| {
+            ui::picker::row(id, selected, t.bg_mid)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .h(px(24.0))
+                .mx(px(6.0))
+                .pl(px(8.0 + depth as f32 * 14.0))
+                .pr_2()
+                .flex_none()
+        };
+        let icon = |path: &'static str, color: kyde_color::Color| {
+            svg()
+                .path(path)
+                .size(px(14.0))
+                .flex_none()
+                .text_color(color)
+        };
+        // Same caret column as the file trees (`ui::tree::item`): a triangle for folders, an
+        // empty spacer for branches so their icons line up under the folder icons.
+        let caret = |expanded: Option<bool>| {
+            div()
+                .w(px(16.0))
+                .flex_none()
+                .text_color(t.line_number)
+                .text_size(px(t.ui_font_size + 5.0))
+                .when_some(expanded, |d, open| {
+                    d.child(if open { "▾" } else { "▸" })
+                })
+        };
+        let head = row(("hist-br-head", 0), rev == "HEAD", 0)
+            .child(caret(None))
+            .child(icon("icons/git-commit.svg", t.line_number))
+            .child(div().truncate().child("HEAD (Current Branch)"))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.set_history_rev("HEAD".to_string(), cx)),
+            );
+        let rows = branch_rows(
+            &[],
+            &self.history.locals,
+            &self.history.remotes,
+            &self.history.branches_expanded,
+            false,
+        );
+        let items = rows.into_iter().enumerate().map(|(i, r)| match r.node {
+            BranchNode::Folder {
+                key,
+                expanded,
+                section,
+            } => row(("hist-br", i), false, r.depth)
+                .text_color(if section { t.secondary_text } else { t.text })
+                .child(caret(Some(expanded)))
+                .when(!section, |d| {
+                    d.child(icon("icons/folder.svg", t.line_number))
+                })
+                .child(div().truncate().child(SharedString::from(r.label)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        this.toggle_history_branch_folder(key.clone(), cx);
+                    }),
+                )
+                .into_any_element(),
+            BranchNode::Leaf { full } => {
+                // The checked-out branch gets an accent icon (IntelliJ's current-branch tag).
+                let is_current = current == Some(full.as_str());
+                row(("hist-br", i), rev == full, r.depth)
+                    .child(caret(None))
+                    .child(icon(
+                        "icons/git-branch.svg",
+                        if is_current { t.primary } else { t.line_number },
+                    ))
+                    .child(div().truncate().child(SharedString::from(r.label)))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.set_history_rev(full.clone(), cx);
+                        }),
+                    )
+                    .into_any_element()
+            }
+        });
+        div()
+            .id("hist-branches")
+            .w(px(HIST_BRANCHES_W))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .py_1()
+            .font_family(ui)
+            .text_size(px(t.ui_font_size + 1.0))
+            .text_color(t.text)
+            .child(head)
+            .children(items)
+            .into_any_element()
     }
 
     /// `(from, to)` revisions for the current compare mode against `hash`; `to == None`

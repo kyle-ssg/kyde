@@ -224,18 +224,37 @@ impl Kyde {
         }
     }
 
-    /// Push tab list: ↑/↓ select files (their diffs show alongside).
+    /// Push tab tree: arrows walk + fold (landing on a file shows its diff); ⏎ / space fold
+    /// a folder.
     fn push_list_key(&mut self, key: Key, cx: &mut Context<Self>) {
-        let n = self.sync.push_files.len();
-        let next = match (key, self.sync.push_selected) {
-            (Key::Arrow(NavKey::Down), None) => 0,
-            (Key::Arrow(NavKey::Down), Some(i)) => ui::picker::nav_down(i, n),
-            (Key::Arrow(NavKey::Up), None) => n.saturating_sub(1),
-            (Key::Arrow(NavKey::Up), Some(i)) => ui::picker::nav_up(i),
-            _ => return,
-        };
-        if next < n {
-            self.select_push_file(next, cx);
+        let rows = self.push_visible_rows();
+        let cursor = self.sync.push_dir_cursor.clone().or_else(|| {
+            self.sync
+                .push_selected
+                .and_then(|i| self.sync.push_files.get(i))
+                .map(|f| f.path.clone())
+        });
+        match key {
+            Key::Arrow(k) => match nav(&rows, cursor.as_deref(), &self.sync.push_expanded, k) {
+                Nav::Select(p) => {
+                    if let Some(i) = rows.iter().position(|r| r.path == p) {
+                        self.sync.push_scroll.scroll_to_item(i);
+                    }
+                    match self.sync.push_files.iter().position(|f| f.path == p) {
+                        Some(i) => self.select_push_file(i, cx),
+                        None => self.sync.push_dir_cursor = Some(p),
+                    }
+                }
+                Nav::Expand(p) | Nav::Collapse(p) => self.toggle_push_dir(p, cx),
+                Nav::Stay => {}
+            },
+            Key::Confirm | Key::Toggle => {
+                if let Some((_, r)) = row_of(&rows, cursor.as_deref()).filter(|(_, r)| r.is_dir) {
+                    let p = r.path.clone();
+                    self.toggle_push_dir(p, cx);
+                }
+            }
+            _ => {}
         }
     }
 

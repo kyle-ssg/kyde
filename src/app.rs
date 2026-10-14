@@ -332,7 +332,7 @@ impl Kyde {
             // stale tree/branch never lingers behind the landing view.
             self.files.clear();
             self.stats.clear();
-            self.sync.push_files.clear();
+            self.sync.set_push_files(Vec::new());
             self.is_git = false;
             self.current_branch = None;
             self.worktree.list.clear();
@@ -418,7 +418,7 @@ impl Kyde {
         if snap.is_git {
             // What a push would send — kept live so the Push tab's count badge is accurate.
             self.sync.push_base = snap.push_base;
-            self.sync.push_files = snap.push_files;
+            self.sync.set_push_files(snap.push_files);
             if let Some(msg) = snap.status_err {
                 // Keep the previous file list on a transient failure (see `RepoSnapshot`);
                 // a later success clears the banner.
@@ -432,7 +432,7 @@ impl Kyde {
         } else {
             self.files.clear();
             self.stats.clear();
-            self.sync.push_files.clear();
+            self.sync.set_push_files(Vec::new());
             self.op_error = None;
         }
         self.rebuild_commit_view(false);
