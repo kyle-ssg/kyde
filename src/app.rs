@@ -181,8 +181,9 @@ impl Kyde {
         let project_search = cx.new(|cx| CodeEditor::single_line(cx, "Search projects"));
         // Branch-switcher popup state + its search-box subscription now live in
         // `BranchPopup::new` (see the `branch` field below).
-        cx.subscribe(&project_search, |_this, _e, ev, cx| {
+        cx.subscribe(&project_search, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) {
+                this.projects_hl = None;
                 cx.notify();
             }
         })
@@ -208,6 +209,7 @@ impl Kyde {
             ignored_packs: std::collections::HashSet::new(),
             recents: Recents::load(),
             project_search,
+            projects_hl: None,
             files: Vec::new(),
             stats: std::collections::HashMap::new(),
             selected: None,
@@ -241,7 +243,7 @@ impl Kyde {
             clear_lh_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
-            settings_theme_open: false,
+            settings_theme: ui::SelectState::new(cx),
             font_preview: None,
             welcome_frame: 0,
             pending_crash: crash_log_path()
@@ -250,6 +252,9 @@ impl Kyde {
             op_error: None,
             pending_error: None,
             context_menu: None,
+            menu_focus: cx.focus_handle(),
+            menu_focus_pending: false,
+            menu_return_focus: None,
             diff_win: None,
             diff_modal_open: false,
             main_window_bounds: None,
@@ -266,7 +271,7 @@ impl Kyde {
             is_git: true,
             current_branch: None,
             branch: BranchPopup::new(cx),
-            worktree: WorktreePopup::new(),
+            worktree: WorktreePopup::new(cx),
             refresh_gen: 0,
             sync: SyncState::new(),
             push_win: None,
@@ -613,48 +618,6 @@ impl Kyde {
         .detach();
     }
 
-    // ── context menu ──────────────────────────────────────────────
-    pub(crate) fn open_menu(
-        &mut self,
-        at: Point<Pixels>,
-        target: MenuTarget,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(ContextMenu {
-            at,
-            target,
-            submenu: None,
-        });
-        cx.notify();
-    }
-
-    /// Open a flyout submenu (`New` / `Git`) inside the context menu — used on hover, so it
-    /// switches between them but never re-closes on a repeated hover.
-    pub(crate) fn open_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
-        if let Some(m) = self.context_menu.as_mut() {
-            if m.submenu != Some(kind) {
-                m.submenu = Some(kind);
-                cx.notify();
-            }
-        }
-    }
-
-    /// Toggle a flyout submenu (`New` / `Git`) — used on click.
-    pub(crate) fn toggle_menu_submenu(&mut self, kind: Submenu, cx: &mut Context<Self>) {
-        if let Some(m) = self.context_menu.as_mut() {
-            m.submenu = if m.submenu == Some(kind) {
-                None
-            } else {
-                Some(kind)
-            };
-        }
-        cx.notify();
-    }
-    pub(crate) fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
-        cx.notify();
-    }
-
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
     /// silent no-op. `ctx` is a short human label ("Commit", "Push", …); the error is
     /// stringified after it. Still logs to stderr for debugging.
@@ -848,13 +811,19 @@ impl Kyde {
             self.close_tab(idx, cx);
         }
     }
+    /// ⌘1 / ⇧⌘E — the Browse view with the keyboard in its file tree (IDE "focus project
+    /// view"), its cursor on the open file when nothing is selected yet.
     pub(crate) fn act_mode_browse(
         &mut self,
         _: &ModeBrowse,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.switch_mode(Mode::Browse, cx);
+        if self.browse.selected_path.is_none() {
+            self.browse.selected_path.clone_from(&self.browse.open_path);
+        }
+        window.focus(&self.browse.tree_focus);
     }
 
     /// The single path EVERY top-level view switch goes through — the activity-rail buttons and

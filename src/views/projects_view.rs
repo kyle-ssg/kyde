@@ -50,21 +50,26 @@ impl Kyde {
             .py_2()
             .border_b_1()
             .border_color(theme::get().divider)
+            // ↑↓ / ⏎ from the search box walk + open the recents below (issue #81).
             .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .text_color(theme::get().line_number)
-                    .child(
-                        svg()
-                            .path("icons/search.svg")
-                            .size(px(15.0))
-                            .text_color(theme::get().line_number),
-                    )
-                    .child(div().flex_1().child(self.project_search.clone())),
+                nav_keys(
+                    div().key_context(ui::nav::NAV_LIST),
+                    NavTarget::Projects,
+                    cx,
+                )
+                .flex_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .text_color(theme::get().line_number)
+                .child(
+                    svg()
+                        .path("icons/search.svg")
+                        .size(px(15.0))
+                        .text_color(theme::get().line_number),
+                )
+                .child(div().flex_1().child(self.project_search.clone())),
             )
             .child(button("New Project", false, cx).on_mouse_down(
                 MouseButton::Left,
@@ -104,20 +109,27 @@ impl Kyde {
         root.into_any_element()
     }
 
-    /// The scrollable recent-projects list (Projects screen, when there are recents).
-    fn render_recents_list(&self, query: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let rows = self
-            .recents
+    /// Recent projects matching the landing search (name or path), most recent first.
+    pub(crate) fn project_matches(&self, query: &str) -> Vec<&PathBuf> {
+        self.recents
             .paths
             .iter()
             .filter(|p| {
-                if query.is_empty() {
-                    return true;
-                }
-                let name = projects::name_of(p).to_lowercase();
-                name.contains(query) || p.to_string_lossy().to_lowercase().contains(query)
+                query.is_empty()
+                    || projects::name_of(p).to_lowercase().contains(query)
+                    || p.to_string_lossy().to_lowercase().contains(query)
             })
-            .map(|p| {
+            .collect()
+    }
+
+    /// The scrollable recent-projects list (Projects screen, when there are recents).
+    fn render_recents_list(&self, query: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let rows = self
+            .project_matches(query)
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let lit = self.projects_hl == Some(i);
                 let name = projects::name_of(p);
                 let icon_color = gpui::rgb(projects::color_for(&name));
                 let pretty = projects::pretty_path(p);
@@ -129,6 +141,7 @@ impl Kyde {
                     .gap_3()
                     .px_4()
                     .py_2()
+                    .when(lit, |d| d.bg(theme::get().selected_bg))
                     .hover(|s| s.bg(theme::get().caret_row))
                     .child(
                         div()

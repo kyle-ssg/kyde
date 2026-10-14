@@ -262,33 +262,6 @@ impl Kyde {
         let t = theme::get();
         let q = self.branch.query.read(cx).text().to_string();
         let ql = q.trim().to_lowercase();
-        let current = self.current_branch.clone();
-        let matches = |b: &str| ql.is_empty() || b.to_lowercase().contains(&ql);
-
-        let recent: Vec<String> = self
-            .branch
-            .list
-            .iter()
-            .filter(|b| current.as_deref() != Some(b.as_str()))
-            .filter(|b| matches(b))
-            .take(5)
-            .cloned()
-            .collect();
-        let mut all: Vec<String> = self
-            .branch
-            .list
-            .iter()
-            .filter(|b| matches(b))
-            .cloned()
-            .collect();
-        all.sort_by_key(|b| b.to_lowercase());
-        let remotes: Vec<String> = self
-            .branch
-            .remotes
-            .iter()
-            .filter(|b| matches(b))
-            .cloned()
-            .collect();
 
         let nb_label = if ql.is_empty() {
             "+ New Branch".to_string()
@@ -298,12 +271,14 @@ impl Kyde {
         // Popup separators: the theme `divider` (#26272B) is invisible on the popup's
         // `bg_mid` (#26282B), so use a faint white hairline that actually reads.
         let sep = gpui::rgba(0xFFFFFF1A);
+        let hl = self.branch.hl;
         let new_row = div()
             .mx_1()
             .px_2()
             .py_1()
             .rounded_md()
             .cursor_pointer()
+            .when(hl == Some(0), |d| d.bg(t.selected_bg))
             .hover(|s| s.bg(t.selected_bg))
             .text_color(t.primary)
             .child(SharedString::from(nb_label))
@@ -329,6 +304,7 @@ impl Kyde {
             .py_1()
             .rounded_md()
             .cursor_pointer()
+            .when(hl == Some(1), |d| d.bg(t.selected_bg))
             .hover(|s| s.bg(t.selected_bg))
             .text_color(t.text)
             .child(SharedString::from(pull_label))
@@ -337,37 +313,34 @@ impl Kyde {
                 cx.listener(move |this, _e, _w, cx| this.do_pull(cx)),
             );
 
-        let search = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_2()
-            .border_b_1()
-            .border_color(sep)
-            .child(
-                svg()
-                    .path("icons/search.svg")
-                    .size(px(15.0))
-                    .flex_none()
-                    .text_color(t.line_number),
-            )
-            .child(div().flex_1().min_w_0().child(self.branch.query.clone()));
+        // The search box keeps focus; ↑↓ / ⏎ bubble from it to the list (issue #81).
+        let search = nav_keys(
+            div().key_context(ui::nav::NAV_LIST),
+            NavTarget::BranchPopup,
+            cx,
+        )
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .border_b_1()
+        .border_color(sep)
+        .child(
+            svg()
+                .path("icons/search.svg")
+                .size(px(15.0))
+                .flex_none()
+                .text_color(t.line_number),
+        )
+        .child(div().flex_1().min_w_0().child(self.branch.query.clone()));
 
-        // Branch tree: Recent + Local sections as expandable roots; `/` → folders.
-        // While searching, force everything open so matches are visible.
-        let rows = branch_rows(
-            &recent,
-            &all,
-            &remotes,
-            &self.branch.expanded,
-            !ql.is_empty(),
-        );
-        let tree_rows = self.branch_tree(rows, cx);
+        let tree_rows = self.branch_tree(self.branch_popup_rows(cx), cx);
         let list = div()
             .id("branch-list")
             .overflow_y_scroll()
+            .track_scroll(&self.branch.scroll)
             .flex()
             .flex_col()
             .py_1()
@@ -413,6 +386,45 @@ impl Kyde {
             .into_any_element()
     }
 
+    /// The branch popup's tree rows for the current search: Recent (top 5 besides the
+    /// current branch) + Local + Remote sections as expandable roots, `/` segments as
+    /// folders. While searching, everything is forced open so matches are visible.
+    pub(crate) fn branch_popup_rows(&self, cx: &App) -> Vec<BranchRow> {
+        let ql = self.branch.query.read(cx).text().trim().to_lowercase();
+        let current = self.current_branch.as_deref();
+        let matches = |b: &str| ql.is_empty() || b.to_lowercase().contains(&ql);
+        let recent: Vec<String> = self
+            .branch
+            .list
+            .iter()
+            .filter(|b| current != Some(b.as_str()) && matches(b))
+            .take(5)
+            .cloned()
+            .collect();
+        let mut all: Vec<String> = self
+            .branch
+            .list
+            .iter()
+            .filter(|b| matches(b))
+            .cloned()
+            .collect();
+        all.sort_by_key(|b| b.to_lowercase());
+        let remotes: Vec<String> = self
+            .branch
+            .remotes
+            .iter()
+            .filter(|b| matches(b))
+            .cloned()
+            .collect();
+        branch_rows(
+            &recent,
+            &all,
+            &remotes,
+            &self.branch.expanded,
+            !ql.is_empty(),
+        )
+    }
+
     /// Render the branch tree (sections as roots, `/` segments as folders).
     fn branch_tree(&self, rows: Vec<BranchRow>, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let t = theme::get();
@@ -421,7 +433,10 @@ impl Kyde {
         // itself hides Checkout inside a pinned (linked) worktree — see the
         // `MenuTarget::Branch` arm in `render_context_menu`.
         rows.into_iter()
-            .map(|r| {
+            .enumerate()
+            .map(|(i, r)| {
+                // Keyboard highlight (the list's first two items are New Branch + Pull).
+                let lit = self.branch.hl == Some(i + 2);
                 let indent = px(8.0 + r.depth as f32 * 14.0);
                 match r.node {
                     BranchNode::Folder {
@@ -440,6 +455,7 @@ impl Kyde {
                             .pr_2()
                             .rounded_md()
                             .cursor_pointer()
+                            .when(lit, |d| d.bg(t.selected_bg))
                             .hover(|s| s.bg(t.bg_light))
                             .text_color(t.text)
                             .child(
@@ -504,6 +520,7 @@ impl Kyde {
                             .pl(indent)
                             .pr_2()
                             .rounded_md()
+                            .when(lit, |d| d.bg(t.selected_bg))
                             .when(!is_current, |d| {
                                 d.cursor_pointer().hover(|s| s.bg(t.selected_bg))
                             })
@@ -533,6 +550,7 @@ impl Kyde {
                                             this.open_branch_menu(
                                                 nm_menu.clone(),
                                                 e.position.y,
+                                                false,
                                                 window,
                                                 cx,
                                             );
@@ -576,6 +594,7 @@ impl Kyde {
                                             this.open_branch_menu(
                                                 nm.clone(),
                                                 e.position.y,
+                                                false,
                                                 window,
                                                 cx,
                                             );
@@ -593,19 +612,22 @@ impl Kyde {
     /// Open a branch row's actions menu as a FLYOUT on the popup's left edge (at the
     /// row's height). The menu anchors its top-RIGHT corner here — see the
     /// `MenuTarget::Branch` handling in `render_context_menu`.
-    fn open_branch_menu(
+    /// `by_key` = opened from the keyboard (the first action starts highlighted).
+    pub(crate) fn open_branch_menu(
         &mut self,
         name: String,
         row_y: gpui::Pixels,
+        by_key: bool,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
         let popup_left = f32::from(window.viewport_size().width) - POPUP_RIGHT - POPUP_W;
-        self.open_menu(
-            gpui::point(px(popup_left), row_y),
-            MenuTarget::Branch(name),
-            cx,
-        );
+        let at = gpui::point(px(popup_left), row_y);
+        if by_key {
+            self.open_menu_by_key(at, MenuTarget::Branch(name), cx);
+        } else {
+            self.open_menu(at, MenuTarget::Branch(name), cx);
+        }
     }
 
     // ── branch switcher ───────────────────────────────────────────
@@ -676,6 +698,7 @@ impl Kyde {
             }
             // Recent expanded by default; Local collapsed.
             self.branch.expanded.insert("sec:recent".into());
+            self.branch.hl = None;
             self.branch.popup_open = true;
             // Focus now and next frame: the popup element isn't in the tree on first open.
             let handle = self.branch.query.read(cx).focus_handle.clone();

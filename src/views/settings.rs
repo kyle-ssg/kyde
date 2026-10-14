@@ -12,7 +12,7 @@ use gpui::FontWeight;
 impl Kyde {
     /// Open (or focus) the Settings window. Bound to ⌘, and the native Settings… menu.
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
-        self.settings_theme_open = false;
+        self.settings_theme.close();
         self.open_modal_window(ModalKind::Settings, "Settings", 660.0, 480.0, cx);
     }
 
@@ -103,17 +103,13 @@ impl Kyde {
                 240.0,
                 &labels,
                 selected,
-                self.settings_theme_open,
-                |this, cx| {
-                    this.settings_theme_open = !this.settings_theme_open;
-                    cx.notify();
-                },
-                |this, i, cx| {
+                &self.settings_theme,
+                |k: &mut Kyde| &mut k.settings_theme,
+                |_this, _cx| {},
+                |_this, i, _cx| {
                     if let Some((_, palette)) = theme::Theme::presets().get(i) {
                         theme::apply_palette(*palette);
                     }
-                    this.settings_theme_open = false;
-                    cx.notify();
                 },
             ))
     }
