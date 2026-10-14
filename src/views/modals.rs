@@ -4,23 +4,23 @@
 use crate::*;
 
 impl Kyde {
-    /// Top-of-editor prompt offering to install syntax support for the open file
-    /// (IntelliJ-style thin bar with Install / Ignore links).
+    /// Thin IntelliJ-style bar offering to install syntax support for `path`'s language, with
+    /// Install / Ignore links — over the Browse editor, and over a diff whose file has an
+    /// uninstalled pack (`in_diff`, which also keeps the two bars' element ids apart).
     pub(crate) fn render_install_banner(
         &self,
         pack: &'static highlight::Pack,
+        path: &std::path::Path,
+        in_diff: bool,
         ui: &'static str,
         fs: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let ext = self
-            .browse
-            .open_path
-            .as_ref()
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let lang = Lang::from_path(path);
+        let pack_id = pack.id;
+        let slot = usize::from(in_diff);
 
         // ⓘ info badge
         let info = div()
@@ -41,7 +41,7 @@ impl Kyde {
 
         let link = |label: SharedString, id: &'static str| {
             div()
-                .id(id)
+                .id((id, slot))
                 .flex_none()
                 .text_color(t.primary)
                 .cursor_pointer()
@@ -78,15 +78,15 @@ impl Kyde {
                 )
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| {
-                        this.install_open_pack(cx);
-                        cx.notify();
-                    }),
+                    cx.listener(move |this, _e, _w, cx| this.install_pack_for(lang, cx)),
                 ),
             )
             .child(link("Ignore extension".into(), "ignore-ext").on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.ignore_open_pack(cx)),
+                cx.listener(move |this, _e, _w, cx| {
+                    this.ignored_packs.insert(pack_id);
+                    cx.notify();
+                }),
             ))
             .into_any_element()
     }
@@ -550,35 +550,42 @@ impl Kyde {
         }
     }
 
-    /// Pack available for the open file but not yet installed (drives the banner).
-    pub(crate) fn pending_pack(&self) -> Option<&'static highlight::Pack> {
-        self.browse
-            .open_path
-            .as_ref()
-            .and_then(|p| Lang::from_path(p).pack())
+    /// The pack `path`'s language needs when it's compiled in but not installed, and the
+    /// user hasn't ignored it this session — what the install banners offer.
+    fn missing_pack(&self, path: &std::path::Path) -> Option<&'static highlight::Pack> {
+        Lang::from_path(path)
+            .pack()
             .filter(|p| !self.plugins.is_installed(p.id) && !self.ignored_packs.contains(p.id))
     }
 
-    /// Dismiss the install banner for the open file's type (session-only).
-    pub(crate) fn ignore_open_pack(&mut self, cx: &mut Context<Self>) {
-        if let Some(p) = self.pending_pack() {
-            self.ignored_packs.insert(p.id);
-            cx.notify();
-        }
+    /// The Browse editor's missing pack (its install banner).
+    pub(crate) fn pending_pack(&self) -> Option<&'static highlight::Pack> {
+        self.browse
+            .open_path
+            .as_deref()
+            .and_then(|p| self.missing_pack(p))
     }
 
-    /// Install the pack for the open file and re-highlight it in place
-    /// (without disturbing the buffer's content, selection, or dirty flag).
-    pub(crate) fn install_open_pack(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.browse.open_path.clone() else {
+    /// The open diff's missing pack — e.g. a Java change in History before the Java pack is
+    /// installed, which otherwise just shows as plain text with no hint why.
+    pub(crate) fn diff_pending_pack(&self) -> Option<&'static highlight::Pack> {
+        self.diff.path.as_deref().and_then(|p| self.missing_pack(p))
+    }
+
+    /// Install `lang`'s pack (the banners' Install link) and re-highlight what's showing it.
+    pub(crate) fn install_pack_for(&mut self, lang: Lang, cx: &mut Context<Self>) {
+        let Some(p) = lang.pack() else {
             return;
         };
-        let lang = Lang::from_path(&rel);
-        if let Some(p) = lang.pack() {
-            self.plugins.install(p.id);
-            self.plugins.save();
-            // Re-highlight in place so the colors appear immediately — previously this only
-            // set the lang, leaving the cached (plain) spans until the file was reopened.
+        self.plugins.install(p.id);
+        self.plugins.save();
+        self.rehighlight_for(lang, cx);
+    }
+
+    /// Re-highlight, in place, every open surface showing `lang` — the Browse editor and both
+    /// diff panes — without disturbing their content, selection or dirty flag.
+    pub(crate) fn rehighlight_for(&mut self, lang: Lang, cx: &mut Context<Self>) {
+        if self.browse.open_path.as_deref().map(Lang::from_path) == Some(lang) {
             let errs = self.errors_enabled_for(lang);
             let links = self.links_enabled_for(lang);
             self.browse.editor.update(cx, |e, cx| {
@@ -587,6 +594,12 @@ impl Kyde {
                 e.set_lang(lang, cx);
             });
         }
+        if self.diff.path.as_deref().map(Lang::from_path) == Some(lang) {
+            for pane in [self.diff.left.clone(), self.diff.right.clone()] {
+                pane.update(cx, |e, cx| e.set_lang(lang, cx));
+            }
+        }
+        cx.notify();
     }
 
     /// Native-menu "Plugins…": open the language-pack manager (native modal window).

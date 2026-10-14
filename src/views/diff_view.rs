@@ -61,8 +61,9 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// The inline diff with the find/replace bar (⌘F / ⌘R) over it while it's searching
-    /// one of the panes. Every main-window view showing the diff renders it through here.
+    /// The inline diff with the install banner (when its file's language pack isn't installed)
+    /// and the find/replace bar (⌘F / ⌘R, while it's searching one of the panes) over it.
+    /// Every main-window view showing the diff renders it through here.
     pub(crate) fn render_diff_with_find(
         &mut self,
         ui: &'static str,
@@ -71,18 +72,24 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let diff = self.render_diff(fs, window, cx);
-        match self.find_bar(FindHost::Main, ui, cx) {
-            Some(bar) => div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .child(bar)
-                .child(diff)
-                .into_any_element(),
-            None => diff,
+        let banner = self
+            .diff_pending_pack()
+            .zip(self.diff.path.clone())
+            .map(|(pack, path)| self.render_install_banner(pack, &path, true, ui, fs, cx));
+        let bar = self.find_bar(FindHost::Main, ui, cx);
+        if banner.is_none() && bar.is_none() {
+            return diff;
         }
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .children(banner)
+            .children(bar)
+            .child(diff)
+            .into_any_element()
     }
 
     /// IntelliJ-style side-by-side diff = two editors in one rounded island: left is the
