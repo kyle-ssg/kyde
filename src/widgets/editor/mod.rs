@@ -346,6 +346,9 @@ pub struct CodeEditor {
     /// changed (inline word diff), painted in `word_bg_color` over the line tint.
     pub word_bg: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>,
     pub word_bg_color: kyde_color::Color,
+    /// Find-bar matches (⌘F), same shape as `word_bg` but its own layer — painted OVER the
+    /// word tint in the theme's `find_match_bg`, so matches show in diff panes too.
+    pub find_bg: std::collections::HashMap<usize, Vec<std::ops::Range<usize>>>,
     /// Diff alignment: insert N blank display rows BEFORE buffer line `b` (`filler[b]=N`),
     /// so this pane lines up row-for-row with the other side. `filler_end` = trailing blanks.
     pub filler: std::collections::HashMap<usize, usize>,
@@ -439,6 +442,7 @@ impl CodeEditor {
                 b: 0.0,
                 a: 0.0,
             },
+            find_bg: std::collections::HashMap::new(),
             filler: std::collections::HashMap::new(),
             filler_end: 0,
         }
@@ -479,6 +483,12 @@ impl CodeEditor {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    /// Bumped on every content change — lets a watcher (the find bar) skip a re-scan
+    /// when a burst of change events all describe text it has already seen.
+    pub fn content_gen(&self) -> u64 {
+        self.compute_gen
     }
 
     /// The current import specifiers (targets), for the app's cheap "did the
@@ -567,6 +577,10 @@ impl CodeEditor {
     /// Re-derive foldable regions from the current text + language, dropping any
     /// folded entry whose start line is no longer a foldable region (after edits).
     fn recompute_folds(&mut self, cx: &mut Context<Self>) {
+        // Bump the generation on EVERY recompute (not just async ones) so a pending
+        // big-file background job can never land its stale spans on content that was
+        // since replaced — via the inline path (big file → small file open) or emptied.
+        self.compute_gen = self.compute_gen.wrapping_add(1);
         if self.single_line || self.content.is_empty() {
             self.spans = Vec::new();
             self.error_ranges = Vec::new();
@@ -589,10 +603,6 @@ impl CodeEditor {
         // whole-file tree-sitter parse never blocks the UI (Zed-style async highlighting).
         let lines = self.content.bytes().filter(|&b| b == b'\n').count();
         const ASYNC_THRESHOLD: usize = 4000;
-        // Bump the generation on EVERY recompute (not just async ones) so a pending
-        // big-file background job can never land its stale spans on content that was
-        // since replaced via the inline path (big file → small file open).
-        self.compute_gen = self.compute_gen.wrapping_add(1);
         if lines < ASYNC_THRESHOLD {
             self.spans = highlight::highlight(&self.content, self.lang);
             self.error_ranges = if self.errors_on {

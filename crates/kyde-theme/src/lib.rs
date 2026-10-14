@@ -122,6 +122,9 @@ pub struct Theme {
     /// Stronger word-level tint on the NEW side of a modified line (the changed words).
     #[serde(with = "hex")]
     pub diff_word_new_bg: Rgba,
+    /// Find-bar match highlight (⌘F) — its own layer, painted over the diff word tint.
+    #[serde(with = "hex")]
+    pub find_match_bg: Rgba,
 
     // Syntax
     /// Syntax colour for keywords.
@@ -182,6 +185,7 @@ struct Cvd {
     mod_bg: u32,
     conflict_bg: u32,
     word_bg: u32,
+    find: u32,
     keyword: u32,
     string: u32,
     number: u32,
@@ -201,6 +205,8 @@ const CVD_DARK_RG: Cvd = Cvd {
     // Same amber family as `modified` (only two poles survive) — split by lightness.
     conflict_bg: 0x63470F,
     word_bg: 0x1F4E78,
+    // Amber like `mod_bg`, but split from it by lightness so a match on a modified line reads.
+    find: 0x8C6A12,
     keyword: 0xE8B33A,
     string: 0x2E9AB8,
     number: 0xC98A2E,
@@ -217,6 +223,7 @@ const CVD_LIGHT_RG: Cvd = Cvd {
     mod_bg: 0xF6EAC0,
     conflict_bg: 0xEDD79B, // deeper amber than mod_bg (lightness split)
     word_bg: 0xAECBF2,
+    find: 0xF0CC5C,
     keyword: 0x9A6800,
     string: 0x0E6FA0,
     number: 0x6B5210,
@@ -234,6 +241,8 @@ const CVD_DARK_TR: Cvd = Cvd {
     mod_bg: 0x4A2230,
     conflict_bg: 0x611A1A, // stronger red than mod_bg (lightness split)
     word_bg: 0x5A2A38,
+    // Green pole — clear of the pink/red hunk tints.
+    find: 0x2F5F2F,
     keyword: 0xFF8FB5,
     string: 0x5CB85C,
     number: 0xC8506A,
@@ -250,6 +259,7 @@ const CVD_LIGHT_TR: Cvd = Cvd {
     mod_bg: 0xF7DCE6,
     conflict_bg: 0xF2C4C4, // stronger red than mod_bg (lightness split)
     word_bg: 0xF0C0D0,
+    find: 0xB5E3B5,
     keyword: 0xC03060,
     string: 0x1E8A1E,
     number: 0x8A2040,
@@ -271,6 +281,7 @@ fn apply_cvd(base: Theme, a: Cvd) -> Theme {
         diff_conflict_bg: c(a.conflict_bg),
         diff_word_old_bg: c(a.word_bg),
         diff_word_new_bg: c(a.word_bg),
+        find_match_bg: c(a.find),
         syn_keyword: c(a.keyword),
         syn_string: c(a.string),
         syn_number: c(a.number),
@@ -329,6 +340,8 @@ impl Default for Theme {
             // words read as emphasis — same on both sides.
             diff_word_old_bg: c(0x1A4269),
             diff_word_new_bg: c(0x1A4269),
+            // Amber — clear of every diff tint (green/grey/blue), so a match always reads.
+            find_match_bg: c(0x6E5A1E),
 
             syn_keyword: c(0xCF8E6D),
             syn_string: c(0x6AAB73),
@@ -397,6 +410,7 @@ impl Theme {
             // Word-level emphasis — same both sides, a stronger blue (mirrors the dark theme).
             diff_word_old_bg: c(0xADCFF7),
             diff_word_new_bg: c(0xADCFF7),
+            find_match_bg: c(0xFFE08A), // soft marker yellow
 
             // Syntax (Hoxton-tinted, dark enough to read on white)
             syn_keyword: c(0xA42F89),  // brand purple

@@ -108,7 +108,7 @@ impl Kyde {
             };
             body = body.child(left).child(divider);
         }
-        let body = body.child(self.render_diff(ui, fs, Some(window), cx));
+        let body = body.child(self.render_diff_with_find(ui, fs, window, cx));
 
         div()
             .flex()

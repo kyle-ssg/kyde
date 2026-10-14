@@ -472,7 +472,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus, line_bg, line_numbers, word_bg, word_bg_color) = {
+        let (focus, line_bg, line_numbers, word_bg, word_bg_color, find_bg) = {
             let ed = self.editor.read(cx);
             (
                 ed.focus_handle.clone(),
@@ -480,6 +480,7 @@ impl Element for EditorElement {
                 ed.line_numbers,
                 ed.word_bg.clone(),
                 ed.word_bg_color,
+                ed.find_bg.clone(),
             )
         };
         window.handle_input(
@@ -562,14 +563,19 @@ impl Element for EditorElement {
                 }
             }
         }
-        // Word-level diff highlight: a stronger tint over just the changed bytes within a
-        // modified line (inline word diff). Painted after the line tint, before text.
-        if !word_bg.is_empty() {
+        // Byte-range highlights within lines, painted after the line tint, before text:
+        // the word-level diff (a stronger tint over just the changed bytes), then find-bar
+        // matches on top so a match inside a changed word still reads.
+        let find_color = theme::get().find_match_bg;
+        for (ranges_by_line, color) in [(&word_bg, word_bg_color), (&find_bg, find_color)] {
+            if ranges_by_line.is_empty() {
+                continue;
+            }
             for (i, &b) in pre.visible_lines.iter().enumerate() {
                 if b == usize::MAX || !on_screen(i) {
                     continue;
                 }
-                let (Some(ranges), Some(line)) = (word_bg.get(&b), pre.lines.get(&i)) else {
+                let (Some(ranges), Some(line)) = (ranges_by_line.get(&b), pre.lines.get(&i)) else {
                     continue;
                 };
                 let y = bounds.top() + lh * i as f32;
@@ -581,7 +587,7 @@ impl Element for EditorElement {
                             point(text_x + x0, y),
                             point(text_x + x1.max(x0 + px(1.0)), y + lh),
                         ),
-                        word_bg_color,
+                        color,
                     ));
                 }
             }

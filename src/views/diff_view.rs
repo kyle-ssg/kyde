@@ -53,19 +53,39 @@ impl Kyde {
             .text_size(px(t.ui_font_size))
             .child(back)
             .child(div().min_w_0().truncate().text_color(t.text).child(title));
-        let mut col = div()
+        div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(header);
-        // The find/replace bar (⌘F / ⌘R), targeting whichever diff pane is focused.
-        if self.find.open {
-            col = col.child(self.render_find_bar(ui, cx));
-        }
-        col.child(self.render_diff(ui, fs, Some(window), cx))
+            .child(header)
+            .child(self.render_diff_with_find(ui, fs, window, cx))
             .into_any_element()
+    }
+
+    /// The inline diff with the find/replace bar (⌘F / ⌘R) over it while it's searching
+    /// one of the panes. Every main-window view showing the diff renders it through here.
+    pub(crate) fn render_diff_with_find(
+        &mut self,
+        ui: &'static str,
+        fs: gpui::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let diff = self.render_diff(ui, fs, Some(window), cx);
+        match self.find_bar(FindHost::Main, ui, cx) {
+            Some(bar) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(bar)
+                .child(diff)
+                .into_any_element(),
+            None => diff,
+        }
     }
 
     /// IntelliJ-style side-by-side diff: aligned rows, with a center gutter showing the old

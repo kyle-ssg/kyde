@@ -518,7 +518,7 @@ impl Kyde {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(self.render_diff(ui, fs, Some(window), cx));
+            .child(self.render_diff_with_find(ui, fs, window, cx));
         if !collapsed {
             root = root.child(v_divider);
         }
