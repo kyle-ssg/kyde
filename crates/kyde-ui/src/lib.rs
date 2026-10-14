@@ -7,6 +7,8 @@ mod badge;
 mod button;
 mod checkbox;
 mod color;
+/// Side-by-side diff building blocks (gutter column / rows / glyphs, editor panes).
+pub mod diff;
 mod footer;
 mod menu;
 /// Keyboard navigation for lists, trees and popups: the shared actions + key contexts.
@@ -19,6 +21,7 @@ mod scrollbar;
 mod select;
 mod stats;
 mod tab;
+mod tip;
 /// Call sites use the explicit `ui::tree::item(…)`.
 pub mod tree;
 
@@ -33,3 +36,4 @@ pub use scrollbar::*;
 pub use select::*;
 pub use stats::*;
 pub use tab::*;
+pub use tip::*;

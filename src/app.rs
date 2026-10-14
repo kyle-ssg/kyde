@@ -108,6 +108,9 @@ struct RepoSnapshot {
     merging: Option<String>,
     /// Whether `root` is inside a git working tree (drives which fields are meaningful).
     is_git: bool,
+    /// The project root this was read for, and the git toplevel `discover` found for it
+    /// (`None` = not a git repo) — cached so `Kyde::repo()` needn't re-discover.
+    top: (PathBuf, Option<PathBuf>),
 }
 
 impl RepoSnapshot {
@@ -132,6 +135,7 @@ impl RepoSnapshot {
                 scratches,
                 merging: None,
                 is_git: false,
+                top: (root.to_path_buf(), None),
             };
         };
         // `git status` failing means we can't trust the file list — carry the message so
@@ -140,6 +144,8 @@ impl RepoSnapshot {
             Ok(files) => (files, None),
             Err(e) => (Vec::new(), Some(format!("Reading status failed: {e}"))),
         };
+        // One push-base resolution feeds both (`push_files()` would resolve it again).
+        let push_base = repo.push_base();
         Self {
             files,
             stats: repo.numstat().unwrap_or_default(),
@@ -149,11 +155,12 @@ impl RepoSnapshot {
             worktrees: repo.worktrees().unwrap_or_default(),
             ahead: repo.ahead_count(),
             behind: repo.behind_count(),
-            push_base: repo.push_base(),
-            push_files: repo.push_files(),
+            push_files: repo.diff_files(&push_base, Some("HEAD"), None),
+            push_base,
             scratches,
             merging: repo.merging(),
             is_git: true,
+            top: (root.to_path_buf(), Some(repo.root().to_path_buf())),
         }
     }
 }
@@ -166,21 +173,9 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> Self {
         let keymap_preset = keymap.preset;
-        // Commit-view state (message editor + changed-files search + its subscription) now
-        // lives in `CommitView::new`; the Browse file editor + its autosave subscription in
-        // `BrowseView::new`; the diff panes + the right pane's debounced autosave in
-        // `DiffPanes::new` (see the `commit`/`browse`/`diff` fields below).
-        // Finder overlay state (query box + its change subscription) now lives in
-        // `Finder::new` (see the `finder` field below).
         let plugins_query = cx.new(|cx| CodeEditor::single_line(cx, "Search plugins…"));
         let name_input = cx.new(|cx| CodeEditor::single_line(cx, "File name"));
-        // Find/replace bar state (both inputs + the query subscription) now lives in
-        // `FindBar::new` (see the `find` field below).
-        // History-view state (commit list, files tree, branch picker) + its three search-box
-        // subscriptions now live in `HistoryView::new` (see the `history` field below).
         let project_search = cx.new(|cx| CodeEditor::single_line(cx, "Search projects"));
-        // Branch-switcher popup state + its search-box subscription now live in
-        // `BranchPopup::new` (see the `branch` field below).
         cx.subscribe(&project_search, |this, _e, ev, cx| {
             if matches!(ev, EditorEvent::Changed) {
                 this.projects_hl = None;
@@ -202,6 +197,7 @@ impl Kyde {
             open_projects: root.iter().cloned().collect(),
             project_sessions: std::collections::HashMap::new(),
             repo_root: root,
+            repo_top: None,
             mode: Mode::Browse, // code-first: a freshly opened project shows the editor
             focus_handle: cx.focus_handle(),
             keymap,
@@ -226,7 +222,7 @@ impl Kyde {
                 value: 0.0,
                 shown: 0.0,
                 last: None,
-                file_last: None,
+                shown_at: None,
             },
             finder: Finder::new(cx),
             onboarding: Onboarding {
@@ -255,8 +251,6 @@ impl Kyde {
             menu_focus: cx.focus_handle(),
             menu_focus_pending: false,
             menu_return_focus: None,
-            diff_win: None,
-            diff_modal_open: false,
             main_window_bounds: None,
             diff_view_open: false,
             rollback_win: None,
@@ -311,8 +305,23 @@ impl Kyde {
         me
     }
 
+    /// The open project's folder name — the label of every tree's root row.
+    pub(crate) fn project_name(&self) -> String {
+        self.repo_root
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned())
+    }
+
+    /// The open project's repo. Uses the toplevel the last status read discovered for this
+    /// root (no subprocess — this is called on every save, select and click), falling back
+    /// to `git rev-parse` only before the first read lands or after a project switch.
     pub(crate) fn repo(&self) -> Option<Repo> {
-        Repo::discover(self.repo_root.as_ref()?).ok()
+        let root = self.repo_root.as_ref()?;
+        match &self.repo_top {
+            Some((r, top)) if r == root => top.as_ref().map(|t| Repo::at(t.clone())),
+            _ => Repo::discover(root).ok(),
+        }
     }
 
     /// Re-read git status + the file tree. The reads (a handful of `git` subprocesses, plus
@@ -347,8 +356,6 @@ impl Kyde {
             self.rebuild_commit_view(false);
             self.selected = None;
             self.diff.current = None;
-            self.diff.old_spans.clear();
-            self.diff.new_spans.clear();
             cx.notify();
             return;
         };
@@ -402,6 +409,7 @@ impl Kyde {
         self.browse.tree =
             tree::Tree::build_with_dirs(&self.browse.all_files, &self.browse.extra_dirs);
         self.is_git = snap.is_git;
+        self.repo_top = Some(snap.top);
         self.current_branch = snap.current_branch;
         self.worktree.list = snap.worktrees;
         // Merge-in-progress state (drives the banner). Covers merges we started AND ones
@@ -440,12 +448,14 @@ impl Kyde {
         // shared with History/Push (committed content). Leave those alone, or a clean-tree
         // refresh blanks an open history diff to "Select a file" on window refocus (#39).
         // History's "Local" compare is editable, hence the mode check on top of `readonly`.
+        // In Browse the panes aren't on screen at all — skip the re-diff (a `git show` +
+        // full diff on every save's refresh); entering the Commit view re-selects anyway.
         let panes_foreign =
-            self.diff.readonly || (self.mode == Mode::History && !self.diff_view_open);
+            self.diff.readonly || (self.mode != Mode::Commit && !self.diff_view_open);
         if panes_foreign {
-            // Just keep the commit-view selection index in range.
-            if self.selected.is_some_and(|i| i >= self.files.len()) {
-                self.selected = None;
+            // Just keep the commit-view selection index valid (it seeds the next entry).
+            if self.selected.is_none_or(|i| i >= self.files.len()) {
+                self.selected = (!self.files.is_empty()).then_some(0);
             }
         } else {
             match self.selected {
@@ -454,8 +464,6 @@ impl Kyde {
                 _ => {
                     self.selected = None;
                     self.diff.current = None;
-                    self.diff.old_spans.clear();
-                    self.diff.new_spans.clear();
                 }
             }
         }
@@ -755,6 +763,8 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Escape: close whatever overlay is open (most-transient first); if none, cancel the
+    /// Commit view back to Browse. A no-op in plain Browse.
     pub(crate) fn act_escape(
         &mut self,
         _: &EscapeKey,

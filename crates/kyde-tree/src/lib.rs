@@ -80,6 +80,16 @@ impl Tree {
         Tree { children: sets }
     }
 
+    /// Whether `path` is a FILE node of the tree (false for folders and unknown paths) —
+    /// a lookup among its siblings, no filesystem access.
+    pub fn is_file(&self, path: &Path) -> bool {
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        self.children
+            .get(parent)
+            .and_then(|es| es.iter().find(|e| e.path == path))
+            .is_some_and(|e| !e.is_dir)
+    }
+
     /// DFS from the root, descending only into expanded directories.
     pub fn visible(&self, expanded: &HashSet<PathBuf>) -> Vec<Row> {
         let mut out = Vec::new();
@@ -181,6 +191,64 @@ pub fn nav<S: std::hash::BuildHasher>(
             .rposition(|r| r.depth < row.depth)
             .map_or(Nav::Stay, select),
     }
+}
+
+impl Tree {
+    /// [`Tree::visible`] under a project-root row (path `""`, depth 0): everything nests one
+    /// level under it, and collapsing the root (removing `""` from `expanded`) hides it all.
+    /// The shape every app tree shows (Browse, Commit, History, Rollback).
+    pub fn visible_with_root(&self, expanded: &HashSet<PathBuf>) -> Vec<Row> {
+        let mut rows = vec![Row {
+            path: PathBuf::new(),
+            is_dir: true,
+            depth: 0,
+        }];
+        if expanded.contains(Path::new("")) {
+            rows.extend(self.visible(expanded).into_iter().map(|mut r| {
+                r.depth += 1;
+                r
+            }));
+        }
+        rows
+    }
+}
+
+/// Narrow `rows` to a search: keep the root row (`""`), files among `files` whose path
+/// contains `query` (case-insensitive; blank = keep everything), and folders holding such
+/// a file. Linear in rows + matches — each file is lowercased once, and folders are kept
+/// by collecting the matches' ancestors rather than rescanning every file per folder.
+///
+/// ```
+/// use kyde_tree::{retain_matching, Row};
+/// use std::path::{Path, PathBuf};
+/// let row = |p: &str, is_dir| Row { path: PathBuf::from(p), is_dir, depth: 0 };
+/// let mut rows = vec![row("", true), row("src", true), row("src/a.rs", false), row("b.md", false)];
+/// retain_matching(&mut rows, [Path::new("src/a.rs"), Path::new("b.md")], "A.RS");
+/// let kept: Vec<_> = rows.iter().map(|r| r.path.clone()).collect();
+/// assert_eq!(kept, ["", "src", "src/a.rs"].map(PathBuf::from));
+/// ```
+pub fn retain_matching<'a>(
+    rows: &mut Vec<Row>,
+    files: impl IntoIterator<Item = &'a Path>,
+    query: &str,
+) {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return;
+    }
+    let hits: HashSet<&Path> = files
+        .into_iter()
+        .filter(|f| f.to_string_lossy().to_lowercase().contains(&q))
+        .collect();
+    let dirs: HashSet<&Path> = hits.iter().flat_map(|f| f.ancestors().skip(1)).collect();
+    rows.retain(|r| {
+        r.path.as_os_str().is_empty()
+            || if r.is_dir {
+                dirs.contains(r.path.as_path())
+            } else {
+                hits.contains(r.path.as_path())
+            }
+    });
 }
 
 #[cfg(test)]

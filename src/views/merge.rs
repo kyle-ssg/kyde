@@ -20,9 +20,6 @@
 use crate::*;
 use kyde_diff::merge::{ChunkKind, Resolution, SideState, WhitespaceMode};
 
-/// Width of each of the two control gutters between the three panes.
-const MERGE_GUTTER_W: f32 = 56.0;
-
 impl Kyde {
     // ── actions ───────────────────────────────────────────────────
 
@@ -1098,7 +1095,6 @@ impl Kyde {
             .and_then(|i| self.merge.files.get(i))
             .is_some_and(|e| !self.merge.resolved.contains(&e.path))
             && !self.merge.busy;
-        let act = |btn: gpui::Stateful<gpui::Div>| btn.w_full().when(!can_act, |d| d.opacity(0.5));
         let buttons = div()
             .flex()
             .flex_col()
@@ -1108,25 +1104,33 @@ impl Kyde {
             .pt(px(24.0))
             .pr_3()
             .child(
-                act(btn_secondary("list-accept-ours", "Accept Yours")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.merge_accept_file(true, cx)),
-                ),
+                btn_secondary_state("list-accept-ours", "Accept Yours", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.merge_accept_file(true, cx)),
+                    ),
             )
             .child(
-                act(btn_secondary("list-accept-theirs", "Accept Theirs")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.merge_accept_file(false, cx)),
-                ),
+                btn_secondary_state("list-accept-theirs", "Accept Theirs", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.merge_accept_file(false, cx)),
+                    ),
             )
-            .child(act(btn_primary("list-merge", "Merge…")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    if let Some(i) = this.merge.list_sel {
-                        this.select_merge_file(i, cx);
-                    }
-                }),
-            ));
+            .child(
+                btn_primary_state("list-merge", "Merge…", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            if let Some(i) = this.merge.list_sel {
+                                this.select_merge_file(i, cx);
+                            }
+                        }),
+                    ),
+            );
 
         let table = div()
             .flex_1()
@@ -1220,12 +1224,10 @@ impl Kyde {
                 format!("Apply ({pending} pending)")
             };
             footer = footer.child(
-                btn_primary("merge-apply", SharedString::from(label))
-                    .when(!ready, |d| d.opacity(0.5))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.merge_apply_file(cx)),
-                    ),
+                btn_primary_state("merge-apply", SharedString::from(label), !ready).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.merge_apply_file(cx)),
+                ),
             );
         } else if all_done {
             footer = footer.child(btn_primary("merge-commit", "Commit Merge").on_mouse_down(
@@ -1378,7 +1380,7 @@ impl Kyde {
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_light))
-                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.into())).into())
+                .tooltip(ui::tip(tip))
                 .child(svg().path(icon).size(px(15.0)).text_color(t.secondary_text))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1514,21 +1516,8 @@ impl Kyde {
                    state: SideState,
                    color: kyde_color::Color,
                    cx: &mut Context<Self>| {
-            let tip = SharedString::from(tip);
-            div()
-                .id(SharedString::from(id))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .rounded_sm()
-                .text_size(px(17.0))
-                .line_height(px(17.0))
-                .text_color(color)
-                .hover(|s| s.bg(t.bg_light).text_color(t.primary))
-                .cursor_pointer()
-                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.clone())).into())
-                .child(glyph)
+            ui::diff::gutter_glyph(SharedString::from(id), glyph, color)
+                .tooltip(ui::tip(tip))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| {
@@ -1543,17 +1532,7 @@ impl Kyde {
         for &(i, row, kind) in &changed {
             let st = res.get(i).copied().unwrap_or_default();
             let row_box = |children: Vec<gpui::AnyElement>| {
-                div()
-                    .absolute()
-                    .top(row_h * row as f32)
-                    .left_0()
-                    .right_0()
-                    .h(row_h)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_0p5()
+                ui::diff::gutter_row(row, row_h)
                     .children(children)
                     .into_any_element()
             };
@@ -1628,24 +1607,7 @@ impl Kyde {
 
         let scroll_y = self.merge.scroll.offset().y;
         let gutter = |id: &'static str, ctls: Vec<gpui::AnyElement>| {
-            div()
-                .id(id)
-                .w(px(MERGE_GUTTER_W))
-                .flex_none()
-                .h_full()
-                .overflow_hidden()
-                .bg(t.diff_separator_bg)
-                .border_l(px(1.0))
-                .border_r(px(1.0))
-                .border_color(t.divider)
-                .child(
-                    div()
-                        .relative()
-                        .w_full()
-                        .h(total_h)
-                        .top(scroll_y)
-                        .children(ctls),
-                )
+            ui::diff::gutter_column(id, ui::diff::GUTTER_W, total_h, scroll_y, ctls)
         };
 
         // Panes: shared vertical scroll, per-pane content width (long lines scroll with
@@ -1654,23 +1616,7 @@ impl Kyde {
         let rw = self.merge.result.read(cx).content_width();
         let tw = self.merge.theirs.read(cx).content_width();
         let pane = |id: &'static str, w: f32, ed: gpui::AnyElement, scroll: &ScrollHandle| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .bg(t.main_bg)
-                .font_family(theme::font::FAMILY)
-                .text_size(fs)
-                .text_color(t.text)
-                .child(
-                    div()
-                        .id(id)
-                        .h_full()
-                        .w_full()
-                        .overflow_scroll()
-                        .track_scroll(scroll)
-                        .child(div().w(px(w)).child(ed)),
-                )
+            ui::diff::editor_pane(id, w, ed, scroll, fs)
         };
         let scroll = self.merge.scroll.clone();
         // Which of the live panes this mode shows. The Middle pairs are 2-pane SUBSETS
@@ -1732,12 +1678,12 @@ impl Kyde {
                     "Yours — {}",
                     self.current_branch.as_deref().unwrap_or("HEAD")
                 )))
-                .child(div().w(px(MERGE_GUTTER_W)).flex_none());
+                .child(div().w(px(ui::diff::GUTTER_W)).flex_none());
         }
         heads = heads.child(hdr("Result".to_string()));
         if show_theirs {
             heads = heads
-                .child(div().w(px(MERGE_GUTTER_W)).flex_none())
+                .child(div().w(px(ui::diff::GUTTER_W)).flex_none())
                 .child(hdr(format!("Theirs — {}", self.merge_source_label())));
         }
 
@@ -1766,23 +1712,7 @@ impl Kyde {
         let lw = self.merge.cmp_l.read(cx).content_width();
         let rw = self.merge.cmp_r.read(cx).content_width();
         let pane = |id: &'static str, w: f32, ed: gpui::AnyElement, scroll: &ScrollHandle| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .bg(t.main_bg)
-                .font_family(theme::font::FAMILY)
-                .text_size(fs)
-                .text_color(t.text)
-                .child(
-                    div()
-                        .id(id)
-                        .h_full()
-                        .w_full()
-                        .overflow_scroll()
-                        .track_scroll(scroll)
-                        .child(div().w(px(w)).child(ed)),
-                )
+            ui::diff::editor_pane(id, w, ed, scroll, fs)
         };
         let hdr = |label: String| {
             div()
@@ -1822,16 +1752,13 @@ impl Kyde {
                         self.merge.cmp_l.clone().into_any_element(),
                         &scroll,
                     ))
-                    .child(
-                        div()
-                            .w(px(12.0))
-                            .flex_none()
-                            .h_full()
-                            .bg(t.diff_separator_bg)
-                            .border_l(px(1.0))
-                            .border_r(px(1.0))
-                            .border_color(t.divider),
-                    )
+                    .child(ui::diff::gutter_column(
+                        "merge-cmp-sep",
+                        12.0,
+                        px(0.0),
+                        px(0.0),
+                        [],
+                    ))
                     .child(pane(
                         "merge-cmp-r",
                         rw,

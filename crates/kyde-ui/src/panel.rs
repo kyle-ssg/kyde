@@ -80,3 +80,38 @@ pub fn empty_state(message: impl Into<SharedString>, ui: &'static str) -> Div {
         .text_color(t.line_number)
         .child(message.into())
 }
+
+/// Width (px) of the strip a minimised side panel leaves behind (Browse tree, Commit files).
+pub const COLLAPSED_STRIP_W: f32 = 30.0;
+
+/// The thin island a minimised side panel collapses to — chain its expand button.
+pub fn collapsed_strip() -> Div {
+    let t = theme::get();
+    div()
+        .flex_none()
+        .h_full()
+        .w(px(COLLAPSED_STRIP_W))
+        .py_1()
+        .bg(t.panel_bg)
+        .rounded(px(theme::ISLAND_RADIUS))
+        .flex()
+        .flex_col()
+        .items_center()
+}
+
+/// A full-width hairline between a panel's header and its list.
+pub fn hr() -> Div {
+    div().flex_none().h(px(1.0)).mx_1().bg(theme::get().divider)
+}
+
+/// A small count pill (ahead / behind / changed-file counts) on a light chip.
+pub fn count_badge(n: usize) -> Div {
+    let t = theme::get();
+    div()
+        .flex_none()
+        .px_1p5()
+        .rounded_md()
+        .bg(t.bg_light)
+        .text_color(t.text)
+        .child(SharedString::from(n.to_string()))
+}

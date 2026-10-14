@@ -219,7 +219,7 @@ pub struct Store {
     /// Hash of the most recent event per path — the dedup check.
     last_by_path: HashMap<PathBuf, String>,
     /// Paths whose most recent event is a [`EventKind::Deleted`] tombstone (the file is
-    /// currently gone) — dedups repeated deletions and drives [`Store::alive_paths`].
+    /// currently gone) — dedups repeated deletions; see [`Store::alive_paths`].
     deleted: std::collections::HashSet<PathBuf>,
 }
 
@@ -324,9 +324,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Paths with history whose most recent event is NOT a deletion — i.e. files the store
-    /// believes currently exist. Drives the app's disappearance sweep (a file here that's
-    /// no longer on disk gets a [`Store::record_deletion`]).
+    /// Paths with history whose most recent event is NOT a deletion — i.e. the files the
+    /// store believes currently exist.
     #[must_use]
     pub fn alive_paths(&self) -> Vec<PathBuf> {
         self.last_by_path

@@ -3,8 +3,6 @@
 use crate::*;
 
 impl Kyde {
-    /// Top-of-editor prompt offering to install syntax support for the open file.
-    /// IntelliJ-style: a thin bar with a primary (#3473EE) Install button.
     /// Top-of-window banner shown only when a newer release exists. The action is
     /// "Update & Relaunch" when running from a `.app` bundle (downloads + swaps in place),
     /// else "Download" (opens the release page) — see `do_update`.
@@ -83,12 +81,10 @@ impl Kyde {
                     ),
             )
             .child(
-                btn_primary("update-now", action_label)
-                    .when(updating, |d| d.opacity(0.6))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.do_update(cx)),
-                    ),
+                btn_primary_state("update-now", action_label, updating).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.do_update(cx)),
+                ),
             )
             .child(btn_secondary("update-dismiss", "Dismiss").on_mouse_down(
                 MouseButton::Left,
@@ -214,29 +210,7 @@ impl Kyde {
         ui: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let t = theme::get();
-        let btn = |label: &'static str, primary: bool| {
-            div()
-                .px_3()
-                .py_1()
-                .rounded_md()
-                .when(primary, |d| d.bg(t.primary).text_color(t.primary_text))
-                .when(!primary, |d| d.text_color(t.secondary_text))
-                .child(label)
-        };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(34.0))
-            .px_3()
-            .bg(gpui::rgb(0x3A2A2C))
-            .border_b_1()
-            .border_color(t.divider)
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size))
-            .text_color(t.text)
+        alert_banner(ui)
             .child(
                 div()
                     .flex_1()
@@ -244,11 +218,13 @@ impl Kyde {
                     .truncate()
                     .child("kyde crashed on the previous run."),
             )
-            .child(btn("Report on GitHub", true).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.report_crash(cx)),
-            ))
-            .child(btn("Dismiss", false).on_mouse_down(
+            .child(
+                btn_primary("crash-report", "Report on GitHub").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.report_crash(cx)),
+                ),
+            )
+            .child(btn_secondary("crash-dismiss", "Dismiss").on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.dismiss_crash(cx)),
             ))
@@ -268,34 +244,33 @@ impl Kyde {
         ui: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let t = theme::get();
         let msg = self.op_error.clone().unwrap_or_default();
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(34.0))
-            .px_3()
-            .bg(gpui::rgb(0x3A2A2C))
-            .border_b_1()
-            .border_color(t.divider)
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size))
-            .text_color(t.text)
+        alert_banner(ui)
             .child(div().flex_1().min_w_0().truncate().child(msg))
-            .child(
-                div()
-                    .px_3()
-                    .py_1()
-                    .rounded_md()
-                    .text_color(t.secondary_text)
-                    .child("Dismiss")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.dismiss_op_error(cx)),
-                    ),
-            )
+            .child(btn_secondary("op-error-dismiss", "Dismiss").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.dismiss_op_error(cx)),
+            ))
             .into_any_element()
     }
+}
+
+/// The thin "something went wrong" strip the crash + git-error banners share: one line
+/// on the theme's conflict tint (readable in every palette, light included), message
+/// first, buttons trailing.
+fn alert_banner(ui: &'static str) -> gpui::Div {
+    let t = theme::get();
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .h(px(34.0))
+        .px_3()
+        .bg(t.diff_conflict_bg)
+        .border_b_1()
+        .border_color(t.divider)
+        .font_family(ui)
+        .text_size(px(t.ui_font_size))
+        .text_color(t.text)
 }

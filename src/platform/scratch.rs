@@ -18,14 +18,7 @@ pub const LANGS: &[(&str, &str)] = &[
 ];
 
 fn base() -> PathBuf {
-    let root = std::env::var("XDG_CONFIG_HOME").map_or_else(
-        |_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(home).join(".config")
-        },
-        PathBuf::from,
-    );
-    root.join("kyde").join("scratches")
+    kyde_config::store::config_dir().join("scratches")
 }
 
 /// Stable, filesystem-safe key for a project (its folder name; non-alphanumerics → `_`).

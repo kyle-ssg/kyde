@@ -30,8 +30,8 @@ pub(crate) use app::{
 };
 pub(crate) use kyde_ui as ui;
 pub(crate) use kyde_ui::{
-    badge_inner, btn_primary, btn_primary_state, btn_secondary, checkbox_box, file_badge, lerp_rgb,
-    menu_icon, scrollbar_thumb, tab_pill,
+    badge_inner, btn_primary, btn_primary_state, btn_secondary, btn_secondary_state, checkbox_box,
+    file_badge, lerp_rgb, menu_icon, scrollbar_thumb, tab_pill,
 };
 
 // ── per-feature views (impl Kyde blocks; see src/views/) ──
@@ -368,8 +368,6 @@ enum FindHost {
     Modal(ModalKind),
 }
 
-/// How the history view diffs the selected commit. `Before` = vs its parent (what the commit
-/// changed), `Latest` = vs HEAD, `Local` = vs the working tree.
 /// The two tabs of the git (Commit) view: staging working changes vs pushing committed ones.
 #[derive(Clone, Copy, PartialEq)]
 enum GitTab {
@@ -377,6 +375,7 @@ enum GitTab {
     Push,
 }
 
+/// How the history view diffs the selected commit.
 #[derive(Clone, Copy, PartialEq)]
 enum CompareMode {
     /// This commit vs its parent — what the commit changed (read-only).
@@ -524,7 +523,7 @@ enum MenuTarget {
     Tab(usize),
     /// The tab-bar overflow chooser (`▾`): a flat list of every open tab to jump to.
     TabList,
-    /// A commit row in the History list (by index into `history_commits`) — its menu offers
+    /// A commit row in the History list (by index into `history.commits`) — its menu offers
     /// the same compare modes as the header dropdown.
     HistoryCompare(usize),
     /// A file row in the History changed-files tree (by index into `history.files`) — same
@@ -584,7 +583,7 @@ pub(crate) enum SbView {
     MdPreview,
     Diff,
     /// The diff's single shared horizontal scrollbar.
-    DiffLeftH,
+    DiffH,
 }
 
 /// An open "name this file" prompt (the small modal with a text input).
@@ -596,28 +595,6 @@ enum NamePrompt {
     NewFolder(PathBuf),
     /// Rename this existing file (rel path) to the typed name in its own folder.
     Rename(PathBuf),
-}
-
-/// A minimal text tooltip view (gpui 0.2.2 ships no ready-made one). Built on
-/// demand by `.tooltip(..)`; styled to match the chrome.
-struct Tip(SharedString);
-
-impl Render for Tip {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme::get();
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(t.bg_light)
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.text)
-            .font_family(theme::font::UI_FAMILY)
-            .text_size(px(theme::get().ui_font_size))
-            .shadow_lg()
-            .child(self.0.clone())
-    }
 }
 
 /// Per-project UI state stashed when switching to another open-project tab, so switching back
@@ -1256,17 +1233,12 @@ impl CommitView {
 
 /// The side-by-side diff panes' state, grouped out of the `Kyde` god-struct: the two
 /// editor entities (left = base, read-only; right = working copy, editable + live-saving),
-/// the diffed file, the computed diff model + cached syntax spans, and the pane geometry.
+/// the diffed file, the computed diff model, and the pane geometry. (Syntax colouring lives
+/// in each editor, highlighted as its content is set.)
 /// Shared by the commit view, the history view, the push modal, and the Show-Diff window.
 struct DiffPanes {
     /// The computed line/word diff between `base` and the right pane.
     current: Option<FileDiff>,
-    /// Syntax spans for the selected file's before/after content (cached on select,
-    /// so the diff doesn't re-parse the whole file every render). Empty when the
-    /// file's language pack isn't installed.
-    old_spans: Vec<highlight::Span>,
-    /// See `old_spans`.
-    new_spans: Vec<highlight::Span>,
     /// Base (before) pane — read-only, line numbers on the right toward the gutter.
     left: Entity<CodeEditor>,
     /// Working (after) pane — editable; edits debounce into `diff_autosave`.
@@ -1324,8 +1296,6 @@ impl DiffPanes {
         .detach();
         Self {
             current: None,
-            old_spans: Vec::new(),
-            new_spans: Vec::new(),
             left,
             right,
             path: None,
@@ -1561,12 +1531,15 @@ struct Fps {
     /// Time of the previous frame (drives the per-frame delta).
     last: Option<std::time::Instant>,
     /// Throttle timer for the `shown` snapshot (~5/sec).
-    file_last: Option<std::time::Instant>,
+    shown_at: Option<std::time::Instant>,
 }
 
 struct Kyde {
     /// None = no project open → the Projects landing view.
     repo_root: Option<PathBuf>,
+    /// `(project root, its git toplevel)` from the last status read — what `repo()` opens
+    /// without re-running `git rev-parse`. The toplevel is `None` for a plain folder.
+    repo_top: Option<(PathBuf, Option<PathBuf>)>,
     /// Roots of every open project, in tab order. The active one == `repo_root`. Project tabs
     /// render only when this holds more than one. Empty ⇔ `repo_root` is None (landing view).
     open_projects: Vec<PathBuf>,
@@ -1672,12 +1645,6 @@ struct Kyde {
     menu_focus_pending: bool,
     /// What had focus before the menu took it — restored when the menu closes.
     menu_return_focus: Option<FocusHandle>,
-    /// Show-Diff viewer — its own native OS window (`None` when closed).
-    diff_win: Option<gpui::WindowHandle<ModalWindow>>,
-    /// True while the Show-Diff modal window is open. The modal renders the shared
-    /// `diff_left`/`diff_right` editors, so the inline diff is suppressed meanwhile (rendering
-    /// one editor in two windows desyncs scroll). Set on open, cleared on the window's release.
-    diff_modal_open: bool,
     /// The main window's bounds, refreshed each frame in `impl Render for Kyde`.
     main_window_bounds: Option<gpui::WindowBounds>,
     /// True when the main window is showing the full-screen Show-Diff view (rollback/push diff).
@@ -1765,7 +1732,6 @@ struct Kyde {
 enum ModalKind {
     Rollback,
     Push,
-    Diff,
     NewBranch,
     Plugins,
     Fonts,
@@ -1946,7 +1912,7 @@ impl SettingsSection {
     ];
 }
 
-/// A separate native OS window hosting one of Kyde's modals (Rollback / Push / Diff). It holds
+/// A separate native OS window hosting one of Kyde's modals (Rollback / Push / …). It holds
 /// the `Kyde` entity, observes it (so checkbox/refresh changes repaint), and builds its body
 /// by delegating into `Kyde` — `kyde.update(..)` is safe here because the window is opened
 /// from a spawned task (never during a `Kyde` update), so there's no re-entrant lease.
@@ -1959,20 +1925,6 @@ struct ModalWindow {
 impl ModalWindow {
     fn new(kyde: Entity<Kyde>, kind: ModalKind, cx: &mut Context<Self>) -> Self {
         cx.observe(&kyde, |_, _, cx| cx.notify()).detach();
-        // The Diff modal renders the SAME `diff_left`/`diff_right` editors as the inline diff;
-        // rendering one editor entity in two windows desyncs scroll + garbles layout. So while
-        // this window lives, the main view suppresses its inline diff (`diff_modal_open`). Clear
-        // the flag when the window closes (manual or programmatic) so the inline diff returns.
-        if kind == ModalKind::Diff {
-            let kyde = kyde.clone();
-            cx.on_release(move |_, cx| {
-                kyde.update(cx, |k, kcx| {
-                    k.diff_modal_open = false;
-                    kcx.notify();
-                });
-            })
-            .detach();
-        }
         // A find bar hosted here goes with the window (it would otherwise linger "open"
         // with nowhere to render, eating the main window's Escape).
         let host_of = kyde.clone();
@@ -2005,7 +1957,6 @@ impl Render for ModalWindow {
         let body = kyde.update(cx, |k, kcx| match kind {
             ModalKind::Rollback => k.render_rollback_body(kcx),
             ModalKind::Push => k.render_push_body(kcx),
-            ModalKind::Diff => k.render_diff_body(kcx),
             ModalKind::NewBranch => k.render_new_branch_body(kcx),
             ModalKind::Plugins => k.render_plugins_body(kcx),
             ModalKind::Fonts => k.render_fonts_body(kcx),
@@ -2252,8 +2203,6 @@ fn emit_branch_level(
     }
 }
 
-/// File-type badge for the Browse tree (approximates `IntelliJ`'s icons). Known types get a
-/// colored monogram; everything else gets the generic lines/document icon.
 /// Raster image types we preview inline (rendered with `img()` instead of the
 /// text editor). SVG stays a text/icon file — it has its own vector path.
 fn is_image(path: &std::path::Path) -> bool {
@@ -2305,20 +2254,14 @@ fn scratch_group_path() -> PathBuf {
     PathBuf::from("\u{1}Scratches")
 }
 
-/// The Kyde config directory (`~/.config/kyde`, XDG-respecting). Holds every persisted
-/// file: plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the
-/// full "clear data" reset (uninstalls all plugins + drops all cached settings).
-fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
-        |_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"),
-        PathBuf::from,
-    );
-    base.join("kyde")
-}
+// The Kyde config directory (`~/.config/kyde`, XDG-respecting) holds every persisted file:
+// plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the full
+// "clear data" reset (uninstalls all plugins + drops all cached settings).
+use kyde_config::store::config_dir;
 
 /// Tiny persisted UI prefs (`~/.config/kyde/ui.json`), e.g. the FPS-monitor toggle.
 fn ui_settings_path() -> PathBuf {
-    config_dir().join("ui.json")
+    kyde_config::store::config_path("ui.json")
 }
 /// Read one boolean key from `ui.json` (missing file/key → `default`).
 fn load_ui_bool(key: &str, default: bool) -> bool {
@@ -2352,13 +2295,10 @@ fn save_show_fps(v: bool) {
 }
 
 /// One visual row of the aligned side-by-side diff. `old`/`new` index into each
-/// side's lines (`None` = filler/blank). `hunk` tags rows belonging to a change;
-/// `hunk_start` marks the first such row (where the gutter controls render).
+/// side's lines (`None` = filler/blank).
 struct DiffRow {
     old: Option<usize>,
     new: Option<usize>,
-    hunk: Option<usize>,
-    hunk_start: bool,
 }
 
 /// Flatten a `FileDiff` into aligned rows. Equal regions advance both sides
@@ -2367,13 +2307,11 @@ struct DiffRow {
 fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
     let mut rows = Vec::new();
     let (mut o, mut n) = (0usize, 0usize);
-    for (hi, h) in d.hunks.iter().enumerate() {
+    for h in &d.hunks {
         while o < h.old_range.start && n < h.new_range.start {
             rows.push(DiffRow {
                 old: Some(o),
                 new: Some(n),
-                hunk: None,
-                hunk_start: false,
             });
             o += 1;
             n += 1;
@@ -2383,8 +2321,6 @@ fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
             rows.push(DiffRow {
                 old: (i < ol).then(|| h.old_range.start + i),
                 new: (i < nl).then(|| h.new_range.start + i),
-                hunk: Some(hi),
-                hunk_start: i == 0,
             });
         }
         o = h.old_range.end;
@@ -2394,13 +2330,37 @@ fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
         rows.push(DiffRow {
             old: Some(o),
             new: Some(n),
-            hunk: None,
-            hunk_start: false,
         });
         o += 1;
         n += 1;
     }
     rows
+}
+
+/// The aligned layout's shape without materialising its rows: `(total rows, (row, hunk) of
+/// each hunk's first row)`. O(hunks), where [`aligned_rows`] is O(lines) — the render
+/// paths only need where the gutter controls go, every frame.
+fn hunk_starts(d: &FileDiff) -> (usize, Vec<(usize, usize)>) {
+    let (mut o, mut n, mut row) = (0usize, 0usize, 0usize);
+    let mut starts = Vec::with_capacity(d.hunks.len());
+    for (hi, h) in d.hunks.iter().enumerate() {
+        // The equal stretch before the hunk advances both sides together.
+        row += h
+            .old_range
+            .start
+            .saturating_sub(o)
+            .min(h.new_range.start.saturating_sub(n));
+        starts.push((row, hi));
+        row += h.old_range.len().max(h.new_range.len());
+        o = h.old_range.end;
+        n = h.new_range.end;
+    }
+    row += d
+        .old
+        .len()
+        .saturating_sub(o)
+        .min(d.new.len().saturating_sub(n));
+    (row, starts)
 }
 
 /// Filler (blank alignment rows) for the two diff panes. `(left_map, left_end, right_map,
@@ -3215,12 +3175,6 @@ fn main() {
                     view.pick_folder(cx);
                 }
 
-                // TEMP debug: KYDE_OPEN=<rel path> auto-opens a file on launch (for
-                // deterministic screenshot verification without sending keystrokes).
-                if let Ok(f) = std::env::var("KYDE_OPEN") {
-                    view.open_file(std::path::PathBuf::from(f), cx);
-                }
-
                 // KYDE_SHOT=<name> drives the app into one fixed UI state for the
                 // screenshot suite (scripts/screenshots.sh). Env-gated → zero cost on a
                 // normal launch. Assumes the open project is this repo. The suite points
@@ -3273,6 +3227,33 @@ fn main() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod diff_layout_tests {
+    use super::*;
+
+    /// `hunk_starts` (the per-frame gutter layout, O(hunks)) must agree with the full
+    /// `aligned_rows` layout: same row count, each start on its hunk's first row.
+    #[test]
+    fn hunk_starts_match_the_aligned_rows() {
+        let before = "a\nb\nc\nd\ne\nf\ng\n";
+        let after = "a\nB\nc\nd\nX\nY\nZ\ne\ng\nh\n";
+        let d = FileDiff::compute(before, after);
+        let rows = aligned_rows(&d);
+        let (n, starts) = hunk_starts(&d);
+        assert_eq!(n, rows.len());
+        assert_eq!(starts.len(), d.hunks.len());
+        for &(row, hi) in &starts {
+            let h = &d.hunks[hi];
+            let r = &rows[row];
+            assert!(
+                r.old == (!h.old_range.is_empty()).then_some(h.old_range.start)
+                    && r.new == (!h.new_range.is_empty()).then_some(h.new_range.start),
+                "hunk {hi} starts on row {row}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3762,7 +3743,7 @@ mod gpui_smoke_tests {
     fn refresh_populates_changed_files_tree_and_selection(cx: &mut TestAppContext) {
         let (handle, _dir) = boot(cx);
         handle
-            .update(cx, |k, _w, _cx| {
+            .update(cx, |k, _w, cx| {
                 assert!(
                     k.files.iter().any(|f| f.path.ends_with("app.tsx")),
                     "the modified file should appear in the changed-files list"
@@ -3777,11 +3758,13 @@ mod gpui_smoke_tests {
                 );
                 assert!(k.current_branch.is_some(), "branch should be read");
                 assert!(k.selected.is_some(), "a change should be auto-selected");
+                assert!(k.op_error.is_none(), "a clean status read shows no banner");
+                // The diff is only computed where it's shown — the Commit view.
+                k.enter_commit(cx);
                 assert!(
                     k.diff.current.is_some(),
                     "the selected change should load a diff model"
                 );
-                assert!(k.op_error.is_none(), "a clean status read shows no banner");
             })
             .unwrap();
     }
@@ -5420,13 +5403,13 @@ mod gpui_smoke_tests {
             .unwrap();
         settle(cx);
 
-        // Show-Diff native window.
+        // Full-screen Show-Diff view (Rollback → View Diff), then back out of it.
         handle
             .update(cx, |k, _w, cx| k.menu_show_diff(0, cx))
             .unwrap();
         settle(cx);
         handle
-            .update(cx, |k, _w, cx| k.close_modal_window(ModalKind::Diff, cx))
+            .update(cx, |k, _w, cx| k.close_diff_view(cx))
             .unwrap();
         settle(cx);
 

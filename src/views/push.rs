@@ -60,19 +60,12 @@ impl Kyde {
             .font_family(ui)
             .text_size(px(theme::get().ui_font_size + 1.0))
             .child(count_header)
-            .child(div().flex_none().h(px(1.0)).mx_1().bg(t.divider))
+            .child(ui::hr())
             .child(list);
 
         // Footer bar: Cancel (back to Browse) + Push, styled like the commit bar's buttons.
-        let cancel_btn = div()
-            .px_4()
+        let cancel_btn = btn_secondary("push-tab-cancel", "Cancel")
             .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.secondary_text)
-            .cursor_pointer()
-            .child("Cancel")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
@@ -89,11 +82,7 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(|this, _e, _w, cx| this.do_push(cx)),
                 );
-        let bar = div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap_2()
+        let bar = ui::modal_footer()
             .flex_none()
             .p_2()
             .bg(t.panel_bg)
@@ -114,9 +103,8 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// Delete-confirmation modal: name the target, Cancel / Delete.
-    /// Push confirmation modal: branch + the commits that would be pushed, Cancel / Push.
-    /// Push confirmation window body (own native window; titlebar shows "Push").
+    /// Push confirmation window body (own native window; titlebar shows "Push"): the files
+    /// the push would send, Cancel / Push.
     pub(crate) fn render_push_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
@@ -199,11 +187,7 @@ impl Kyde {
     fn push_tree_rows(&self, in_tab: bool, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let t = theme::get();
         let sync = &self.sync;
-        let root_name = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let root_name = self.project_name();
         let index: HashMap<&std::path::Path, usize> = sync
             .push_files
             .iter()
@@ -280,19 +264,9 @@ impl Kyde {
 
     /// The push tree's visible rows: the root (the repo) + every expanded folder's children.
     pub(crate) fn push_visible_rows(&self) -> Vec<tree::Row> {
-        let sync = &self.sync;
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if sync.push_expanded.contains(&PathBuf::new()) {
-            for mut r in sync.push_tree.visible(&sync.push_expanded) {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
-        visible
+        self.sync
+            .push_tree
+            .visible_with_root(&self.sync.push_expanded)
     }
 
     /// Expand / collapse a folder in the push tree.
@@ -308,8 +282,11 @@ impl Kyde {
     pub(crate) fn open_push_modal(&mut self, cx: &mut Context<Self>) {
         self.context_menu = None;
         if let Some(repo) = self.repo() {
-            self.sync.push_base = repo.push_base();
-            self.sync.set_push_files(repo.push_files());
+            // One push-base resolution feeds both (`push_files()` would resolve it again).
+            let base = repo.push_base();
+            self.sync
+                .set_push_files(repo.diff_files(&base, Some("HEAD"), None));
+            self.sync.push_base = base;
         } else {
             self.sync.set_push_files(Vec::new());
         }
@@ -407,7 +384,7 @@ impl Kyde {
             .committed_content("HEAD", &file.path)
             .unwrap_or_default();
         let lang = self.effective_lang(&file.path);
-        // `diff_path = Some` (set inside `load_diff_panes`) makes `render_diff` show the
+        // `diff.path = Some` (set inside `load_diff_panes`) makes `render_diff` show the
         // panes (it gates on a path); `readonly = true` suppresses the revert chevrons +
         // autosave for this committed diff.
         self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);

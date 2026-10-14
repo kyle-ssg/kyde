@@ -19,7 +19,7 @@ feel. No web, no Electron, no React.
 
 ## UI principles (non-negotiable)
 - **Every modal is a native OS window (`ModalWindow`), never an in-app overlay.** Rollback,
-  Push, Diff, New Branch, Language Plugins, Settings, Merge, Compare, Local History — all are
+  Push, New Branch, Language Plugins, Settings, Merge, Compare, Local History — all are
   separate native windows with a real macOS titlebar, opened via `open_modal_window(kind,
   title, w, h, cx)` and dispatched through `ModalKind` → `render_*_body` (each body fills the
   window via `size_full`; the window provides chrome/bg/font). To add a modal: add a
@@ -27,9 +27,11 @@ feel. No web, no Electron, no React.
   a `ModalKind` arm in `ModalWindow::render`, and a `pub(crate) fn render_<x>_body(&mut self,
   cx)`. Do NOT build modal dialogs as `overlay(cx, _)` children of the root. (The fuzzy
   finder and first-run keymap picker are transient *overlays*, not modals — they stay as-is.)
-- **Buttons use the shared `btn_primary` / `btn_secondary` helpers** (`render.rs`), never
+- **Buttons use the shared `btn_primary` / `btn_secondary` helpers** (`kyde-ui`), never
   hand-rolled. Primary = accent fill + `primary_text`; secondary = transparent + `divider`
-  border + `secondary_text`. Caller chains `.on_mouse_down(...)`.
+  border + `secondary_text`. Caller chains `.on_mouse_down(...)`. Disabled → the `_state`
+  variants (not `.opacity()`, which leaves hover/pointer live); small square glyph/icon
+  buttons → `icon_btn`; tooltips → `.tooltip(ui::tip(..))`.
 - **New icons MUST be registered** in the `Assets` `include_bytes!` match in `main.rs`. An
   unregistered path renders as NOTHING, silently — this has bitten us in QA. Icons are
   Lucide SVGs (MIT) in `assets/icons/`, drawn via `svg().path(..)` with `stroke="currentColor"`
@@ -111,10 +113,13 @@ kyde-local-history  per-project snapshot store: content-addressed blobs + append
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
               feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
 kyde-theme    runtime dark palette (theme::get/merge/update, hex JSON). (kyde-color, serde)
-kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
-              file_badge, checkbox, menu_icon, select, lerp_rgb, scrollbar_thumb, line_stats,
-              the file-tree row `tree::item<V>`, and `picker` (bounded nav + the selected/
-              hover row pill every list picker uses). Aliased back as `ui`. (gpui, kyde-theme)
+kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary(+_state), icon_btn,
+              tab_pill, Badge + file_badge, count_badge, checkbox, menu_icon, select, tip
+              (tooltips), panels (modal_panel, collapsed_strip, hr, empty_state), lerp_rgb,
+              scrollbar_thumb, line_stats, the file-tree row `tree::item<V>`, `picker` (bounded
+              nav + the selected/hover row pill every list picker uses), and `diff` (the
+              side-by-side gutter column/rows/glyphs + editor panes). Check here before
+              hand-rolling a div. Aliased back as `ui`. (gpui, kyde-theme)
 kyde-syntax   tree-sitter highlight() + fold_regions() + error_ranges() + import_links/
               definition_sites/resolve_import + sort_object_keys; OWNS every grammar crate
               behind per-pack features. Binary depends with default-features=false and
@@ -150,7 +155,7 @@ adding it to the CVD variants too.
 Fonts stay compile-const in `theme::font` (**not** themeable): `UI_FAMILY` = **Inter** (all
 chrome), `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor). Both OFL, bundled
 in `assets/fonts/`, registered at startup via `main::load_fonts`. Chrome render fns thread a
-`ui` family arg; `render_diff` ignores it and hard-codes `FAMILY`. (SF Mono was rejected —
+`ui` family arg; `render_diff` takes none and hard-codes `FAMILY`. (SF Mono was rejected —
 Apple license, not shippable.)
 
 ## Build / run
@@ -224,7 +229,7 @@ so plain rustc warnings fail every step, not just clippy. Rules:
 ## Language packs — two independent gates
 The plugin system is **two separate gates**, do not conflate them:
 - **Cargo features** (`Cargo.toml [features]`, one per pack: `rust`, `typescript`,
-  `css` (= CSS+SCSS), …, plus `full` = all, `default = ["full"]`). These are
+  `css` (= CSS+SCSS), …, plus `full` = all, `default = ["full", "terminal"]`). These are
   **compile-time `cfg` gates** (conditional compilation, like `#ifdef`), NOT runtime
   feature flags — resolved once at build, baked into the binary. Each gates (a) the
   `optional` grammar crate dep and (b) the matching arms in `config()` / `grammar()` / the
@@ -312,7 +317,7 @@ Conventions when adding/maintaining them:
 - gpui gives no text-editor widget — `widgets/editor/` is ours, modeled on gpui's
   `examples/input.rs` but multi-line. Typed text comes through
   `EntityInputHandler::replace_text_in_range` (IME-correct); control keys via `actions!` +
-  `KeyBinding`. Offsets are UTF-8 bytes. Still missing: soft-wrap, rope buffer for huge files.
+  `KeyBinding`. Offsets are UTF-8 bytes. Still missing: a rope buffer for huge files (soft-wrap exists, used by the commit box).
 - Background threads can't touch gpui entities (not `Send`). The pattern everywhere is:
   worker thread → `futures::mpsc` channel → a `cx.spawn` foreground pump. Used by the
   terminal `EventProxy`, the fs watcher, and the single-instance socket.

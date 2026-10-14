@@ -472,18 +472,7 @@ impl Element for EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus, line_bg, line_numbers, word_bg, word_bg_color, find_bg, find_current) = {
-            let ed = self.editor.read(cx);
-            (
-                ed.focus_handle.clone(),
-                ed.line_bg.clone(),
-                ed.line_numbers,
-                ed.word_bg.clone(),
-                ed.word_bg_color,
-                ed.find_bg.clone(),
-                ed.find_current.clone(),
-            )
-        };
+        let focus = self.editor.read(cx).focus_handle.clone();
         window.handle_input(
             &focus,
             ElementInputHandler::new(bounds, self.editor.clone()),
@@ -542,6 +531,14 @@ impl Element for EditorElement {
             ));
         }
 
+        // The diff decoration maps are read in place for the background passes — borrowed,
+        // not cloned per frame (a big diff holds an entry per changed line). The gutter passes
+        // further down only need the on-screen rows' tints, collected into `row_tint`.
+        let mut row_tint: HashMap<usize, kyde_color::Color> = HashMap::new();
+        let ed = self.editor.read(cx);
+        let (line_bg, word_bg, word_bg_color) = (&ed.line_bg, &ed.word_bg, ed.word_bg_color);
+        let (find_bg, find_current) = (&ed.find_bg, ed.find_current.clone());
+        let line_numbers = ed.line_numbers;
         // Per-line diff background (behind text + selection), full row width. Filler rows
         // (sentinel usize::MAX, inserted for diff alignment) get the separator tint.
         if !line_bg.is_empty() {
@@ -553,7 +550,11 @@ impl Element for EditorElement {
                 let bg = if b == usize::MAX {
                     Some(filler_bg)
                 } else {
-                    line_bg.get(&b).copied()
+                    let tint = line_bg.get(&b).copied();
+                    if let Some(c) = tint {
+                        row_tint.insert(i, c);
+                    }
+                    tint
                 };
                 if let Some(bg) = bg {
                     let y = bounds.top() + lh * i as f32;
@@ -633,7 +634,7 @@ impl Element for EditorElement {
                 if b == usize::MAX || !on_screen(i) {
                     continue; // filler row, or off-screen → don't shape a number for it
                 }
-                let color = if line_bg.contains_key(&b) {
+                let color = if row_tint.contains_key(&i) {
                     bright
                 } else {
                     dim
@@ -761,7 +762,7 @@ impl Element for EditorElement {
                 let bg = if b == usize::MAX {
                     filler_bg
                 } else {
-                    line_bg.get(&b).copied().unwrap_or(t.main_bg)
+                    row_tint.get(&i).copied().unwrap_or(t.main_bg)
                 };
                 window.paint_quad(fill(
                     Bounds::from_corners(point(left, y), point(clip.right(), y + lh)),
@@ -770,7 +771,7 @@ impl Element for EditorElement {
                 if b == usize::MAX {
                     continue; // filler row → no number
                 }
-                let color = if line_bg.contains_key(&b) {
+                let color = if row_tint.contains_key(&i) {
                     bright
                 } else {
                     dim

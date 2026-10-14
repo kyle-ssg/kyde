@@ -10,36 +10,25 @@ impl Kyde {
         let ui = theme::font::UI_FAMILY;
         let fs = px(theme::get().ui_font_size);
         let t = theme::get();
-        let root_name = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let root_name = self.project_name();
         // Same folder tree as the Commit view, with rollback checkboxes.
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if self.commit.expanded.contains(&PathBuf::new()) {
-            for mut r in self.commit.tree.visible(&self.commit.expanded) {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
+        let visible = self.commit.tree.visible_with_root(&self.commit.expanded);
+        // Per-frame lookups computed once (not per row × every changed file).
+        let file_ix = super::commit::file_index(&self.files);
+        let folder_checked =
+            super::commit::folders_all_checked(&self.files, &self.rollback_checked);
         let rows: Vec<gpui::AnyElement> = visible
             .into_iter()
             .map(|r| {
                 let is_root = r.path.as_os_str().is_empty();
                 let checked = if r.is_dir {
-                    self.rollback_folder_all_checked(&r.path)
+                    folder_checked.get(&r.path).copied().unwrap_or(false)
                 } else {
                     self.rollback_checked.contains(&r.path)
                 };
-                let name_color = self
-                    .files
-                    .iter()
-                    .find(|f| f.path == r.path)
+                let name_color = file_ix
+                    .get(r.path.as_path())
+                    .and_then(|&i| self.files.get(i))
                     .map_or(t.text, |f| status_color(f.status));
                 let name: SharedString = if is_root {
                     root_name.clone().into()

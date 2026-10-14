@@ -20,7 +20,6 @@ use gpui::{
 };
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use unicode_segmentation::UnicodeSegmentation;
 
 mod element;
 use element::EditorElement;
@@ -193,6 +192,28 @@ enum EditKind {
     Other,
 }
 
+/// The grapheme boundary before `off` (0 at the start). A `GraphemeCursor` only looks at
+/// the text around `off` — O(1) per arrow press, where walking `grapheme_indices` from the
+/// end of the buffer was O(file).
+fn prev_grapheme(s: &str, off: usize) -> usize {
+    let off = s.floor_char_boundary(off.min(s.len()));
+    unicode_segmentation::GraphemeCursor::new(off, s.len(), true)
+        .prev_boundary(s, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+/// The grapheme boundary after `off` (the end at the end) — see [`prev_grapheme`].
+fn next_grapheme(s: &str, off: usize) -> usize {
+    let off = s.floor_char_boundary(off.min(s.len()));
+    unicode_segmentation::GraphemeCursor::new(off, s.len(), true)
+        .next_boundary(s, 0)
+        .ok()
+        .flatten()
+        .unwrap_or(s.len())
+}
+
 pub struct CodeEditor {
     pub focus_handle: FocusHandle,
     pub content: String,
@@ -223,7 +244,9 @@ pub struct CodeEditor {
     marked_range: Option<Range<usize>>,
 
     // Undo/redo. Snapshot-based (whole-buffer); fine until the rope buffer lands.
-    undo_stack: Vec<Snapshot>,
+    /// Oldest first; capped at 1000 by dropping from the front (a deque — `Vec::remove(0)`
+    /// shifted every snapshot on each edit past the cap).
+    undo_stack: std::collections::VecDeque<Snapshot>,
     redo_stack: Vec<Snapshot>,
     /// Kind of the most recent edit, for coalescing runs of typing.
     last_edit: EditKind,
@@ -302,7 +325,7 @@ pub struct CodeEditor {
     bounds: Option<Bounds<Pixels>>,
     line_height: Pixels,
     /// The parent scroll container's handle (set by the embedding view via
-    /// `set_scroll_handle` whenever it changes, e.g. `file_scroll` in Browse vs
+    /// `set_scroll_handle` whenever it changes, e.g. `editor_scroll` in Browse vs
     /// `md_editor_scroll` in the Markdown split). Lets the editor scroll itself to keep the
     /// caret visible on keyboard selection and to auto-scroll while drag-selecting past an
     /// edge. `None` → the editor never scrolls its parent (e.g. single-line inputs).
@@ -396,7 +419,7 @@ impl CodeEditor {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
-            undo_stack: Vec::new(),
+            undo_stack: std::collections::VecDeque::new(),
             redo_stack: Vec::new(),
             last_edit: EditKind::Other,
             folded: HashSet::new(),
@@ -909,9 +932,9 @@ impl CodeEditor {
             self.last_edit = kind;
             return; // merge into the run already on the stack
         }
-        self.undo_stack.push(self.snapshot());
+        self.undo_stack.push_back(self.snapshot());
         if self.undo_stack.len() > 1000 {
-            self.undo_stack.remove(0);
+            self.undo_stack.pop_front();
         }
         self.last_edit = kind;
     }
@@ -935,7 +958,7 @@ impl CodeEditor {
         if self.read_only {
             return;
         }
-        if let Some(prev) = self.undo_stack.pop() {
+        if let Some(prev) = self.undo_stack.pop_back() {
             let now = self.snapshot();
             self.restore(prev, cx);
             self.redo_stack.push(now);
@@ -949,7 +972,7 @@ impl CodeEditor {
         if let Some(next) = self.redo_stack.pop() {
             let now = self.snapshot();
             self.restore(next, cx);
-            self.undo_stack.push(now);
+            self.undo_stack.push_back(now);
         }
     }
 
@@ -971,17 +994,10 @@ impl CodeEditor {
 
     // ── grapheme-aware horizontal boundaries ──────────────────────
     fn prev_boundary(&self, off: usize) -> usize {
-        self.content
-            .grapheme_indices(true)
-            .rev()
-            .find_map(|(i, _)| (i < off).then_some(i))
-            .unwrap_or(0)
+        prev_grapheme(&self.content, off)
     }
     fn next_boundary(&self, off: usize) -> usize {
-        self.content
-            .grapheme_indices(true)
-            .find_map(|(i, _)| (i > off).then_some(i))
-            .unwrap_or(self.content.len())
+        next_grapheme(&self.content, off)
     }
 
     // ── line geometry ─────────────────────────────────────────────
@@ -1862,8 +1878,7 @@ fn locate_in(line_starts: &[usize], content: &str, off: usize) -> (usize, usize)
 }
 
 /// Build `TextRuns` covering one line, colored by the highlight spans that fall in it.
-/// Public so the side-by-side diff can color its lines with the same logic.
-pub fn line_runs(
+pub(super) fn line_runs(
     line: &str,
     line_start: usize,
     spans: &[highlight::Span],
@@ -2091,6 +2106,30 @@ fn caret_after_fold(
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Perf guard (see CLAUDE.md "Performance regression tests"): ←/→ step one grapheme
+    /// per press — that must not rescan the buffer (it walked every grapheme from an end of
+    /// the file, so holding an arrow key in a big file lagged). Also: a multi-codepoint
+    /// grapheme (é as e + combining accent) is one step.
+    #[test]
+    fn perf_grapheme_steps_stay_local() {
+        let s = format!("{}cafe\u{301}!", "x".repeat(2_000_000));
+        let accent_end = s.len() - 1; // just before the '!'
+        assert_eq!(
+            prev_grapheme(&s, accent_end),
+            accent_end - 3,
+            "e + U+0301 is one step"
+        );
+        assert_eq!(next_grapheme(&s, accent_end - 3), accent_end);
+        let t = std::time::Instant::now();
+        let mut off = s.len() / 2;
+        for _ in 0..2_000 {
+            off = next_grapheme(&s, prev_grapheme(&s, off));
+        }
+        let dt = t.elapsed();
+        assert_eq!(off, s.len() / 2);
+        assert!(dt.as_secs_f32() < 2.0, "2k grapheme steps took {dt:?}");
+    }
 
     fn set(items: &[usize]) -> HashSet<usize> {
         items.iter().copied().collect()

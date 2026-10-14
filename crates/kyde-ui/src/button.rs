@@ -41,16 +41,47 @@ pub fn btn_secondary(
     id: impl Into<gpui::ElementId>,
     label: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
+    btn_secondary_state(id, label, false)
+}
+
+/// `btn_secondary` with an explicit `disabled` state (dimmed, no hover — see
+/// [`btn_primary_state`] for why the look lives in the single `.hover()`).
+pub fn btn_secondary_state(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    disabled: bool,
+) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
-    div()
+    let b = div()
         .id(id)
         .px_4()
         .py_1()
         .rounded_md()
         .border_1()
         .border_color(t.divider)
-        .text_color(t.secondary_text)
+        .text_color(t.secondary_text);
+    let b = if disabled {
+        b.opacity(0.6).cursor_default().hover(|s| s.opacity(0.6))
+    } else {
+        b.cursor_pointer().hover(|s| s.bg(t.bg_mid))
+    };
+    b.child(label.into())
+}
+
+/// A small square icon / glyph button — the `−` / `»` panel toggles, terminal-strip and
+/// toolbar icons: centred content, muted until hovered. The caller sets the glyph's text
+/// size (or an `svg` child) and chains the child, tooltip and handler.
+pub fn icon_btn(id: impl Into<gpui::ElementId>, size: f32) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(gpui::px(size))
+        .rounded_md()
+        .text_color(t.line_number)
+        .hover(|s| s.bg(t.bg_light).text_color(t.text))
         .cursor_pointer()
-        .hover(|s| s.bg(t.bg_mid))
-        .child(label.into())
 }

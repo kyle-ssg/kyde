@@ -11,7 +11,6 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let t = theme::get();
         // A plain (non-git) folder has no git actions at all — say so clearly and offer to
         // initialise a repository, rather than showing an empty "nothing to commit" screen
         // that looks broken (issue #66).
@@ -68,38 +67,19 @@ impl Kyde {
             // Thin strip with a `»` expand button where the files panel was (same affordance as
             // the Browse tree's collapsed strip). No resize divider — nothing to resize.
             body = body.child(
-                div()
-                    .flex_none()
-                    .h_full()
-                    .w(px(30.0))
-                    .py_1()
-                    .bg(t.panel_bg)
-                    .rounded(px(theme::ISLAND_RADIUS))
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .child(
-                        div()
-                            .id("commit-expand")
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(24.0))
-                            .rounded_md()
-                            .text_size(px(15.0))
-                            .text_color(t.line_number)
-                            .hover(|s| s.bg(t.bg_light).text_color(t.text))
-                            .cursor_pointer()
-                            .tooltip(|_w, cx| cx.new(|_| Tip("Expand files panel".into())).into())
-                            .child("»")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _e, _w, cx| {
-                                    this.commit.collapsed = false;
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
+                ui::collapsed_strip().child(
+                    ui::icon_btn("commit-expand", 24.0)
+                        .text_size(px(15.0))
+                        .tooltip(ui::tip("Expand files panel"))
+                        .child("»")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| {
+                                this.commit.collapsed = false;
+                                cx.notify();
+                            }),
+                        ),
+                ),
             );
         } else {
             let left = match active {
@@ -168,35 +148,15 @@ impl Kyde {
         row.into_any_element()
     }
 
-    /// The Commit tab's visible tree rows: the root, its expanded descendants, filtered by
+    /// The Commit tab's visible tree rows: the root + its expanded descendants, narrowed by
     /// the search box (keeping the root, matching files, and folders holding a match).
     pub(crate) fn commit_visible_rows(&self, cx: &App) -> Vec<tree::Row> {
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if self.commit.expanded.contains(&PathBuf::new()) {
-            for mut r in self.commit.tree.visible(&self.commit.expanded) {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
-        // Filter the changed-files list by the search box: keep the root, files whose path
-        // matches, and folders that contain a matching file.
-        let query = self.commit.search.read(cx).text().trim().to_lowercase();
-        if !query.is_empty() {
-            let files = &self.files;
-            visible.retain(|r| {
-                r.path.as_os_str().is_empty()
-                    || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&query))
-                    || (r.is_dir
-                        && files.iter().any(|f| {
-                            f.path.starts_with(&r.path)
-                                && f.path.to_string_lossy().to_lowercase().contains(&query)
-                        }))
-            });
-        }
+        let mut visible = self.commit.tree.visible_with_root(&self.commit.expanded);
+        tree::retain_matching(
+            &mut visible,
+            self.files.iter().map(|f| f.path.as_path()),
+            self.commit.search.read(cx).text(),
+        );
         visible
     }
 
@@ -204,23 +164,22 @@ impl Kyde {
     /// commit-message bar.
     fn render_commit_left(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        let root_name = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let root_name = self.project_name();
         let visible = self.commit_visible_rows(cx);
+        // Per-frame lookups computed once (not per row × every changed file).
+        let file_ix = file_index(&self.files);
+        let folder_checked = folders_all_checked(&self.files, &self.commit.checked);
         let rows: Vec<gpui::AnyElement> = visible
             .into_iter()
             .map(|r| {
                 let is_root = r.path.as_os_str().is_empty();
                 let checked = if r.is_dir {
-                    self.folder_all_checked(&r.path)
+                    folder_checked.get(&r.path).copied().unwrap_or(false)
                 } else {
                     self.commit.checked.contains(&r.path)
                 };
                 let file_idx = (!r.is_dir)
-                    .then(|| self.files.iter().position(|f| f.path == r.path))
+                    .then(|| file_ix.get(r.path.as_path()).copied())
                     .flatten();
                 // The keyboard cursor: a folder when it's on one, else the selected file.
                 let selected = match &self.commit.dir_cursor {
@@ -287,19 +246,9 @@ impl Kyde {
         // header (filter box + divider) over the scrollable changed-files list.
         // Header: filter box + a `−` button that minimises the panel to a thin strip (same
         // affordance as the Browse tree), handing the full width to the side-by-side diff.
-        let collapse_btn = div()
-            .id("commit-minimize")
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(22.0))
-            .rounded_md()
+        let collapse_btn = ui::icon_btn("commit-minimize", 22.0)
             .text_size(px(16.0))
-            .text_color(t.line_number)
-            .hover(|s| s.bg(t.bg_light).text_color(t.text))
-            .cursor_pointer()
-            .tooltip(|_w, cx| cx.new(|_| Tip("Collapse files panel".into())).into())
+            .tooltip(ui::tip("Collapse files panel"))
             .child("−")
             .on_mouse_down(
                 MouseButton::Left,
@@ -324,7 +273,7 @@ impl Kyde {
         .text_size(px(theme::get().ui_font_size))
         .child(div().flex_1().min_w_0().child(self.commit.search.clone()))
         .child(collapse_btn);
-        let search_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
+        let search_hr = ui::hr();
         let file_list = nav_keys(
             div()
                 .id("commit-tree")
@@ -372,14 +321,8 @@ impl Kyde {
     fn render_commit_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         // Cancel → back to the Browse (code) view.
-        let cancel_btn = div()
-            .px_4()
+        let cancel_btn = btn_secondary("commit-cancel", "Cancel")
             .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.secondary_text)
-            .child("Cancel")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
@@ -428,15 +371,7 @@ impl Kyde {
                     .child(self.commit.editor.clone()),
             )
             // Cancel + Commit on their own line, right-aligned.
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap_2()
-                    .child(cancel_btn)
-                    .child(commit_btn),
-            )
+            .child(ui::modal_footer().child(cancel_btn).child(commit_btn))
             .into_any_element()
     }
 
@@ -446,7 +381,7 @@ impl Kyde {
 
     /// Select a changed file and load it into the diff editors. `cx` is needed to push
     /// content into the editor entities; when called without a context (e.g. during a
-    /// plain `refresh`) the editors are left as-is and only `current_diff` updates.
+    /// plain `refresh`) the editors are left as-is and only `diff.current` updates.
     pub(crate) fn select_with(&mut self, idx: usize, cx: Option<&mut Context<Self>>) {
         self.selected = Some(idx);
         self.commit.focus.clear(); // a single selection drops any folder-group highlight
@@ -458,8 +393,6 @@ impl Kyde {
         // other selection so a stale preview never lingers.
         self.diff.image = None;
         if is_image(&file.path) {
-            self.diff.old_spans = Vec::new();
-            self.diff.new_spans = Vec::new();
             self.diff.current = None;
             self.diff.path = None; // keep autosave disabled — never write an image pane
             self.diff.image = Some(file.path.clone()); // set unconditionally — refresh re-selects with cx=None
@@ -485,8 +418,6 @@ impl Kyde {
                 // string through the diff (it would render as "all deleted" and, worse,
                 // the right pane's autosave would truncate the file to empty).
                 let Ok(a) = repo.working_content(&file.path) else {
-                    self.diff.old_spans = Vec::new();
-                    self.diff.new_spans = Vec::new();
                     self.diff.current = None;
                     if let Some(cx) = cx {
                         self.diff.path = None; // disables diff_autosave for this file
@@ -508,8 +439,6 @@ impl Kyde {
                 // No context (e.g. during a plain `refresh`): update only the diff model,
                 // leaving the editor entities as-is.
                 None => {
-                    self.diff.old_spans = highlight::highlight(&before, lang);
-                    self.diff.new_spans = highlight::highlight(&after, lang);
                     self.diff.current = Some(FileDiff::compute(&before, &after));
                 }
                 // With a context, load both panes (editable working diff: right unlocked).
@@ -520,7 +449,6 @@ impl Kyde {
         }
     }
 
-    /// Browse → "Commit": jump to the Commit view, selecting the file if it changed.
     /// Indices into `self.files` that are committable/rollback-able under `path`:
     /// a file → itself; a folder → every change beneath it; the repo root (`""`) → all.
     pub(crate) fn changed_under(&self, path: &std::path::Path) -> Vec<usize> {
@@ -772,8 +700,11 @@ impl Kyde {
         self.commit.focus_msg = true;
         if let Some(repo) = self.repo() {
             self.files = repo.status().unwrap_or_default();
-            self.sync.push_base = repo.push_base();
-            self.sync.set_push_files(repo.push_files());
+            // One push-base resolution feeds both (`push_files()` would resolve it again).
+            let base = repo.push_base();
+            self.sync
+                .set_push_files(repo.diff_files(&base, Some("HEAD"), None));
+            self.sync.push_base = base;
         }
         // Default to the tab that has work: Push if there's nothing to commit but commits
         // are waiting to be pushed; Commit otherwise.
@@ -900,9 +831,70 @@ fn stage_partial(
     repo.stage_content(path, &d.partial_new_content(|i| !excl.contains(&i)))
 }
 
+/// Changed-file path → its index in `files`, for O(1) per-row lookups while rendering a tree.
+pub(crate) fn file_index(
+    files: &[ChangedFile],
+) -> std::collections::HashMap<&std::path::Path, usize> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.path.as_path(), i))
+        .collect()
+}
+
+/// Every folder holding changes → whether ALL of them are in `checked` (its tri-state
+/// checkbox), in one pass over `files` — rather than rescanning every file per folder row,
+/// per frame. Folders with no changes beneath are absent (render unticked).
+pub(crate) fn folders_all_checked(
+    files: &[ChangedFile],
+    checked: &std::collections::HashSet<PathBuf>,
+) -> std::collections::HashMap<PathBuf, bool> {
+    let mut out: std::collections::HashMap<PathBuf, bool> = std::collections::HashMap::new();
+    for f in files {
+        let on = checked.contains(&f.path);
+        for dir in f.path.ancestors().skip(1) {
+            *out.entry(dir.to_path_buf()).or_insert(true) &= on;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::stage_partial;
+    use super::{folders_all_checked, stage_partial};
+    use crate::git::{ChangedFile, FileStatus};
+    use std::path::PathBuf;
+
+    /// Perf guard (CLAUDE.md "Performance regression tests"): the Commit/Rollback trees
+    /// derive every folder's checkbox each frame — one pass over the changes, not a rescan
+    /// of every file per folder row. A folder is ticked iff ALL changes beneath it are.
+    #[test]
+    fn perf_folder_ticks_in_one_pass() {
+        let files: Vec<ChangedFile> = (0..20_000)
+            .map(|i| ChangedFile {
+                path: PathBuf::from(format!("pkg{}/mod{}/f{i}.rs", i % 40, i % 400)),
+                status: FileStatus::Modified,
+            })
+            .collect();
+        // Tick everything except one file under pkg0/mod0.
+        let checked = files
+            .iter()
+            .map(|f| f.path.clone())
+            .filter(|p| p != &PathBuf::from("pkg0/mod0/f0.rs"))
+            .collect();
+        let t = std::time::Instant::now();
+        let ticks = folders_all_checked(&files, &checked);
+        let dt = t.elapsed();
+        assert_eq!(ticks.get(&PathBuf::from("pkg0/mod0")), Some(&false));
+        assert_eq!(ticks.get(&PathBuf::from("pkg0")), Some(&false));
+        assert_eq!(
+            ticks.get(&PathBuf::new()),
+            Some(&false),
+            "the root sees the miss"
+        );
+        assert_eq!(ticks.get(&PathBuf::from("pkg1/mod1")), Some(&true));
+        assert!(dt.as_secs_f32() < 2.0, "folder ticks took {dt:?}");
+    }
     use crate::git::Repo;
     use std::collections::HashSet;
     use std::fs;

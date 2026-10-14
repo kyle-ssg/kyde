@@ -66,11 +66,11 @@ impl Render for Kyde {
             // so the number is readable rather than blurring every frame.
             let due = self
                 .fps
-                .file_last
+                .shown_at
                 .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 0.2);
             if due {
                 self.fps.shown = self.fps.value;
-                self.fps.file_last = Some(now);
+                self.fps.shown_at = Some(now);
             }
         }
 
@@ -91,7 +91,7 @@ impl Render for Kyde {
                 .when(active, |d| d.bg(t.bg_light))
                 .when(!active, |d| d.hover(|d| d.bg(t.bg_mid)))
                 .cursor_pointer()
-                .tooltip(move |_w, cx| cx.new(|_| Tip(label.into())).into())
+                .tooltip(ui::tip(label))
                 .child(svg().path(icon).size(px(22.0)).text_color(if active {
                     t.text
                 } else {
@@ -191,7 +191,7 @@ impl Render for Kyde {
                     .when(active, |d| d.bg(t.bg_light))
                     .when(!active, |d| d.hover(|d| d.bg(t.bg_mid)))
                     .cursor_pointer()
-                    .tooltip(move |_w, cx| cx.new(|_| Tip("Terminal  (⌃`)".into())).into())
+                    .tooltip(ui::tip("Terminal  (⌃`)"))
                     .child(
                         svg()
                             .path("icons/terminal.svg")
@@ -471,7 +471,7 @@ impl Kyde {
     pub(crate) fn editor_island_w(&self, window: &Window) -> f32 {
         let win_w = f32::from(window.viewport_size().width);
         let left_chrome = if self.browse.tree_collapsed {
-            RAIL_W + theme::FRAME_GAP + 30.0 + theme::FRAME_GAP
+            RAIL_W + theme::FRAME_GAP + ui::COLLAPSED_STRIP_W + theme::FRAME_GAP
         } else {
             RAIL_W + theme::FRAME_GAP + self.browse.tree_width + theme::FRAME_GAP
         };

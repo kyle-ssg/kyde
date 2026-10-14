@@ -188,6 +188,12 @@ impl Repo {
         Ok(Self { root })
     }
 
+    /// A repo whose working-tree root is already known (a previous [`Repo::discover`]) —
+    /// no subprocess. `Repo` is just its root path; every operation shells out from there.
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
     /// Initialise a new git repository at `path` (`git init`) and return it opened.
     /// Errors if `path` isn't a directory or `git init` fails.
     pub fn init(path: impl AsRef<Path>) -> Result<Self> {

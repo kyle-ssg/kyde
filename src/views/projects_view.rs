@@ -16,23 +16,6 @@ impl Kyde {
         }
         let query = self.project_search.read(cx).text().to_lowercase();
 
-        // Primary = filled accent + white text. Secondary = transparent bg, divider
-        // border, secondary text.
-        let button = |label: &'static str, accent: bool, _cx: &mut Context<Self>| {
-            let t = theme::get();
-            div()
-                .px_4()
-                .py_1p5()
-                .rounded_md()
-                .border_1()
-                .font_weight(FontWeight::SEMIBOLD)
-                .when(accent, |d| d.bg(t.primary).text_color(t.primary_text))
-                .when(!accent, |d| {
-                    d.border_color(t.divider).text_color(t.secondary_text)
-                })
-                .child(label)
-        };
-
         // A draggable title strip holds the macOS traffic lights on its own line, so the search
         // row sits cleanly *below* them (not tucked under the close/minimise buttons).
         let titlebar = div().flex().flex_none().h(px(38.0)).w_full().child(
@@ -71,14 +54,24 @@ impl Kyde {
                 )
                 .child(div().flex_1().child(self.project_search.clone())),
             )
-            .child(button("New Project", false, cx).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
-            ))
-            .child(button("Open", true, cx).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
-            ));
+            .child(
+                btn_secondary("projects-new", "New Project")
+                    .py_1p5()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
+                    ),
+            )
+            .child(
+                btn_primary("projects-open", "Open")
+                    .py_1p5()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
+                    ),
+            );
 
         let body = self.render_recents_list(&query, cx);
 
