@@ -24,6 +24,8 @@ members = ["crates/*"]
 # version/edition/MSRV/license live in exactly one place. release-please keeps this `version`
 # in lockstep with the root `[package].version` via the `extra-files` updater in
 # release-please-config.json (it can't bump an inherited `version.workspace` directly).
+# A second `extra-files` entry bumps every path crate's `Cargo.lock` entry (the ones with no
+# `source`): the rust strategy can't expand the `crates/*` glob, so it only bumps `kyde`'s.
 [workspace.package]
 version = "2.6.0"
 edition = "2021"
