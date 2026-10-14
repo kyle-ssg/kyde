@@ -281,8 +281,10 @@ impl Kyde {
                 if let Some(p) = self.open_file_conflict() {
                     r = r.child(self.render_conflict_file_banner(p, ui, fs, cx));
                 }
-                if let Some(pack) = self.pending_pack() {
-                    r = r.child(self.render_install_banner(pack, ui, fs, cx));
+                if let (Some(pack), Some(path)) =
+                    (self.pending_pack(), self.browse.open_path.clone())
+                {
+                    r = r.child(self.render_install_banner(pack, &path, false, ui, fs, cx));
                 }
                 if let Some(bar) = self.find_bar(FindHost::Main, ui, cx) {
                     r = r.child(bar);

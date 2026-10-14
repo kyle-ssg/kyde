@@ -4440,6 +4440,40 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A diff whose language pack isn't installed offers the install banner — a Java change in
+    /// History used to show as plain text with no hint why (#92). Installing re-highlights both
+    /// diff panes in place, and the banner goes.
+    #[gpui::test]
+    fn diff_offers_a_missing_pack_and_installing_rehighlights_it(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.plugins.uninstall("typescript");
+                k.enter_commit(cx);
+                let i = k
+                    .files
+                    .iter()
+                    .position(|f| f.path == std::path::Path::new("app.tsx"))
+                    .unwrap();
+                k.select_with(i, Some(cx));
+                assert_eq!(k.diff_pending_pack().map(|p| p.id), Some("typescript"));
+                assert_eq!(k.diff.right.read(cx).lang, Lang::PlainText);
+
+                // The banner's Install, minus the save into the developer's real config.
+                k.plugins.install("typescript");
+                k.rehighlight_for(Lang::Tsx, cx);
+                assert!(
+                    k.diff_pending_pack().is_none(),
+                    "banner gone once installed"
+                );
+                assert_eq!(k.diff.left.read(cx).lang, Lang::Tsx);
+                assert_eq!(k.diff.right.read(cx).lang, Lang::Tsx);
+            })
+            .unwrap();
+    }
+
     /// History branches sidebar (#92): branches load off the UI thread when the view opens,
     /// `/` folders start expanded, and a folder the user collapsed stays collapsed on reload.
     #[gpui::test]
