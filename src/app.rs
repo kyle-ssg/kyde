@@ -240,6 +240,7 @@ impl Kyde {
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme: ui::SelectState::new(cx),
+            keymap_editor: KeymapEditor::new(cx),
             font_preview: None,
             welcome_frame: 0,
             pending_crash: crash_log_path()

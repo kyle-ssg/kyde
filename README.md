@@ -162,7 +162,7 @@ by lightness instead of hue) — switch in Settings.
 
 ### Keymap & configuration
 
-* **WebStorm** / **VSCode** presets with per-action overrides in `~/.config/kyde/keymap.json`.
+* **WebStorm** / **VSCode** presets, and a **shortcut editor** in Settings → Keymap: click a shortcut and press the new keys (a key already in use moves over, and the action it came from is named), reset one action, or **Reset to WebStorm / IntelliJ defaults**. Saved to `~/.config/kyde/keymap.json`.
 * **Onboarding keymap picker** on first launch, reopenable via Settings.
 * **Keyboard navigation** everywhere — context menus and their submenus, the file trees, lists and popups: `↑` / `↓` move, `←` / `→` fold folders or step in and out of submenus, `⏎` activates, space ticks a checkbox, `⇧F10` opens a row's context menu, `Esc` closes.
 * **Install shell command** — optionally symlinks `ky` into `~/.local/bin`. No shell-rc editing, no sudo.
@@ -197,7 +197,7 @@ Default shortcuts (WebStorm → VSCode):
 * Save: `⌘S`
 * Commit: `⌘K` → `⌘⏎`
 * Commit view: `⌘9` → `⌃⇧G`
-* Push / Pull: `⌘⇧K` / `⌘T` → unbound (VSCode has no defaults; set them in `keymap.json`)
+* Push / Pull: `⌘⇧K` / `⌘T` → unbound (VSCode has no defaults; set them in Settings → Keymap)
 * Browse view: `⌘1` → `⌘⇧E`
 * Back / Forward: `⌘⌥←` / `⌘⌥→`
 * Sort Lines / Sort Object Keys: `⌥⌘L` / `⌥⌘S`
