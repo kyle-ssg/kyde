@@ -197,6 +197,7 @@ Default shortcuts (WebStorm → VSCode):
 * Save: `⌘S`
 * Commit: `⌘K` → `⌘⏎`
 * Commit view: `⌘9` → `⌃⇧G`
+* Push / Pull: `⌘⇧K` / `⌘T` → unbound (VSCode has no defaults; set them in `keymap.json`)
 * Browse view: `⌘1` → `⌘⇧E`
 * Back / Forward: `⌘⌥←` / `⌘⌥→`
 * Sort Lines / Sort Object Keys: `⌥⌘L` / `⌥⌘S`

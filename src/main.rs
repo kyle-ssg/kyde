@@ -114,7 +114,9 @@ actions!(
         DiffPrevChange,
         CopyFiles,
         CutFiles,
-        PasteFiles
+        PasteFiles,
+        GitPush,
+        GitPull
     ]
 );
 // Context-menu keyboard navigation (fixed keys, context "ContextMenu" — the open panel).
@@ -267,6 +269,8 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "sort_keys", SortKeys);
     bind_app(cx, km, "nav_back", NavBack);
     bind_app(cx, km, "nav_forward", NavForward);
+    bind_app(cx, km, "push", GitPush);
+    bind_app(cx, km, "pull", GitPull);
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
     // Enter: confirm the open confirmation dialog (currently the Delete overlay) —
@@ -464,6 +468,9 @@ enum PaletteAction {
     LocalHistory,
     ClearLocalHistory,
     Changelog,
+    Push,
+    Pull,
+    Fetch,
 }
 
 /// Action-finder entries: (label, action, keymap-action name for the shortcut
@@ -494,6 +501,9 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
         "mode_browse",
     ),
     ("Git History (log)", PaletteAction::HistoryView, ""),
+    ("Push…", PaletteAction::Push, "push"),
+    ("Pull (Update Project)", PaletteAction::Pull, "pull"),
+    ("Fetch", PaletteAction::Fetch, ""),
     ("Rollback changes", PaletteAction::Rollback, ""),
     ("Local History", PaletteAction::LocalHistory, ""),
     ("Clear Local History", PaletteAction::ClearLocalHistory, ""),
