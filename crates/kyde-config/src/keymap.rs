@@ -51,7 +51,7 @@ pub const ACTIONS: &[ActionDef] = &[
         name: "open_keymap",
         webstorm: "cmd-,",
         vscode: "cmd-,",
-        label: "Keymap / Onboarding",
+        label: "Settings…",
     },
     ActionDef {
         name: "actions",
@@ -104,6 +104,33 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Pull (Update Project)",
     },
 ];
+
+/// A keystroke string in canonical form — modifiers in `cmd-ctrl-alt-shift-fn` order, then
+/// the key — so two spellings of the same shortcut compare equal.
+///
+/// ```
+/// use kyde_config::keymap::normalize_key;
+/// assert_eq!(normalize_key("shift-cmd-k"), "cmd-shift-k");
+/// assert_eq!(normalize_key("alt-cmd-left"), "cmd-alt-left");
+/// assert_eq!(normalize_key("cmd--"), "cmd--");
+/// ```
+#[must_use]
+pub fn normalize_key(key: &str) -> String {
+    // The key itself may be `-` (`cmd--`), so split it off before reading the modifiers.
+    let (mods, key) = match key.strip_suffix("--") {
+        Some(mods) => (mods, "-"),
+        None => key.rsplit_once('-').unwrap_or(("", key)),
+    };
+    let mut out = String::new();
+    for m in ["cmd", "ctrl", "alt", "shift", "fn"] {
+        if mods.split('-').any(|x| x == m) {
+            out.push_str(m);
+            out.push('-');
+        }
+    }
+    out.push_str(key);
+    out
+}
 
 /// A configurable action: its stable name, the default keystroke under each preset, and a
 /// human label for the settings UI.
@@ -174,12 +201,66 @@ impl Keymap {
             .filter(|k| !k.is_empty())
     }
 
-    /// Effective keystroke for a named action (override wins over preset).
+    /// Effective keystroke for a named action (override wins over preset); `None` = unbound.
+    /// An empty override is an explicit unbind of a key the preset would give it.
     pub fn key_for(&self, name: &str) -> Option<String> {
-        if let Some(k) = self.overrides.get(name) {
-            return Some(k.clone());
+        match self.overrides.get(name) {
+            Some(k) if k.is_empty() => None,
+            Some(k) => Some(k.clone()),
+            None => self.preset_key(name).map(str::to_string),
         }
-        self.preset_key(name).map(str::to_string)
+    }
+
+    /// Whether `name`'s shortcut differs from its preset default.
+    pub fn is_customised(&self, name: &str) -> bool {
+        self.overrides.contains_key(name)
+    }
+
+    /// Bind `name` to `key`. Any other action on the same keystroke is unbound — one key never
+    /// fires two actions — and its label returned so the UI can say so. Binding an action back
+    /// to its preset default drops the override.
+    pub fn rebind(&mut self, name: &str, key: &str) -> Vec<&'static str> {
+        let key = normalize_key(key);
+        let mut freed = Vec::new();
+        for a in ACTIONS {
+            if a.name != name
+                && self
+                    .key_for(a.name)
+                    .is_some_and(|k| normalize_key(&k) == key)
+            {
+                self.unbind(a.name);
+                freed.push(a.label);
+            }
+        }
+        if self
+            .preset_key(name)
+            .is_some_and(|k| normalize_key(k) == key)
+        {
+            self.overrides.remove(name);
+        } else {
+            self.overrides.insert(name.to_string(), key);
+        }
+        freed
+    }
+
+    /// Remove `name`'s shortcut (an empty override when the preset would bind it).
+    pub fn unbind(&mut self, name: &str) {
+        if self.preset_key(name).is_some() {
+            self.overrides.insert(name.to_string(), String::new());
+        } else {
+            self.overrides.remove(name);
+        }
+    }
+
+    /// Put `name` back on its preset default, taking that key from any action now using it
+    /// (their labels are returned, as with [`Keymap::rebind`]).
+    pub fn reset(&mut self, name: &str) -> Vec<&'static str> {
+        if let Some(k) = self.preset_key(name) {
+            self.rebind(name, k)
+        } else {
+            self.overrides.remove(name);
+            Vec::new()
+        }
     }
 
     /// Switch to `preset`, clearing any per-action overrides.
@@ -234,6 +315,34 @@ mod tests {
         assert_eq!(km.key_for("push"), None);
         km.overrides.insert("push".into(), "cmd-alt-p".into());
         assert_eq!(km.key_for("push").as_deref(), Some("cmd-alt-p"));
+    }
+
+    /// The keymap editor's model: taking another action's key frees it (one key never fires
+    /// two actions), a per-action reset takes the default back, binding the default drops the
+    /// override, and resetting to a preset clears every customisation.
+    #[test]
+    fn rebind_frees_a_taken_key_and_reset_takes_it_back() {
+        let mut km = Keymap::default();
+        assert_eq!(km.rebind("push", "shift-cmd-o"), ["Go to File"]);
+        assert_eq!(km.key_for("push").as_deref(), Some("cmd-shift-o"));
+        assert_eq!(km.key_for("go_to_file"), None);
+
+        assert_eq!(km.reset("go_to_file"), ["Push…"]);
+        assert_eq!(km.key_for("go_to_file").as_deref(), Some("cmd-shift-o"));
+        assert_eq!(
+            km.key_for("push"),
+            None,
+            "push lost the key, and isn't re-bound"
+        );
+
+        assert!(km.rebind("push", "cmd-shift-k").is_empty());
+        assert!(
+            !km.is_customised("push"),
+            "binding the default drops the override"
+        );
+        km.rebind("save", "cmd-alt-p");
+        km.set_preset(Preset::WebStorm);
+        assert!(km.overrides.is_empty());
     }
 
     #[test]

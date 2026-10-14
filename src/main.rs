@@ -757,6 +757,47 @@ impl HistoryView {
     }
 }
 
+/// Settings → Keymap's shortcut editor, grouped out of the `Kyde` god-struct.
+struct KeymapEditor {
+    /// The action waiting for its new shortcut (`None` = not recording).
+    recording: Option<&'static str>,
+    /// Captures the next keystroke app-wide while recording; dropping it stops capturing.
+    intercept: Option<gpui::Subscription>,
+    /// One status line about the last change ("⌘⇧O moved from Go to File", …).
+    note: Option<String>,
+    /// Filters the shortcut table by action name or keystroke.
+    query: Entity<CodeEditor>,
+    /// A "Reset to <preset>" waiting for confirmation — nothing changes until it's confirmed.
+    confirm: Option<Preset>,
+    /// Focused while recording, so modifier presses reach the section's listener.
+    focus: FocusHandle,
+    /// Modifiers held right now while recording — previewed (translucent) in the row as the
+    /// shortcut is built, IDE-style.
+    held: gpui::Modifiers,
+}
+
+impl KeymapEditor {
+    /// A closed editor; the search box repaints the Settings window as it changes.
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let query = cx.new(|cx| CodeEditor::single_line(cx, "Search shortcuts…"));
+        cx.subscribe(&query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) && this.settings_win.is_some() {
+                cx.notify();
+            }
+        })
+        .detach();
+        Self {
+            recording: None,
+            intercept: None,
+            note: None,
+            query,
+            confirm: None,
+            focus: cx.focus_handle(),
+            held: gpui::Modifiers::default(),
+        }
+    }
+}
+
 /// The branch-switcher popup's state (bottom-right status-bar chip → dropdown), grouped out
 /// of the `Kyde` god-struct. Defined at the crate root so its fields stay reachable from the
 /// feature modules. `current_branch` deliberately stays on `Kyde` — it's repo state read all
@@ -1631,6 +1672,8 @@ struct Kyde {
     settings_section: SettingsSection,
     /// The Appearance → Theme select dropdown.
     settings_theme: ui::SelectState,
+    /// The Keymap section's shortcut editor (recording state + last change's note).
+    keymap_editor: KeymapEditor,
     /// Cached `(path, registered family name)` for the open font file's preview.
     font_preview: Option<(PathBuf, SharedString)>,
     /// Frame counter driving the welcome-screen ASCII shimmer (bumped each animation frame).
@@ -1939,7 +1982,13 @@ impl ModalWindow {
         // with nowhere to render, eating the main window's Escape).
         let host_of = kyde.clone();
         cx.on_release(move |_, cx| {
-            host_of.update(cx, |k, kcx| k.find_host_closed(FindHost::Modal(kind), kcx));
+            host_of.update(cx, |k, kcx| {
+                k.find_host_closed(FindHost::Modal(kind), kcx);
+                // Closing Settings mid-record must not leave the keystroke capture running.
+                if kind == ModalKind::Settings {
+                    k.stop_key_recording();
+                }
+            });
         })
         .detach();
         Self {
@@ -2477,15 +2526,35 @@ fn diff_word_bgs(d: &FileDiff) -> (LineWordBgs, LineWordBgs) {
 
 /// Turn "cmd-shift-o" into "⌘⇧O" for display.
 fn pretty_key(k: &str) -> String {
-    k.split('-')
-        .map(|part| match part {
-            "cmd" => "⌘".to_string(),
-            "shift" => "⇧".to_string(),
-            "ctrl" => "⌃".to_string(),
-            "alt" | "opt" => "⌥".to_string(),
-            "enter" => "⏎".to_string(),
-            other => other.to_uppercase(),
-        })
+    key_parts(k).concat()
+}
+
+/// "cmd-shift-o" → `["⌘", "⇧", "O"]`: one glyph per key, for key-cap rendering.
+fn key_parts(k: &str) -> Vec<String> {
+    // The key itself may be `-` (`cmd--`): split it off before the modifiers.
+    let (mods, key) = match k.strip_suffix("--") {
+        Some(mods) => (mods, "-"),
+        None => k.rsplit_once('-').unwrap_or(("", k)),
+    };
+    let glyph = |part: &str| match part {
+        "cmd" => "⌘".to_string(),
+        "shift" => "⇧".to_string(),
+        "ctrl" => "⌃".to_string(),
+        "alt" | "opt" => "⌥".to_string(),
+        "enter" => "⏎".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "backspace" => "⌫".to_string(),
+        "tab" => "⇥".to_string(),
+        "space" => "Space".to_string(),
+        other => other.to_uppercase(),
+    };
+    mods.split('-')
+        .filter(|m| !m.is_empty())
+        .chain(std::iter::once(key))
+        .map(glyph)
         .collect()
 }
 
@@ -3364,6 +3433,9 @@ mod gpui_smoke_tests {
         ONCE.call_once(|| {
             let dir = std::env::temp_dir().join(format!("kyde-test-xdg-{}", std::process::id()));
             std::env::set_var("XDG_DATA_HOME", &dir);
+            // Config too: the keymap / plugin / theme stores would otherwise read — and a test
+            // that saves would overwrite — the developer's real ~/.config/kyde (CI has none).
+            std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
         });
     }
 
@@ -4502,6 +4574,47 @@ mod gpui_smoke_tests {
                 );
                 assert_eq!(k.diff.left.read(cx).lang, Lang::Tsx);
                 assert_eq!(k.diff.right.read(cx).lang, Lang::Tsx);
+            })
+            .unwrap();
+    }
+
+    /// Settings → Keymap: recording a shortcut rebinds the action (taking the key from the
+    /// action that had it, with a note saying so), a bare key is refused with recording left
+    /// on, and a confirmed "Reset to `WebStorm` / `IntelliJ`" puts every default back.
+    #[gpui::test]
+    fn keymap_editor_records_rebinds_and_resets(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                k.choose_preset(Preset::WebStorm, cx);
+                k.start_key_recording("push", w, cx);
+                k.record_keystroke(&gpui::Keystroke::parse("cmd-shift-o").unwrap(), cx);
+                assert_eq!(k.keymap.key_for("push").as_deref(), Some("cmd-shift-o"));
+                assert_eq!(k.keymap.key_for("go_to_file"), None);
+                assert_eq!(
+                    k.keymap_editor.note.as_deref(),
+                    Some("⌘⇧O moved from Go to File")
+                );
+                assert_eq!(k.keymap_editor.recording, None);
+
+                k.start_key_recording("pull", w, cx);
+                k.record_keystroke(&gpui::Keystroke::parse("p").unwrap(), cx);
+                assert_eq!(k.keymap_editor.recording, Some("pull"), "bare key refused");
+                assert_eq!(k.keymap.key_for("pull").as_deref(), Some("cmd-t"));
+
+                k.stop_key_recording();
+                k.request_preset_reset(Preset::WebStorm, cx);
+                assert_eq!(
+                    k.keymap.key_for("push").as_deref(),
+                    Some("cmd-shift-o"),
+                    "nothing changes until the reset is confirmed"
+                );
+                k.confirm_preset_reset(cx);
+                assert_eq!(
+                    k.keymap.key_for("go_to_file").as_deref(),
+                    Some("cmd-shift-o")
+                );
+                assert_eq!(k.keymap.key_for("push").as_deref(), Some("cmd-shift-k"));
             })
             .unwrap();
     }
