@@ -597,28 +597,6 @@ enum NamePrompt {
     Rename(PathBuf),
 }
 
-/// A minimal text tooltip view (gpui 0.2.2 ships no ready-made one). Built on
-/// demand by `.tooltip(..)`; styled to match the chrome.
-struct Tip(SharedString);
-
-impl Render for Tip {
-    fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme::get();
-        div()
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(t.bg_light)
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.text)
-            .font_family(theme::font::UI_FAMILY)
-            .text_size(px(theme::get().ui_font_size))
-            .shadow_lg()
-            .child(self.0.clone())
-    }
-}
-
 /// Per-project UI state stashed when switching to another open-project tab, so switching back
 /// restores the project exactly as you left it (which file is open, the editor tabs, the tree
 /// expansion, the active mode). The *active* project's state lives in the `Kyde` fields
@@ -2276,20 +2254,14 @@ fn scratch_group_path() -> PathBuf {
     PathBuf::from("\u{1}Scratches")
 }
 
-/// The Kyde config directory (`~/.config/kyde`, XDG-respecting). Holds every persisted
-/// file: plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the
-/// full "clear data" reset (uninstalls all plugins + drops all cached settings).
-fn config_dir() -> PathBuf {
-    let base = std::env::var("XDG_CONFIG_HOME").map_or_else(
-        |_| PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config"),
-        PathBuf::from,
-    );
-    base.join("kyde")
-}
+// The Kyde config directory (`~/.config/kyde`, XDG-respecting) holds every persisted file:
+// plugins.json, keymap.json, theme.json, projects.json, ui.json. Removing it is the full
+// "clear data" reset (uninstalls all plugins + drops all cached settings).
+use kyde_config::store::config_dir;
 
 /// Tiny persisted UI prefs (`~/.config/kyde/ui.json`), e.g. the FPS-monitor toggle.
 fn ui_settings_path() -> PathBuf {
-    config_dir().join("ui.json")
+    kyde_config::store::config_path("ui.json")
 }
 /// Read one boolean key from `ui.json` (missing file/key → `default`).
 fn load_ui_bool(key: &str, default: bool) -> bool {
@@ -2323,13 +2295,10 @@ fn save_show_fps(v: bool) {
 }
 
 /// One visual row of the aligned side-by-side diff. `old`/`new` index into each
-/// side's lines (`None` = filler/blank). `hunk` tags rows belonging to a change;
-/// `hunk_start` marks the first such row (where the gutter controls render).
+/// side's lines (`None` = filler/blank).
 struct DiffRow {
     old: Option<usize>,
     new: Option<usize>,
-    hunk: Option<usize>,
-    hunk_start: bool,
 }
 
 /// Flatten a `FileDiff` into aligned rows. Equal regions advance both sides
@@ -2338,13 +2307,11 @@ struct DiffRow {
 fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
     let mut rows = Vec::new();
     let (mut o, mut n) = (0usize, 0usize);
-    for (hi, h) in d.hunks.iter().enumerate() {
+    for h in &d.hunks {
         while o < h.old_range.start && n < h.new_range.start {
             rows.push(DiffRow {
                 old: Some(o),
                 new: Some(n),
-                hunk: None,
-                hunk_start: false,
             });
             o += 1;
             n += 1;
@@ -2354,8 +2321,6 @@ fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
             rows.push(DiffRow {
                 old: (i < ol).then(|| h.old_range.start + i),
                 new: (i < nl).then(|| h.new_range.start + i),
-                hunk: Some(hi),
-                hunk_start: i == 0,
             });
         }
         o = h.old_range.end;
@@ -2365,13 +2330,37 @@ fn aligned_rows(d: &FileDiff) -> Vec<DiffRow> {
         rows.push(DiffRow {
             old: Some(o),
             new: Some(n),
-            hunk: None,
-            hunk_start: false,
         });
         o += 1;
         n += 1;
     }
     rows
+}
+
+/// The aligned layout's shape without materialising its rows: `(total rows, (row, hunk) of
+/// each hunk's first row)`. O(hunks), where [`aligned_rows`] is O(lines) — the render
+/// paths only need where the gutter controls go, every frame.
+fn hunk_starts(d: &FileDiff) -> (usize, Vec<(usize, usize)>) {
+    let (mut o, mut n, mut row) = (0usize, 0usize, 0usize);
+    let mut starts = Vec::with_capacity(d.hunks.len());
+    for (hi, h) in d.hunks.iter().enumerate() {
+        // The equal stretch before the hunk advances both sides together.
+        row += h
+            .old_range
+            .start
+            .saturating_sub(o)
+            .min(h.new_range.start.saturating_sub(n));
+        starts.push((row, hi));
+        row += h.old_range.len().max(h.new_range.len());
+        o = h.old_range.end;
+        n = h.new_range.end;
+    }
+    row += d
+        .old
+        .len()
+        .saturating_sub(o)
+        .min(d.new.len().saturating_sub(n));
+    (row, starts)
 }
 
 /// Filler (blank alignment rows) for the two diff panes. `(left_map, left_end, right_map,
@@ -3241,6 +3230,33 @@ fn main() {
 }
 
 #[cfg(test)]
+mod diff_layout_tests {
+    use super::*;
+
+    /// `hunk_starts` (the per-frame gutter layout, O(hunks)) must agree with the full
+    /// `aligned_rows` layout: same row count, each start on its hunk's first row.
+    #[test]
+    fn hunk_starts_match_the_aligned_rows() {
+        let before = "a\nb\nc\nd\ne\nf\ng\n";
+        let after = "a\nB\nc\nd\nX\nY\nZ\ne\ng\nh\n";
+        let d = FileDiff::compute(before, after);
+        let rows = aligned_rows(&d);
+        let (n, starts) = hunk_starts(&d);
+        assert_eq!(n, rows.len());
+        assert_eq!(starts.len(), d.hunks.len());
+        for &(row, hi) in &starts {
+            let h = &d.hunks[hi];
+            let r = &rows[row];
+            assert!(
+                r.old == (!h.old_range.is_empty()).then_some(h.old_range.start)
+                    && r.new == (!h.new_range.is_empty()).then_some(h.new_range.start),
+                "hunk {hi} starts on row {row}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod branch_tree_tests {
     use super::*;
     use std::collections::HashSet;
@@ -3727,7 +3743,7 @@ mod gpui_smoke_tests {
     fn refresh_populates_changed_files_tree_and_selection(cx: &mut TestAppContext) {
         let (handle, _dir) = boot(cx);
         handle
-            .update(cx, |k, _w, _cx| {
+            .update(cx, |k, _w, cx| {
                 assert!(
                     k.files.iter().any(|f| f.path.ends_with("app.tsx")),
                     "the modified file should appear in the changed-files list"
@@ -3742,11 +3758,13 @@ mod gpui_smoke_tests {
                 );
                 assert!(k.current_branch.is_some(), "branch should be read");
                 assert!(k.selected.is_some(), "a change should be auto-selected");
+                assert!(k.op_error.is_none(), "a clean status read shows no banner");
+                // The diff is only computed where it's shown — the Commit view.
+                k.enter_commit(cx);
                 assert!(
                     k.diff.current.is_some(),
                     "the selected change should load a diff model"
                 );
-                assert!(k.op_error.is_none(), "a clean status read shows no banner");
             })
             .unwrap();
     }

@@ -67,3 +67,21 @@ pub fn btn_secondary_state(
     };
     b.child(label.into())
 }
+
+/// A small square icon / glyph button — the `−` / `»` panel toggles, terminal-strip and
+/// toolbar icons: centred content, muted until hovered. The caller sets the glyph's text
+/// size (or an `svg` child) and chains the child, tooltip and handler.
+pub fn icon_btn(id: impl Into<gpui::ElementId>, size: f32) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .size(gpui::px(size))
+        .rounded_md()
+        .text_color(t.line_number)
+        .hover(|s| s.bg(t.bg_light).text_color(t.text))
+        .cursor_pointer()
+}

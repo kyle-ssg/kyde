@@ -185,7 +185,7 @@ impl Kyde {
                 .text_color(t.secondary_text)
                 .cursor_pointer()
                 .hover(|d| d.bg(t.bg_light))
-                .tooltip(|_w, cx| cx.new(|_| Tip("Clear path filter".into())).into())
+                .tooltip(ui::tip("Clear path filter"))
                 .child(label)
                 .child(div().text_color(t.line_number).child("×"))
                 .on_mouse_down(
@@ -231,26 +231,13 @@ impl Kyde {
             // Minimise / expand the bottom panel (IDE tool-window style).
             .child({
                 let collapsed = self.history.panel_collapsed;
-                div()
-                    .id("hist-panel-toggle")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(28.0))
-                    .rounded_md()
+                ui::icon_btn("hist-panel-toggle", 28.0)
                     .text_size(px(16.0))
-                    .cursor_pointer()
-                    .text_color(t.line_number)
-                    .hover(|d| d.bg(t.bg_mid).text_color(t.text))
-                    .tooltip(move |_w, cx| {
-                        let tip = if collapsed {
-                            "Expand panel"
-                        } else {
-                            "Minimise panel"
-                        };
-                        cx.new(|_| Tip(tip.into())).into()
-                    })
+                    .tooltip(ui::tip(if collapsed {
+                        "Expand panel"
+                    } else {
+                        "Minimise panel"
+                    }))
                     // `−` to minimise (same as the Browse tree's collapse button); to expand,
                     // the tree's `»` double-chevron rotated to point up (this panel grows
                     // upward) = Lucide `chevrons-up`.
@@ -391,18 +378,14 @@ impl Kyde {
         // ── changed files of the selected commit, as a folder tree + a search box ──
         let visible = self.history_visible_files(cx);
         // Root row shows the project name (like the Browse tree), not a generic "Files".
-        let root_name: SharedString = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned())
-            .into();
+        let root_name: SharedString = self.project_name().into();
+        let file_ix = super::commit::file_index(&self.history.files);
         let file_rows: Vec<gpui::AnyElement> = visible
             .into_iter()
             .map(|r| {
                 let is_root = r.path.as_os_str().is_empty();
                 let file_idx = (!r.is_dir)
-                    .then(|| self.history.files.iter().position(|f| f.path == r.path))
+                    .then(|| file_ix.get(r.path.as_path()).copied())
                     .flatten();
                 // The keyboard cursor: a folder when it's on one, else the selected file.
                 let selected = match &self.history.files_dir_cursor {
@@ -477,7 +460,7 @@ impl Kyde {
         .py_1p5()
         .text_size(px(t.ui_font_size))
         .child(self.history.files_query.clone());
-        let files_hr = div().flex_none().h(px(1.0)).mx_1().bg(t.divider);
+        let files_hr = ui::hr();
         // No changed files (e.g. "Compare with Local" when the working tree matches the
         // commit) → an explicit empty-state instead of a lone, childless root folder row.
         let files_body = if self.history.files.is_empty() {
@@ -1125,41 +1108,15 @@ impl Kyde {
     /// The history files tree's visible rows: root + expanded descendants, filtered by the
     /// files search box (keeping the root, matching files, and dirs containing a match).
     pub(crate) fn history_visible_files(&self, cx: &App) -> Vec<tree::Row> {
-        let fq = self
+        let mut visible = self
             .history
-            .files_query
-            .read(cx)
-            .text()
-            .trim()
-            .to_lowercase();
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if self.history.files_expanded.contains(&PathBuf::new()) {
-            for mut r in self
-                .history
-                .files_tree
-                .visible(&self.history.files_expanded)
-            {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
-        // Filter by the search box: keep root, matching files, and dirs containing a match.
-        if !fq.is_empty() {
-            let files = &self.history.files;
-            visible.retain(|r| {
-                r.path.as_os_str().is_empty()
-                    || (!r.is_dir && r.path.to_string_lossy().to_lowercase().contains(&fq))
-                    || (r.is_dir
-                        && files.iter().any(|f| {
-                            f.path.starts_with(&r.path)
-                                && f.path.to_string_lossy().to_lowercase().contains(&fq)
-                        }))
-            });
-        }
+            .files_tree
+            .visible_with_root(&self.history.files_expanded);
+        tree::retain_matching(
+            &mut visible,
+            self.history.files.iter().map(|f| f.path.as_path()),
+            self.history.files_query.read(cx).text(),
+        );
         visible
     }
 

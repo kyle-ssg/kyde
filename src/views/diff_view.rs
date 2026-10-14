@@ -145,8 +145,8 @@ impl Kyde {
         // empty rows collapse (gpui ignores `.h()` on a childless div), which bunched every
         // chevron toward the top instead of onto its hunk row.
         let row_h = px(editor::line_height_px());
-        let rows = aligned_rows(d);
-        let total_h = row_h * rows.len() as f32;
+        let (n_rows, starts) = hunk_starts(d);
+        let total_h = row_h * n_rows as f32;
         // Read-only diffs (push view) show a committed change with no working-tree edit,
         // so there's nothing to revert — drop the gutter chevrons.
         let chevrons: Vec<gpui::AnyElement> = if self.diff.readonly {
@@ -166,10 +166,9 @@ impl Kyde {
                 .and_then(|p| self.commit.excluded_hunks.get(p))
                 .cloned()
                 .unwrap_or_default();
-            rows.iter()
-                .enumerate()
-                .filter_map(|(i, r)| {
-                    let hi = r.hunk_start.then_some(r.hunk).flatten()?;
+            starts
+                .iter()
+                .map(|&(i, hi)| {
                     // Flex-center the glyph in a fixed box so it's truly centered
                     // (a line-height hack left it sitting low).
                     let revert = div()
@@ -203,10 +202,7 @@ impl Kyde {
                             .rounded_sm()
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_light))
-                            .tooltip(|_w, cx| {
-                                cx.new(|_| Tip("Include this change in the commit".into()))
-                                    .into()
-                            })
+                            .tooltip(ui::tip("Include this change in the commit"))
                             .child(checkbox_box(!excluded.contains(&hi)))
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -216,25 +212,13 @@ impl Kyde {
                                 }),
                             )
                     });
-                    Some(
-                        // Position the row's line box exactly over the editor line (`line_height`
-                        // = `row_h`), so the `»` baselines with the line's text instead of being
-                        // half-centered a few px high.
-                        div()
-                            .absolute()
-                            .top(row_h * i as f32)
-                            .left_0()
-                            .right_0()
-                            .h(row_h)
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_center()
-                            .gap_0p5()
-                            .children(include)
-                            .child(revert)
-                            .into_any_element(),
-                    )
+                    // Position the row's line box exactly over the editor line (`line_height`
+                    // = `row_h`), so the `»` baselines with the line's text instead of being
+                    // half-centered a few px high.
+                    ui::diff::gutter_row(i, row_h)
+                        .children(include)
+                        .child(revert)
+                        .into_any_element()
                 })
                 .collect()
         };
@@ -244,27 +228,17 @@ impl Kyde {
         let frac = self.diff.split.clamp(0.15, 0.85);
         let lw = self.diff.left.read(cx).content_width();
         let rw = self.diff.right.read(cx).content_width();
-        let pane_scroll =
-            |id: &'static str, scroll: &ScrollHandle, w: f32, editor: gpui::AnyElement| {
-                div()
-                    .id(id)
-                    .h_full()
-                    .w_full()
-                    .overflow_scroll()
-                    .track_scroll(scroll)
-                    .child(div().w(px(w)).child(editor))
-            };
-        let left_inner = pane_scroll(
+        let left_inner = ui::diff::pane_scroller(
             "diff-left-scroll",
-            &self.diff.scroll,
             lw,
             self.diff.left.clone().into_any_element(),
-        );
-        let right_inner = pane_scroll(
-            "diff-right-scroll",
             &self.diff.scroll,
+        );
+        let right_inner = ui::diff::pane_scroller(
+            "diff-right-scroll",
             rw,
             self.diff.right.clone().into_any_element(),
+            &self.diff.scroll,
         );
         // One shared horizontal scrollbar driven by `diff.scroll`; its travel is the wider
         // pane's content. Placed on the island (full width) below.
@@ -311,35 +285,21 @@ impl Kyde {
         // The gutter (chevrons) shares the editors' vertical scroll by translating its content
         // by the SAME offset; it also doubles as the draggable divider (drag to resize the
         // split). Clicks on a `»` still revert their hunk (chevrons are children).
-        let scroll_y = self.diff.scroll.offset().y;
-        let gutter = div()
-            .id("diff-gutter")
-            .w(px(DIFF_GUTTER_W))
-            .flex_none()
-            .h_full()
-            .overflow_hidden()
-            .bg(t.diff_separator_bg)
-            // Thin divider lines on both edges so the center gutter reads as the
-            // pane separator (otherwise it blends into the panes at most font sizes).
-            .border_l(px(1.0))
-            .border_r(px(1.0))
-            .border_color(t.divider)
-            .cursor_col_resize()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.start_divider_drag(Divider::DiffPane, e.position, window);
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(total_h)
-                    .top(scroll_y)
-                    .children(chevrons),
-            );
+        let gutter = ui::diff::gutter_column(
+            "diff-gutter",
+            DIFF_GUTTER_W,
+            total_h,
+            self.diff.scroll.offset().y,
+            chevrons,
+        )
+        .cursor_col_resize()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
+                this.start_divider_drag(Divider::DiffPane, e.position, window);
+                cx.notify();
+            }),
+        );
 
         // Single vertical scrollbar overlaid on the right edge of the island; both panes
         // share `diff.scroll`, so one bar drives the whole diff. `total_h` is the exact
@@ -391,7 +351,7 @@ impl Kyde {
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(t.bg_light))
-                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.into())).into())
+                .tooltip(ui::tip(tip))
                 .child(svg().path(icon).size(px(14.0)).text_color(t.secondary_text))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -776,11 +736,10 @@ impl Kyde {
         let Some(d) = self.diff.current.as_ref() else {
             return Vec::new();
         };
-        crate::aligned_rows(d)
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.hunk_start)
-            .map(|(i, _)| i)
+        crate::hunk_starts(d)
+            .1
+            .into_iter()
+            .map(|(row, _)| row)
             .collect()
     }
 

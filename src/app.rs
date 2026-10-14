@@ -305,6 +305,14 @@ impl Kyde {
         me
     }
 
+    /// The open project's folder name — the label of every tree's root row.
+    pub(crate) fn project_name(&self) -> String {
+        self.repo_root
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned())
+    }
+
     /// The open project's repo. Uses the toplevel the last status read discovered for this
     /// root (no subprocess — this is called on every save, select and click), falling back
     /// to `git rev-parse` only before the first read lands or after a project switch.
@@ -440,12 +448,14 @@ impl Kyde {
         // shared with History/Push (committed content). Leave those alone, or a clean-tree
         // refresh blanks an open history diff to "Select a file" on window refocus (#39).
         // History's "Local" compare is editable, hence the mode check on top of `readonly`.
+        // In Browse the panes aren't on screen at all — skip the re-diff (a `git show` +
+        // full diff on every save's refresh); entering the Commit view re-selects anyway.
         let panes_foreign =
-            self.diff.readonly || (self.mode == Mode::History && !self.diff_view_open);
+            self.diff.readonly || (self.mode != Mode::Commit && !self.diff_view_open);
         if panes_foreign {
-            // Just keep the commit-view selection index in range.
-            if self.selected.is_some_and(|i| i >= self.files.len()) {
-                self.selected = None;
+            // Just keep the commit-view selection index valid (it seeds the next entry).
+            if self.selected.is_none_or(|i| i >= self.files.len()) {
+                self.selected = (!self.files.is_empty()).then_some(0);
             }
         } else {
             match self.selected {

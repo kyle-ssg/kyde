@@ -125,22 +125,14 @@ fn tool_btn(
         .px_1p5()
         .rounded_md()
         .cursor_pointer()
-        .hover(|s| s.bg(t.bg_mid))
-        .tooltip(move |_w, cx| cx.new(|_| Tip(tip.clone())).into())
+        .hover(|s| s.bg(t.bg_light))
+        .tooltip(ui::tip(tip))
         .child(svg().path(icon).size(px(16.0)).text_color(if busy {
             t.line_number
         } else {
             t.secondary_text
         }))
         .when(count > 0, |d| {
-            d.child(
-                div()
-                    .px_1()
-                    .rounded_sm()
-                    .bg(t.bg_light)
-                    .text_size(px(10.0))
-                    .text_color(t.text)
-                    .child(SharedString::from(count.to_string())),
-            )
+            d.child(ui::count_badge(count).text_size(px(10.0)))
         })
 }

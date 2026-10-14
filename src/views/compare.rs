@@ -6,10 +6,6 @@
 
 use crate::*;
 
-/// Center gutter width — two 22px controls + breathing room (matches the merge
-/// view's gutters).
-const COMPARE_GUTTER_W: f32 = 56.0;
-
 impl Kyde {
     /// Open (or re-focus) the Compare window for `left` ↔ `right`. Paths are
     /// repo-relative (or absolute for scratch files), like every open-file path.
@@ -170,35 +166,16 @@ impl Kyde {
         };
 
         // Per-hunk gutter controls at each hunk's first aligned display row.
-        let rows = aligned_rows(d);
-        let total_h = row_h * rows.len() as f32;
-        let hunk_rows: Vec<(usize, usize)> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.hunk_start)
-            .filter_map(|(row, r)| r.hunk.map(|h| (row, h)))
-            .collect();
+        let (n_rows, hunk_rows) = hunk_starts(d);
+        let total_h = row_h * n_rows as f32;
         let ctl = |id: String,
                    glyph: &'static str,
                    tip: &'static str,
                    hi: usize,
                    to_right: bool,
                    cx: &mut Context<Self>| {
-            let tip = SharedString::from(tip);
-            div()
-                .id(SharedString::from(id))
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .rounded_sm()
-                .text_size(px(17.0))
-                .line_height(px(17.0))
-                .text_color(t.line_number)
-                .hover(|s| s.bg(t.bg_light).text_color(t.primary))
-                .cursor_pointer()
-                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.clone())).into())
-                .child(glyph)
+            ui::diff::gutter_glyph(SharedString::from(id), glyph, t.line_number)
+                .tooltip(ui::tip(tip))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| {
@@ -210,17 +187,7 @@ impl Kyde {
         let mut ctls: Vec<gpui::AnyElement> = Vec::new();
         for &(row, hi) in &hunk_rows {
             ctls.push(
-                div()
-                    .absolute()
-                    .top(row_h * row as f32)
-                    .left_0()
-                    .right_0()
-                    .h(row_h)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .gap_0p5()
+                ui::diff::gutter_row(row, row_h)
                     .child(ctl(
                         format!("cmp-left-{hi}"),
                         "«",
@@ -240,47 +207,19 @@ impl Kyde {
                     .into_any_element(),
             );
         }
-        let scroll_y = self.compare.scroll.offset().y;
-        let gutter = div()
-            .id("compare-gutter")
-            .w(px(COMPARE_GUTTER_W))
-            .flex_none()
-            .h_full()
-            .overflow_hidden()
-            .bg(t.diff_separator_bg)
-            .border_l(px(1.0))
-            .border_r(px(1.0))
-            .border_color(t.divider)
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(total_h)
-                    .top(scroll_y)
-                    .children(ctls),
-            );
+        let gutter = ui::diff::gutter_column(
+            "compare-gutter",
+            ui::diff::GUTTER_W,
+            total_h,
+            self.compare.scroll.offset().y,
+            ctls,
+        );
 
         // Panes: shared scroll, content width for horizontal overflow.
         let lw = self.compare.left.read(cx).content_width();
         let rw = self.compare.right.read(cx).content_width();
         let pane = |id: &'static str, w: f32, ed: gpui::AnyElement, scroll: &ScrollHandle| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .bg(t.main_bg)
-                .font_family(theme::font::FAMILY)
-                .text_size(fs)
-                .text_color(t.text)
-                .child(
-                    div()
-                        .id(id)
-                        .h_full()
-                        .w_full()
-                        .overflow_scroll()
-                        .track_scroll(scroll)
-                        .child(div().w(px(w)).child(ed)),
-                )
+            ui::diff::editor_pane(id, w, ed, scroll, fs)
         };
         let scroll = self.compare.scroll.clone();
 
@@ -312,7 +251,7 @@ impl Kyde {
                 .text_color(t.secondary_text)
                 .hover(|s| s.bg(t.bg_light).text_color(t.primary))
                 .cursor_pointer()
-                .tooltip(move |_w, cx| cx.new(|_| Tip(tip.clone())).into())
+                .tooltip(ui::tip(tip))
                 .child(glyph)
                 .on_mouse_down(
                     MouseButton::Left,

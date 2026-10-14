@@ -82,17 +82,8 @@ impl Kyde {
             );
         }
         strip = strip.child(
-            div()
-                .id("term-tab-new")
-                .size(px(22.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .hover(|d| d.bg(t.bg_mid))
-                .cursor_pointer()
-                .text_color(t.secondary_text)
-                .tooltip(move |_w, cx| cx.new(|_| Tip("New terminal tab".into())).into())
+            ui::icon_btn("term-tab-new", 22.0)
+                .tooltip(ui::tip("New terminal tab"))
                 .child("+")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -110,18 +101,9 @@ impl Kyde {
             // Minimize: hide the panel (reopen via the rail icon or ⌃`). A `−` glyph styled
             // like the tree / commit-panel collapse buttons.
             .child(
-                div()
-                    .id("term-minimize")
-                    .size(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
+                ui::icon_btn("term-minimize", 22.0)
                     .text_size(px(16.0))
-                    .text_color(t.line_number)
-                    .hover(|d| d.bg(t.bg_light).text_color(t.text))
-                    .cursor_pointer()
-                    .tooltip(move |_w, cx| cx.new(|_| Tip("Minimize terminal".into())).into())
+                    .tooltip(ui::tip("Minimize terminal"))
                     .child("−")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -133,25 +115,12 @@ impl Kyde {
                     ),
             )
             .child(
-                div()
-                    .id("term-maximize")
-                    .size(px(22.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    // Same colour + hover as the minimize button next to it.
-                    .text_color(t.line_number)
-                    .hover(|d| d.bg(t.bg_light).text_color(t.text))
-                    .cursor_pointer()
-                    .tooltip(move |_w, cx| {
-                        let label = if maxed {
-                            "Restore terminal"
-                        } else {
-                            "Maximize terminal"
-                        };
-                        cx.new(|_| Tip(label.into())).into()
-                    })
+                ui::icon_btn("term-maximize", 22.0)
+                    .tooltip(ui::tip(if maxed {
+                        "Restore terminal"
+                    } else {
+                        "Maximize terminal"
+                    }))
                     .child(
                         svg()
                             .path(if maxed {

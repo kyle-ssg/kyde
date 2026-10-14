@@ -28,9 +28,6 @@
 use crate::*;
 use kyde_local_history::{format_ts, relative_ts, EventKind};
 
-/// Center gutter width — matches the compare/merge gutters.
-const LH_GUTTER_W: f32 = 56.0;
-
 /// Milliseconds since the Unix epoch, best effort (pre-1970 clocks read as 0).
 pub(crate) fn lh_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -1225,72 +1222,37 @@ impl Kyde {
                 .into_any_element();
         };
 
-        let rows = aligned_rows(d);
-        let total_h = row_h * rows.len() as f32;
-        let hunk_rows: Vec<(usize, usize)> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.hunk_start)
-            .filter_map(|(row, r)| r.hunk.map(|h| (row, h)))
-            .collect();
+        let (n_rows, hunk_rows) = hunk_starts(d);
+        let total_h = row_h * n_rows as f32;
         let mut ctls: Vec<gpui::AnyElement> = Vec::new();
         for &(row, hi) in &hunk_rows {
-            let tip = SharedString::from("Restore this change from the snapshot");
             ctls.push(
-                div()
-                    .absolute()
-                    .top(row_h * row as f32)
-                    .left_0()
-                    .right_0()
-                    .h(row_h)
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                ui::diff::gutter_row(row, row_h)
                     .child(
-                        div()
-                            .id(SharedString::from(format!("lh-apply-{hi}")))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(22.0))
-                            .rounded_sm()
-                            .text_size(px(17.0))
-                            .line_height(px(17.0))
-                            .text_color(t.line_number)
-                            .hover(|s| s.bg(t.bg_light).text_color(t.primary))
-                            .cursor_pointer()
-                            .tooltip(move |_w, cx| cx.new(|_| Tip(tip.clone())).into())
-                            .child("»")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _e, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.lh_apply_hunk(hi, cx);
-                                }),
-                            ),
+                        ui::diff::gutter_glyph(
+                            SharedString::from(format!("lh-apply-{hi}")),
+                            "»",
+                            t.line_number,
+                        )
+                        .tooltip(ui::tip("Restore this change from the snapshot"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.lh_apply_hunk(hi, cx);
+                            }),
+                        ),
                     )
                     .into_any_element(),
             );
         }
-        let scroll_y = self.lh.scroll.offset().y;
-        let gutter = div()
-            .id("lh-gutter")
-            .w(px(LH_GUTTER_W))
-            .flex_none()
-            .h_full()
-            .overflow_hidden()
-            .bg(t.diff_separator_bg)
-            .border_l(px(1.0))
-            .border_r(px(1.0))
-            .border_color(t.divider)
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(total_h)
-                    .top(scroll_y)
-                    .children(ctls),
-            );
+        let gutter = ui::diff::gutter_column(
+            "lh-gutter",
+            ui::diff::GUTTER_W,
+            total_h,
+            self.lh.scroll.offset().y,
+            ctls,
+        );
 
         let lw = self.lh.left.read(cx).content_width();
         let rw = self.lh.right.read(cx).content_width();
@@ -1302,24 +1264,7 @@ impl Kyde {
                     ed: gpui::AnyElement,
                     scroll: &ScrollHandle,
                     placeholder: Option<SharedString>| {
-            let mut d = div()
-                .flex_1()
-                .min_w_0()
-                .h_full()
-                .relative()
-                .bg(t.main_bg)
-                .font_family(theme::font::FAMILY)
-                .text_size(fs)
-                .text_color(t.text)
-                .child(
-                    div()
-                        .id(id)
-                        .h_full()
-                        .w_full()
-                        .overflow_scroll()
-                        .track_scroll(scroll)
-                        .child(div().w(px(w)).child(ed)),
-                );
+            let mut d = ui::diff::editor_pane(id, w, ed, scroll, fs).relative();
             if let Some(msg) = placeholder {
                 d = d.child(
                     div()

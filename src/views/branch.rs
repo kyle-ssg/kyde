@@ -68,12 +68,10 @@ impl Kyde {
             .as_ref()
             .or(self.browse.open_path.as_ref());
         if let Some(rel) = crumb.filter(|p| !p.as_os_str().is_empty()) {
-            // Real filesystem check (not "is it the open file") — single-click selection
-            // can point at any file or folder, so the icon must follow the path itself.
-            let is_file = self
-                .repo_root
-                .as_ref()
-                .is_some_and(|root| root.join(rel).is_file());
+            // Selection can point at any file or folder, so the icon follows the path itself
+            // — asked of the tree (this runs every frame; a filesystem stat per frame isn't
+            // free). Scratch files are absolute paths outside the tree.
+            let is_file = self.browse.tree.is_file(rel) || rel.is_absolute();
             let repo_name = self
                 .repo_root
                 .as_ref()
@@ -146,24 +144,14 @@ impl Kyde {
             } else {
                 bar_text
             })
-            .tooltip(move |_w, cx| cx.new(|_| Tip(tip_text.clone())).into())
+            .tooltip(ui::tip(tip_text))
             .child(div().flex_none().child(if pushing { "↻" } else { "↑" }))
             .child(SharedString::from(if pushing {
                 "Pushing…"
             } else {
                 "Push"
             }))
-            .when(ahead > 0, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .px_1p5()
-                        .rounded_md()
-                        .bg(t.bg_light)
-                        .text_color(t.text)
-                        .child(SharedString::from(ahead.to_string())),
-                )
-            })
+            .when(ahead > 0, |d| d.child(ui::count_badge(ahead)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.open_push_modal(cx)),
@@ -185,24 +173,14 @@ impl Kyde {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_light))
             .text_color(bar_text)
-            .tooltip(|_w, cx| cx.new(|_| Tip("Pull from origin (rebase)".into())).into())
+            .tooltip(ui::tip("Pull from origin (rebase)"))
             .child(div().flex_none().child(if pulling { "↻" } else { "↓" }))
             .child(SharedString::from(if pulling {
                 "Pulling…"
             } else {
                 "Pull"
             }))
-            .when(behind > 0, |d| {
-                d.child(
-                    div()
-                        .flex_none()
-                        .px_1p5()
-                        .rounded_md()
-                        .bg(t.bg_light)
-                        .text_color(t.text)
-                        .child(SharedString::from(behind.to_string())),
-                )
-            })
+            .when(behind > 0, |d| d.child(ui::count_badge(behind)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.do_pull(cx)),

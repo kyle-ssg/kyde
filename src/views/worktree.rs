@@ -119,7 +119,7 @@ impl Kyde {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_light))
             .text_color(bar_text)
-            .tooltip(|_w, cx| cx.new(|_| Tip("Worktrees".into())).into())
+            .tooltip(ui::tip("Worktrees"))
             .child(
                 div().flex_none().child(
                     svg()
@@ -131,15 +131,7 @@ impl Kyde {
             .child(SharedString::from(label))
             // Worktree-count badge (like the Push/Pull count badges): signals this chip is
             // the *set* of worktrees, not just the current one's name.
-            .child(
-                div()
-                    .flex_none()
-                    .px_1p5()
-                    .rounded_md()
-                    .bg(t.bg_light)
-                    .text_color(t.text)
-                    .child(SharedString::from(count.to_string())),
-            )
+            .child(ui::count_badge(count))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, window, cx| this.toggle_worktree_popup(window, cx)),
@@ -206,15 +198,7 @@ impl Kyde {
                     // Changed-files badge: the "which agent has work waiting?" signal.
                     // Absent while the background status gather is still running.
                     .when_some(changed.filter(|n| *n > 0), |d, n| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .px_1p5()
-                                .rounded_md()
-                                .bg(t.bg_light)
-                                .text_color(t.text)
-                                .child(SharedString::from(n.to_string())),
-                        )
+                        d.child(ui::count_badge(n))
                     })
                     .when(is_current, |d| {
                         d.child(div().flex_none().text_color(t.line_number).child("✓"))

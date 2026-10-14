@@ -9,17 +9,7 @@ impl Kyde {
     /// Depths are offset by one so everything nests under the root row. The "Scratches"
     /// sentinel path can't collide with a real file.
     pub(crate) fn browse_visible_rows(&self) -> Vec<tree::Row> {
-        let mut visible = vec![tree::Row {
-            path: PathBuf::new(),
-            is_dir: true,
-            depth: 0,
-        }];
-        if self.browse.expanded.contains(&PathBuf::new()) {
-            for mut r in self.browse.tree.visible(&self.browse.expanded) {
-                r.depth += 1;
-                visible.push(r);
-            }
-        }
+        let mut visible = self.browse.tree.visible_with_root(&self.browse.expanded);
         let scratch_group = scratch_group_path();
         if !self.browse.scratches.is_empty() {
             visible.push(tree::Row {
@@ -312,11 +302,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         // Show the repo root as the top row; everything else nests one level under it,
         // and collapsing the root hides the whole tree.
-        let root_name = self
-            .repo_root
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map_or_else(|| "/".to_string(), |s| s.to_string_lossy().into_owned());
+        let root_name = self.project_name();
         let visible = self.browse_visible_rows();
         let scratch_group = scratch_group_path();
         // O(1) status lookup per row (was `self.files.iter().find()` — O(changed) per row,
@@ -451,22 +437,14 @@ impl Kyde {
         // Header strip with a `−` minimize button at the top-right.
         // Collapse button — absolutely positioned in the tree's top-right corner so it floats
         // over the rows instead of consuming a whole header line.
-        let tree_minimize = div()
-            .id("tree-minimize")
+        let tree_minimize = ui::icon_btn("tree-minimize", 22.0)
             .absolute()
             .top(px(4.0))
             // Clear the 12px scrollbar gutter on the right so the bar never sits under it.
             .right(px(8.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .size(px(22.0))
-            .rounded_md()
             .text_size(px(16.0))
-            .text_color(t.line_number)
             .bg(t.panel_bg)
-            .hover(|s| s.bg(t.bg_light).text_color(t.text))
-            .cursor_pointer()
+            .tooltip(ui::tip("Collapse file tree"))
             .child("−")
             .on_mouse_down(
                 MouseButton::Left,
@@ -523,37 +501,19 @@ impl Kyde {
         })
         .child(tree_minimize);
         // Collapsed: a thin strip with an expand button where the tree was.
-        let collapsed_strip = div()
-            .flex_none()
-            .h_full()
-            .w(px(30.0))
-            .py_1()
-            .bg(t.panel_bg)
-            .rounded(px(theme::ISLAND_RADIUS))
-            .flex()
-            .flex_col()
-            .items_center()
-            .child(
-                div()
-                    .id("tree-expand")
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.0))
-                    .rounded_md()
-                    .text_size(px(15.0))
-                    .text_color(t.line_number)
-                    .hover(|s| s.bg(t.bg_light).text_color(t.text))
-                    .cursor_pointer()
-                    .child("»")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| {
-                            this.browse.tree_collapsed = false;
-                            cx.notify();
-                        }),
-                    ),
-            );
+        let collapsed_strip = ui::collapsed_strip().child(
+            ui::icon_btn("tree-expand", 24.0)
+                .text_size(px(15.0))
+                .tooltip(ui::tip("Expand file tree"))
+                .child("»")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.browse.tree_collapsed = false;
+                        cx.notify();
+                    }),
+                ),
+        );
 
         // The frame-colored gap between the two islands doubles as the resize handle.
         // No hover/active tint — just the resize cursor.
