@@ -64,15 +64,8 @@ impl Kyde {
             .child(list);
 
         // Footer bar: Cancel (back to Browse) + Push, styled like the commit bar's buttons.
-        let cancel_btn = div()
-            .px_4()
+        let cancel_btn = btn_secondary("push-tab-cancel", "Cancel")
             .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.secondary_text)
-            .cursor_pointer()
-            .child("Cancel")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
@@ -89,11 +82,7 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener(|this, _e, _w, cx| this.do_push(cx)),
                 );
-        let bar = div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .gap_2()
+        let bar = ui::modal_footer()
             .flex_none()
             .p_2()
             .bg(t.panel_bg)
@@ -114,9 +103,8 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// Delete-confirmation modal: name the target, Cancel / Delete.
-    /// Push confirmation modal: branch + the commits that would be pushed, Cancel / Push.
-    /// Push confirmation window body (own native window; titlebar shows "Push").
+    /// Push confirmation window body (own native window; titlebar shows "Push"): the files
+    /// the push would send, Cancel / Push.
     pub(crate) fn render_push_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
@@ -407,7 +395,7 @@ impl Kyde {
             .committed_content("HEAD", &file.path)
             .unwrap_or_default();
         let lang = self.effective_lang(&file.path);
-        // `diff_path = Some` (set inside `load_diff_panes`) makes `render_diff` show the
+        // `diff.path = Some` (set inside `load_diff_panes`) makes `render_diff` show the
         // panes (it gates on a path); `readonly = true` suppresses the revert chevrons +
         // autosave for this committed diff.
         self.load_diff_panes(file.path.clone(), before, after, lang, true, cx);

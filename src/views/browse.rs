@@ -82,18 +82,12 @@ impl Kyde {
             {
                 self.render_font_view(cx).into_any_element()
             } else {
-                // Outer flex item is `flex_1 min_w_0 overflow_hidden` — it shrinks to its flex
-                // share regardless of the (content-wide) editor element inside. The INNER
-                // `overflow_scroll` div holds the wide editor and scrolls it. Decoupling the
-                // two is what lets a side-by-side pane (markdown preview) keep its 50%: a
-                // content-wide element directly on the flex item refuses to shrink below it.
-                // Single scroll div holding the content-wide editor element — the explicit width
-                // (set in `editor_with_scrollbars`) goes on THIS div, the same one that has
-                // `overflow_scroll` and the editor as a direct child. (An extra wrapper level
-                // around it lets the content's min-width win and the pane refuses to shrink.)
-                // The editor sits inside an explicit-width wrapper (its content width) so long
-                // lines overflow this `overflow_scroll` viewport and the horizontal scrollbar
-                // appears; `min_h_full` keeps the click target covering short files.
+                // One `overflow_scroll` div holds the editor inside an explicit-width wrapper
+                // (its content width), so long lines overflow the viewport and the horizontal
+                // scrollbar appears; `min_h_full` keeps the click target covering short files.
+                // `with_scrollbars` sizes this div to the pane — keep it the direct parent of
+                // that wrapper (an extra level lets the content's min-width win, and a
+                // side-by-side pane like the markdown preview then refuses to shrink).
                 let content_w = self.browse.editor.read(cx).content_width();
                 let editor_pane = div()
                     .id("editor-scroll")
@@ -316,8 +310,6 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        // Row-hover suppression during a tree resize now lives in `tree_row` (it reads
-        // `dragging(Divider::Tree)`), so the cursor sweeping over rows mid-drag doesn't flicker.
         // Show the repo root as the top row; everything else nests one level under it,
         // and collapsing the root hides the whole tree.
         let root_name = self
@@ -675,137 +667,6 @@ impl Kyde {
             )
     }
 
-    /// Rendered Markdown preview (right pane of the side-by-side markdown view). Live —
-    /// re-renders from the editor's current text each frame.
-    // Superseded by the selectable `mdview::MarkdownView`, but kept (another change adds image
-    // rendering here); left in place rather than deleted.
-    #[allow(dead_code)]
-    fn render_markdown_preview(&self, text: &str) -> gpui::Stateful<gpui::Div> {
-        let t = theme::get();
-        let mk_font = |bold: bool, italic: bool, code: bool| gpui::Font {
-            family: if code {
-                theme::font::FAMILY
-            } else {
-                theme::font::UI_FAMILY
-            }
-            .into(),
-            features: Default::default(),
-            fallbacks: None,
-            weight: if bold {
-                FontWeight::BOLD
-            } else {
-                FontWeight::NORMAL
-            },
-            style: if italic {
-                gpui::FontStyle::Italic
-            } else {
-                gpui::FontStyle::Normal
-            },
-        };
-        let styled = move |spans: &[markdown::Span], color: gpui::Hsla| -> gpui::StyledText {
-            let mut s = String::new();
-            let mut runs = Vec::new();
-            for sp in spans {
-                let c: gpui::Hsla = if sp.code {
-                    gpui::rgb(0xC9CDD6).into()
-                } else {
-                    color
-                };
-                runs.push(gpui::TextRun {
-                    len: sp.text.len(),
-                    font: mk_font(sp.bold, sp.italic, sp.code),
-                    color: c,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-                s.push_str(&sp.text);
-            }
-            gpui::StyledText::new(SharedString::from(s)).with_runs(runs)
-        };
-        let blocks = markdown::parse(text).into_iter().map(|b| match b {
-            markdown::Block::Heading(level, spans) => {
-                let size = match level {
-                    1 => 26.0,
-                    2 => 21.0,
-                    3 => 18.0,
-                    _ => 15.0,
-                };
-                div()
-                    .pt_2()
-                    .text_size(px(size))
-                    .child(styled(&spans, t.text.into()))
-                    .into_any_element()
-            }
-            markdown::Block::Paragraph(spans) => div()
-                .text_size(px(14.0))
-                .child(styled(&spans, t.text.into()))
-                .into_any_element(),
-            markdown::Block::Code(code) => div()
-                .font_family(theme::font::FAMILY)
-                .text_size(px(13.0))
-                .text_color(t.text)
-                .bg(t.bg_mid)
-                .rounded_md()
-                .p_3()
-                .child(SharedString::from(code))
-                .into_any_element(),
-            markdown::Block::ListItem(depth, spans) => div()
-                .flex()
-                .flex_row()
-                .pl(px(depth as f32 * 14.0))
-                .text_size(px(14.0))
-                .child(div().pr_2().text_color(t.line_number).child("•"))
-                .child(styled(&spans, t.text.into()))
-                .into_any_element(),
-            markdown::Block::Quote(spans) => div()
-                .border_l_2()
-                .border_color(t.divider)
-                .pl_3()
-                .text_size(px(14.0))
-                .child(styled(&spans, t.secondary_text.into()))
-                .into_any_element(),
-            markdown::Block::Rule => div().h(px(1.0)).bg(t.divider).my_2().into_any_element(),
-            markdown::Block::Image { src, .. } => {
-                // Remote (http/https) → loaded via gpui's asset loader, which needs an
-                // HttpClient wired at startup — only present under the `remote-images`
-                // feature; without it the fetch fails and nothing renders (no crash).
-                // Local → resolved relative to the open file's directory, then the repo
-                // root, and read straight off disk (no deps, always works).
-                let source: gpui::ImageSource =
-                    if src.starts_with("http://") || src.starts_with("https://") {
-                        src.clone().into()
-                    } else {
-                        let rel = src.trim_start_matches("./");
-                        let joined = match self.browse.open_path.as_ref().and_then(|p| p.parent()) {
-                            Some(dir) => dir.join(rel),
-                            None => PathBuf::from(rel),
-                        };
-                        self.repo_root
-                            .as_ref()
-                            .map(|r| r.join(&joined))
-                            .unwrap_or(joined)
-                            .into()
-                    };
-                div()
-                    .py_1()
-                    .child(img(source).max_w_full().max_h(px(480.0)))
-                    .into_any_element()
-            }
-        });
-        div()
-            .id("md-preview")
-            .overflow_y_scroll()
-            .track_scroll(&self.browse.md_preview_scroll)
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_5()
-            .bg(t.main_bg)
-            .font_family(theme::font::UI_FAMILY)
-            .children(blocks)
-    }
-
     /// Expand/collapse a directory in the Browse tree.
     pub(crate) fn toggle_dir(&mut self, dir: PathBuf, cx: &mut Context<Self>) {
         if !self.browse.expanded.remove(&dir) {
@@ -903,7 +764,7 @@ impl Kyde {
             self.refresh_external_defs(cx);
             // Point the editor at whichever scroll container it renders in, so caret-follow
             // and drag auto-scroll move the right one: the Markdown split uses
-            // `md_editor_scroll`, plain Browse uses `file_scroll` (mirrors the `md` gate in
+            // `md_editor_scroll`, plain Browse uses `editor_scroll` (mirrors the `md` gate in
             // render_browse).
             let md = matches!(highlight::Lang::from_path(&rel), highlight::Lang::Markdown)
                 && self.plugins.is_installed("markdown");

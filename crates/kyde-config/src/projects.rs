@@ -54,17 +54,6 @@ pub fn pretty_path(path: &Path) -> String {
     s.into_owned()
 }
 
-/// Current branch, read straight from `.git/HEAD` (fast, no shell). Not currently shown in the
-/// projects list (rows are name + path only) but kept for reuse.
-#[allow(dead_code)]
-pub fn branch_of(path: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(path.join(".git").join("HEAD")).ok()?;
-    let head = head.trim();
-    head.strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
-        .or_else(|| Some(format!("{}…", &head.get(0..7).unwrap_or(head))))
-}
-
 /// 1–2 letter initials for the project icon.
 pub fn initials(name: &str) -> String {
     let parts: Vec<&str> = name

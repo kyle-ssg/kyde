@@ -4,6 +4,8 @@
 use crate::*;
 
 impl Kyde {
+    /// Top-of-editor prompt offering to install syntax support for the open file
+    /// (IntelliJ-style thin bar with Install / Ignore links).
     pub(crate) fn render_install_banner(
         &self,
         pack: &'static highlight::Pack,
@@ -89,10 +91,9 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// The language-plugin manager: every installable pack with its monogram badge,
-    /// approximate compiled footprint, install state, and an Install/Uninstall button.
-    /// Filtered live by the search box.
-    /// Body of the Language-Plugins modal window (hosted by `ModalWindow`, native titlebar).
+    /// Body of the Language-Plugins modal window: every installable pack with its monogram
+    /// badge, approximate compiled footprint, install state, and an Install/Uninstall button,
+    /// filtered live by the search box.
     pub(crate) fn render_plugins_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
@@ -345,9 +346,8 @@ impl Kyde {
         .into_any_element()
     }
 
-    /// Font specimen viewer: each bundled family at every available weight, previewing a
-    /// full sentence at a large size so weight differences are obvious.
-    /// Body of the Fonts modal window (hosted by `ModalWindow`, native titlebar).
+    /// Body of the Fonts modal window: each bundled family at every available weight,
+    /// previewing a full sentence at a large size so weight differences are obvious.
     pub(crate) fn render_fonts_body(&mut self, _cx: &mut Context<Self>) -> gpui::AnyElement {
         let ui = theme::font::UI_FAMILY;
         let t = theme::get();
@@ -438,7 +438,6 @@ impl Kyde {
         match kind {
             ModalKind::Rollback => &mut self.rollback_win,
             ModalKind::Push => &mut self.push_win,
-            ModalKind::Diff => &mut self.diff_win,
             ModalKind::NewBranch => &mut self.new_branch_win,
             ModalKind::Plugins => &mut self.plugins_win,
             ModalKind::Fonts => &mut self.fonts_win,
@@ -476,12 +475,12 @@ impl Kyde {
             *self.modal_slot(kind) = None; // stale (user closed it) → fall through and reopen
         }
         let kyde = cx.entity();
-        // The Diff + Merge modals open at the MAIN window's bounds (captured each frame in
-        // `impl Render for Kyde`) so they're as big as the editor and land over it — NOT the
-        // focused window's, which may be another modal (e.g. Rollback) they were launched from.
+        // The Merge / Compare / Local History windows open at the MAIN window's bounds
+        // (captured each frame in `impl Render for Kyde`) so they're as big as the editor and
+        // land over it — NOT the focused window's, which may be another modal.
         let main_bounds = matches!(
             kind,
-            ModalKind::Diff | ModalKind::Merge | ModalKind::Compare | ModalKind::LocalHistory
+            ModalKind::Merge | ModalKind::Compare | ModalKind::LocalHistory
         )
         .then_some(self.main_window_bounds)
         .flatten();
@@ -590,8 +589,6 @@ impl Kyde {
         }
     }
 
-    /// Escape: close whatever overlay is open (most-transient first); if none, cancel the
-    /// Commit view back to Browse. A no-op in plain Browse.
     /// Native-menu "Plugins…": open the language-pack manager (native modal window).
     pub(crate) fn act_open_plugins(
         &mut self,
@@ -625,8 +622,6 @@ impl Kyde {
         cx.restart();
     }
 
-    /// Toggle a language pack's installed state from the plugin manager, persist it, and
-    /// re-highlight the open file in place if it's affected (so colors appear/clear at once).
     /// Install a pack by id (used by the font-file install prompt), persist, and refresh the
     /// relevant preview/highlight so it applies immediately.
     pub(crate) fn install_pack(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -647,6 +642,8 @@ impl Kyde {
         cx.notify();
     }
 
+    /// Toggle a language pack's installed state from the plugin manager, persist it, and
+    /// re-highlight the open file in place if it's affected (so colors appear/clear at once).
     pub(crate) fn toggle_plugin(&mut self, pack_id: &str, cx: &mut Context<Self>) {
         if self.plugins.is_installed(pack_id) {
             self.plugins.uninstall(pack_id);
@@ -728,8 +725,8 @@ pub(crate) fn pack_ext(id: &str) -> &'static str {
         "html" => "html",
         "go" => "go",
         "java" => "java",
-        "env" => "env",
-        "gitignore" => "gitignore",
+        "r" => "r",
+        "latex" => "tex",
         "font" => "ttf",
         _ => "txt",
     }
@@ -754,7 +751,8 @@ pub(crate) fn pack_size(id: &str) -> &'static str {
         "html" => "~120 KB",
         "go" => "~700 KB",
         "java" => "~800 KB",
-        "env" | "gitignore" => "built-in (no grammar)",
+        "r" => "~900 KB",
+        "latex" => "~5 MB",
         "font" => "preview only",
         _ => "—",
     }

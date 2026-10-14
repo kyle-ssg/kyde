@@ -541,8 +541,8 @@ impl Kyde {
             );
 
         // Bottom panel (one island): toolbar, then commit list | files, divider-split.
-        // Height is drag-resizable via the strip above it (`history_panel_h`). The header
-        // chevron minimises it to just the toolbar (`history_panel_collapsed`).
+        // Height is drag-resizable via the strip above it (`history.panel_h`). The header
+        // chevron minimises it to just the toolbar (`history.panel_collapsed`).
         let panel_h = self.history.panel_h;
         let collapsed = self.history.panel_collapsed;
         // Toolbar height: pt + 28px chip row + pb. Used to anchor the dropdowns + as the
@@ -801,7 +801,7 @@ impl Kyde {
         self.load_history_branches(cx);
     }
 
-    /// Reload the commit list for `history_rev` (scoped to `history_path`), select newest.
+    /// Reload the commit list for `history.rev` (scoped to `history.path`), select newest.
     pub(crate) fn reload_history(&mut self, cx: &mut Context<Self>) {
         let path = self.history.path.clone();
         self.history.commits = self

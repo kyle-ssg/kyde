@@ -372,14 +372,8 @@ impl Kyde {
     fn render_commit_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         // Cancel → back to the Browse (code) view.
-        let cancel_btn = div()
-            .px_4()
+        let cancel_btn = btn_secondary("commit-cancel", "Cancel")
             .py_2()
-            .rounded_md()
-            .border_1()
-            .border_color(t.divider)
-            .text_color(t.secondary_text)
-            .child("Cancel")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| {
@@ -428,15 +422,7 @@ impl Kyde {
                     .child(self.commit.editor.clone()),
             )
             // Cancel + Commit on their own line, right-aligned.
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_end()
-                    .gap_2()
-                    .child(cancel_btn)
-                    .child(commit_btn),
-            )
+            .child(ui::modal_footer().child(cancel_btn).child(commit_btn))
             .into_any_element()
     }
 
@@ -446,7 +432,7 @@ impl Kyde {
 
     /// Select a changed file and load it into the diff editors. `cx` is needed to push
     /// content into the editor entities; when called without a context (e.g. during a
-    /// plain `refresh`) the editors are left as-is and only `current_diff` updates.
+    /// plain `refresh`) the editors are left as-is and only `diff.current` updates.
     pub(crate) fn select_with(&mut self, idx: usize, cx: Option<&mut Context<Self>>) {
         self.selected = Some(idx);
         self.commit.focus.clear(); // a single selection drops any folder-group highlight
@@ -458,8 +444,6 @@ impl Kyde {
         // other selection so a stale preview never lingers.
         self.diff.image = None;
         if is_image(&file.path) {
-            self.diff.old_spans = Vec::new();
-            self.diff.new_spans = Vec::new();
             self.diff.current = None;
             self.diff.path = None; // keep autosave disabled — never write an image pane
             self.diff.image = Some(file.path.clone()); // set unconditionally — refresh re-selects with cx=None
@@ -485,8 +469,6 @@ impl Kyde {
                 // string through the diff (it would render as "all deleted" and, worse,
                 // the right pane's autosave would truncate the file to empty).
                 let Ok(a) = repo.working_content(&file.path) else {
-                    self.diff.old_spans = Vec::new();
-                    self.diff.new_spans = Vec::new();
                     self.diff.current = None;
                     if let Some(cx) = cx {
                         self.diff.path = None; // disables diff_autosave for this file
@@ -508,8 +490,6 @@ impl Kyde {
                 // No context (e.g. during a plain `refresh`): update only the diff model,
                 // leaving the editor entities as-is.
                 None => {
-                    self.diff.old_spans = highlight::highlight(&before, lang);
-                    self.diff.new_spans = highlight::highlight(&after, lang);
                     self.diff.current = Some(FileDiff::compute(&before, &after));
                 }
                 // With a context, load both panes (editable working diff: right unlocked).
@@ -520,7 +500,6 @@ impl Kyde {
         }
     }
 
-    /// Browse → "Commit": jump to the Commit view, selecting the file if it changed.
     /// Indices into `self.files` that are committable/rollback-able under `path`:
     /// a file → itself; a folder → every change beneath it; the repo root (`""`) → all.
     pub(crate) fn changed_under(&self, path: &std::path::Path) -> Vec<usize> {

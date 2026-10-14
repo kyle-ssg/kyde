@@ -66,11 +66,11 @@ impl Render for Kyde {
             // so the number is readable rather than blurring every frame.
             let due = self
                 .fps
-                .file_last
+                .shown_at
                 .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 0.2);
             if due {
                 self.fps.shown = self.fps.value;
-                self.fps.file_last = Some(now);
+                self.fps.shown_at = Some(now);
             }
         }
 

@@ -1,9 +1,9 @@
 //! First-run onboarding / keymap picker overlay + shell-command install row. Crate-root child.
 
 use crate::{
-    apply_keymap, div, keymap, overlay, pretty_key, px, shellcmd, theme, Context, FluentBuilder,
-    FontWeight, InteractiveElement, IntoElement, Kyde, MouseButton, OpenKeymap, ParentElement,
-    Preset, SharedString, Styled, Window,
+    apply_keymap, btn_primary, checkbox_box, div, keymap, overlay, pretty_key, px, shellcmd, theme,
+    ui, Context, FluentBuilder, FontWeight, InteractiveElement, IntoElement, Kyde, MouseButton,
+    OpenKeymap, ParentElement, Preset, SharedString, Styled, Window,
 };
 
 impl Kyde {
@@ -117,16 +117,11 @@ impl Kyde {
             .child(self.render_shell_command_row(cx))
             // Single primary action, bottom-right: confirm the highlighted choice.
             .child(
-                div().flex().flex_row().justify_end().mt_2().child(
-                    div()
+                ui::modal_footer().mt_2().child(
+                    btn_primary("onboarding-continue", "Continue")
                         .px_5()
                         .py_1p5()
-                        .rounded_md()
-                        .bg(theme::get().primary)
-                        .text_color(gpui::white())
                         .font_weight(FontWeight::SEMIBOLD)
-                        .cursor_pointer()
-                        .child("Continue")
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, _e, _w, cx| {
@@ -182,23 +177,7 @@ impl Kyde {
             _ => "`ky` and `kyde` are already taken on your PATH — skipped".to_string(),
         };
 
-        let checkbox = div()
-            .size_4()
-            .rounded_sm()
-            .border_1()
-            .border_color(if checked { t.primary } else { t.bg_light })
-            .when(checked, |d| d.bg(t.primary))
-            .flex()
-            .items_center()
-            .justify_center()
-            .when(checked, |d| {
-                d.child(
-                    div()
-                        .text_color(gpui::white())
-                        .text_size(px(11.0))
-                        .child("✓"),
-                )
-            });
+        let checkbox = checkbox_box(checked);
 
         let mut row = div()
             .flex()

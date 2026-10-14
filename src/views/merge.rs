@@ -1098,7 +1098,6 @@ impl Kyde {
             .and_then(|i| self.merge.files.get(i))
             .is_some_and(|e| !self.merge.resolved.contains(&e.path))
             && !self.merge.busy;
-        let act = |btn: gpui::Stateful<gpui::Div>| btn.w_full().when(!can_act, |d| d.opacity(0.5));
         let buttons = div()
             .flex()
             .flex_col()
@@ -1108,25 +1107,33 @@ impl Kyde {
             .pt(px(24.0))
             .pr_3()
             .child(
-                act(btn_secondary("list-accept-ours", "Accept Yours")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.merge_accept_file(true, cx)),
-                ),
+                btn_secondary_state("list-accept-ours", "Accept Yours", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.merge_accept_file(true, cx)),
+                    ),
             )
             .child(
-                act(btn_secondary("list-accept-theirs", "Accept Theirs")).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.merge_accept_file(false, cx)),
-                ),
+                btn_secondary_state("list-accept-theirs", "Accept Theirs", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.merge_accept_file(false, cx)),
+                    ),
             )
-            .child(act(btn_primary("list-merge", "Merge…")).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    if let Some(i) = this.merge.list_sel {
-                        this.select_merge_file(i, cx);
-                    }
-                }),
-            ));
+            .child(
+                btn_primary_state("list-merge", "Merge…", !can_act)
+                    .w_full()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            if let Some(i) = this.merge.list_sel {
+                                this.select_merge_file(i, cx);
+                            }
+                        }),
+                    ),
+            );
 
         let table = div()
             .flex_1()
@@ -1220,12 +1227,10 @@ impl Kyde {
                 format!("Apply ({pending} pending)")
             };
             footer = footer.child(
-                btn_primary("merge-apply", SharedString::from(label))
-                    .when(!ready, |d| d.opacity(0.5))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| this.merge_apply_file(cx)),
-                    ),
+                btn_primary_state("merge-apply", SharedString::from(label), !ready).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.merge_apply_file(cx)),
+                ),
             );
         } else if all_done {
             footer = footer.child(btn_primary("merge-commit", "Commit Merge").on_mouse_down(

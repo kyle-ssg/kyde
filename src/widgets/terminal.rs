@@ -313,8 +313,6 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Clear the terminal (⌘K): drop the scrollback buffer, then send the shell Ctrl-L so it
-    /// wipes the visible screen and redraws its prompt at the top — matching iTerm's "clear".
     /// Clear the scrollback + screen (iTerm "Clear Buffer"): drop history, scroll to the live
     /// region, and send Ctrl-L so the shell redraws a fresh prompt (keeping any typed input).
     fn clear_screen(&mut self, cx: &mut Context<Self>) {

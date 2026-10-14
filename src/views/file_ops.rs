@@ -57,12 +57,12 @@ fn image_ext(format: gpui::ImageFormat) -> &'static str {
 }
 
 impl Kyde {
+    /// Delete-confirmation overlay: names the target, Cancel / Delete.
     pub(crate) fn render_delete_modal(
         &self,
         ui: &'static str,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let t = theme::get();
         let Some((path, is_dir)) = self.delete_target.clone() else {
             return div().into_any_element();
         };
@@ -82,16 +82,10 @@ impl Kyde {
                     cx.notify();
                 }),
             );
-        let confirm = div()
-            .id("delete-confirm")
+        // Same primary action as the other destructive confirms (Rollback, Clear Data).
+        let confirm = btn_primary("delete-confirm", "Delete")
             .px_3()
             .py_1p5()
-            .rounded_md()
-            .bg(t.status_deleted)
-            .text_color(t.primary_text)
-            .cursor_pointer()
-            .hover(|s| s.opacity(0.9))
-            .child("Delete")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _e, _w, cx| this.do_delete(cx)),

@@ -333,137 +333,132 @@ impl Lang {
         // regardless of which features are on.
         // Explicit type: in a zero-grammar build every value-producing arm is `cfg`'d out,
         // leaving only the diverging `_ => return None`, so nothing else pins the tuple type.
-        #[allow(unreachable_patterns)]
-        let (lang, highlights, injections, locals): (
-            tree_sitter::Language,
-            &str,
-            &str,
-            &str,
-        ) = match self {
-            #[cfg(feature = "typescript")]
-            Lang::Tsx => (
-                tree_sitter_typescript::LANGUAGE_TSX.into(),
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                "",
-                tree_sitter_typescript::LOCALS_QUERY,
-            ),
-            #[cfg(feature = "typescript")]
-            Lang::Ts => (
-                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-                tree_sitter_typescript::HIGHLIGHTS_QUERY,
-                "",
-                tree_sitter_typescript::LOCALS_QUERY,
-            ),
-            #[cfg(feature = "javascript")]
-            Lang::Js => (
-                tree_sitter_javascript::LANGUAGE.into(),
-                tree_sitter_javascript::HIGHLIGHT_QUERY,
-                tree_sitter_javascript::INJECTIONS_QUERY,
-                tree_sitter_javascript::LOCALS_QUERY,
-            ),
-            #[cfg(feature = "rust")]
-            Lang::Rust => (
-                tree_sitter_rust::LANGUAGE.into(),
-                tree_sitter_rust::HIGHLIGHTS_QUERY,
-                tree_sitter_rust::INJECTIONS_QUERY,
-                "",
-            ),
-            #[cfg(feature = "json")]
-            Lang::Json => (
-                tree_sitter_json::LANGUAGE.into(),
-                tree_sitter_json::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            // Markdown: block grammar only (headings, code fences, lists, quotes).
-            // Inline emphasis/links need the separate inline grammar — skipped for now.
-            #[cfg(feature = "markdown")]
-            Lang::Markdown => (
-                tree_sitter_md::LANGUAGE.into(),
-                tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-                "",
-                "",
-            ),
-            #[cfg(feature = "shell")]
-            Lang::Bash => (
-                tree_sitter_bash::LANGUAGE.into(),
-                tree_sitter_bash::HIGHLIGHT_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "css")]
-            Lang::Css => (
-                tree_sitter_css::LANGUAGE.into(),
-                tree_sitter_css::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            // SCSS reuses the CSS grammar — covers selectors/properties/values.
-            // SCSS-only syntax ($vars, nesting, @mixin) degrades gracefully.
-            #[cfg(feature = "css")]
-            Lang::Scss => (
-                tree_sitter_css::LANGUAGE.into(),
-                tree_sitter_css::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "yaml")]
-            Lang::Yaml => (
-                tree_sitter_yaml::LANGUAGE.into(),
-                tree_sitter_yaml::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "toml")]
-            Lang::Toml => (
-                tree_sitter_toml_ng::LANGUAGE.into(),
-                tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "python")]
-            Lang::Python => (
-                tree_sitter_python::LANGUAGE.into(),
-                tree_sitter_python::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            // HTML injections (embedded JS/CSS) skipped — block grammar only, like Markdown.
-            #[cfg(feature = "html")]
-            Lang::Html => (
-                tree_sitter_html::LANGUAGE.into(),
-                tree_sitter_html::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "go")]
-            Lang::Go => (
-                tree_sitter_go::LANGUAGE.into(),
-                tree_sitter_go::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "java")]
-            Lang::Java => (
-                tree_sitter_java::LANGUAGE.into(),
-                tree_sitter_java::HIGHLIGHTS_QUERY,
-                "",
-                "",
-            ),
-            #[cfg(feature = "r")]
-            Lang::R => (
-                tree_sitter_r::LANGUAGE.into(),
-                tree_sitter_r::HIGHLIGHTS_QUERY,
-                "",
-                tree_sitter_r::LOCALS_QUERY,
-            ),
-            // LaTeX grammar ships no highlights query — use our hand-written one.
-            #[cfg(feature = "latex")]
-            Lang::Latex => (tree_sitter_latex::LANGUAGE.into(), LATEX_HIGHLIGHTS, "", ""),
-            // Builtin-highlighter langs, PlainText, and any lang whose grammar
-            // feature isn't compiled in → no tree-sitter config.
-            _ => return None,
-        };
+        let (lang, highlights, injections, locals): (tree_sitter::Language, &str, &str, &str) =
+            match self {
+                #[cfg(feature = "typescript")]
+                Lang::Tsx => (
+                    tree_sitter_typescript::LANGUAGE_TSX.into(),
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    "",
+                    tree_sitter_typescript::LOCALS_QUERY,
+                ),
+                #[cfg(feature = "typescript")]
+                Lang::Ts => (
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+                    tree_sitter_typescript::HIGHLIGHTS_QUERY,
+                    "",
+                    tree_sitter_typescript::LOCALS_QUERY,
+                ),
+                #[cfg(feature = "javascript")]
+                Lang::Js => (
+                    tree_sitter_javascript::LANGUAGE.into(),
+                    tree_sitter_javascript::HIGHLIGHT_QUERY,
+                    tree_sitter_javascript::INJECTIONS_QUERY,
+                    tree_sitter_javascript::LOCALS_QUERY,
+                ),
+                #[cfg(feature = "rust")]
+                Lang::Rust => (
+                    tree_sitter_rust::LANGUAGE.into(),
+                    tree_sitter_rust::HIGHLIGHTS_QUERY,
+                    tree_sitter_rust::INJECTIONS_QUERY,
+                    "",
+                ),
+                #[cfg(feature = "json")]
+                Lang::Json => (
+                    tree_sitter_json::LANGUAGE.into(),
+                    tree_sitter_json::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                // Markdown: block grammar only (headings, code fences, lists, quotes).
+                // Inline emphasis/links need the separate inline grammar — skipped for now.
+                #[cfg(feature = "markdown")]
+                Lang::Markdown => (
+                    tree_sitter_md::LANGUAGE.into(),
+                    tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "shell")]
+                Lang::Bash => (
+                    tree_sitter_bash::LANGUAGE.into(),
+                    tree_sitter_bash::HIGHLIGHT_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "css")]
+                Lang::Css => (
+                    tree_sitter_css::LANGUAGE.into(),
+                    tree_sitter_css::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                // SCSS reuses the CSS grammar — covers selectors/properties/values.
+                // SCSS-only syntax ($vars, nesting, @mixin) degrades gracefully.
+                #[cfg(feature = "css")]
+                Lang::Scss => (
+                    tree_sitter_css::LANGUAGE.into(),
+                    tree_sitter_css::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "yaml")]
+                Lang::Yaml => (
+                    tree_sitter_yaml::LANGUAGE.into(),
+                    tree_sitter_yaml::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "toml")]
+                Lang::Toml => (
+                    tree_sitter_toml_ng::LANGUAGE.into(),
+                    tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "python")]
+                Lang::Python => (
+                    tree_sitter_python::LANGUAGE.into(),
+                    tree_sitter_python::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                // HTML injections (embedded JS/CSS) skipped — block grammar only, like Markdown.
+                #[cfg(feature = "html")]
+                Lang::Html => (
+                    tree_sitter_html::LANGUAGE.into(),
+                    tree_sitter_html::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "go")]
+                Lang::Go => (
+                    tree_sitter_go::LANGUAGE.into(),
+                    tree_sitter_go::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "java")]
+                Lang::Java => (
+                    tree_sitter_java::LANGUAGE.into(),
+                    tree_sitter_java::HIGHLIGHTS_QUERY,
+                    "",
+                    "",
+                ),
+                #[cfg(feature = "r")]
+                Lang::R => (
+                    tree_sitter_r::LANGUAGE.into(),
+                    tree_sitter_r::HIGHLIGHTS_QUERY,
+                    "",
+                    tree_sitter_r::LOCALS_QUERY,
+                ),
+                // LaTeX grammar ships no highlights query — use our hand-written one.
+                #[cfg(feature = "latex")]
+                Lang::Latex => (tree_sitter_latex::LANGUAGE.into(), LATEX_HIGHLIGHTS, "", ""),
+                // Builtin-highlighter langs, PlainText, and any lang whose grammar
+                // feature isn't compiled in → no tree-sitter config.
+                _ => return None,
+            };
         // tree-sitter-typescript's HIGHLIGHTS_QUERY only holds TS-specific rules and
         // inherits the base ECMAScript highlighting from the JS grammar — without
         // prepending it, TS/TSX matches no captures and renders as plain text.
@@ -496,7 +491,6 @@ impl Lang {
     fn grammar(self) -> Option<tree_sitter::Language> {
         // Feature-gated like `config()`: an absent grammar's arm vanishes and the
         // lang falls through to `_ => return None` (no folding, like PlainText).
-        #[allow(unreachable_patterns)]
         let lang: tree_sitter::Language = match self {
             #[cfg(feature = "typescript")]
             Lang::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -1518,6 +1512,26 @@ fn highlight_env(source: &str) -> Vec<Span> {
     spans
 }
 
+thread_local! {
+    /// Compiled highlight configs, one per language (per thread — the UI thread plus the
+    /// background big-file jobs). Compiling a grammar's highlights query costs milliseconds
+    /// (TS/TSX compile the JS query too) and `highlight` runs on every keystroke, so each
+    /// is built once, on first use.
+    static CONFIGS: std::cell::RefCell<
+        std::collections::HashMap<Lang, Option<std::rc::Rc<HighlightConfiguration>>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// `lang`'s highlight config from the per-thread cache (built on first use).
+fn cached_config(lang: Lang) -> Option<std::rc::Rc<HighlightConfiguration>> {
+    CONFIGS.with(|c| {
+        c.borrow_mut()
+            .entry(lang)
+            .or_insert_with(|| lang.config().map(std::rc::Rc::new))
+            .clone()
+    })
+}
+
 /// Highlight `source` for the given language into ordered, non-overlapping spans.
 /// Gaps between spans render in the default foreground.
 pub fn highlight(source: &str, lang: Lang) -> Vec<Span> {
@@ -1526,7 +1540,7 @@ pub fn highlight(source: &str, lang: Lang) -> Vec<Span> {
         Lang::Gitignore => return highlight_gitignore(source),
         _ => {}
     }
-    let Some(config) = lang.config() else {
+    let Some(config) = cached_config(lang) else {
         return Vec::new();
     };
     let mut hl = Highlighter::new();
