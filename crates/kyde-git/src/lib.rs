@@ -384,17 +384,26 @@ impl Repo {
     }
 
     /// Unstage a file (`git restore --staged -- <rel>`).
+    ///
+    /// An untracked file (in neither HEAD nor the index) has nothing staged, but its
+    /// pathspec matches nothing and `restore` errors with "did not match any file(s)
+    /// known to git" — treated as the no-op it is, so committing with an untracked file
+    /// left unticked works (issue #76).
     pub fn unstage(&self, rel: &Path) -> Result<()> {
         match git(
             &self.root,
             &["restore", "--staged", "--", &rel.to_string_lossy()],
         ) {
             Ok(_) => Ok(()),
+            Err(GitError::Command { stderr, .. }) if stderr.contains("did not match any file") => {
+                Ok(())
+            }
             // A repo with no commits yet (unborn HEAD): `restore --staged` needs HEAD to
             // restore FROM and dies with "could not resolve HEAD" (newer gits quote it:
             // "could not resolve 'HEAD'" — match the stable prefix only). Everything staged
             // there is by definition newly added, so dropping the index entry — keeping the
-            // working-tree file — is the exact same unstage.
+            // working-tree file — is the exact same unstage. `--ignore-unmatch` covers the
+            // untracked case here too.
             Err(GitError::Command { stderr, .. }) if stderr.contains("could not resolve") => git(
                 &self.root,
                 &[
@@ -402,6 +411,7 @@ impl Repo {
                     "--cached",
                     "--force",
                     "--quiet",
+                    "--ignore-unmatch",
                     "--",
                     &rel.to_string_lossy(),
                 ],
@@ -1641,6 +1651,12 @@ mod tests {
         g(&base, &["config", "commit.gpgsign", "false"]);
         let repo = Repo::discover(&base).unwrap();
 
+        // Untracked (never staged) → nothing to unstage, must not error (issue #76).
+        fs::write(base.join("loose.txt"), "x\n").unwrap();
+        repo.unstage(Path::new("loose.txt"))
+            .expect("unstage of an untracked file is a no-op on an unborn HEAD");
+        fs::remove_file(base.join("loose.txt")).unwrap();
+
         // Unborn HEAD: no commits yet, stage a new file, unstage it.
         fs::write(base.join("first.txt"), "1\n").unwrap();
         repo.stage(Path::new("first.txt")).unwrap();
@@ -1663,6 +1679,8 @@ mod tests {
         assert_eq!(st.len(), 1);
         assert_eq!(st[0].status, FileStatus::Untracked);
         assert!(base.join("second.txt").exists());
+        repo.unstage(Path::new("second.txt"))
+            .expect("unstage of an untracked file is a no-op with a HEAD");
 
         let _ = fs::remove_dir_all(&base);
     }
