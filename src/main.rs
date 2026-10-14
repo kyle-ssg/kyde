@@ -3003,9 +3003,25 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         }
         // History view: the commit log for the current branch, first commit selected so the
         // changed-files list + read-only diff are populated.
+        // The History log. screenshots.sh passes a clone with a short feature branch merged
+        // back `--no-ff` (KYDE_SHOT_REPO), so the graph has a real branch + merge to draw —
+        // main's own history is squash-merged and draws as one line. Selects the branch's
+        // first commit, diffed against its parent.
         "history" => {
             set_packs(view, &["rust"]);
+            if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
+                view.open_project(PathBuf::from(repo), cx);
+            }
+            view.history.compare = CompareMode::Before;
             view.enter_history(cx);
+            if let Some(i) = view
+                .history
+                .commits
+                .iter()
+                .position(|c| c.subject.starts_with("feat: ease the shimmer"))
+            {
+                view.select_history_commit(i, cx);
+            }
         }
         // Browse view with the bottom terminal panel open, seeded with a couple of commands
         // so the shot shows a live shell (prompt + output), not a bare box.

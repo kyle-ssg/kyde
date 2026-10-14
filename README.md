@@ -59,7 +59,7 @@ by lightness instead of hue) — switch in Settings.
 
 * **Folder tree** — expandable, resizable, file-type icons, git-status colors.
 * **Text editor** — selection, undo/redo, copy/cut/paste, Tab/Shift-Tab indent, ⌘-backspace, line numbers, current-line highlight, IME, auto-save.
-* **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace.
+* **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace — in the editor and in every diff (Commit, History, Push, View Diff, Compare, Merge, Local History), with every match highlighted and the current one outlined.
 * **Editor tabs** that scroll and follow the active file.
 * **Image preview** for PNG/JPG/GIF/WebP/BMP/ICO/AVIF/TIFF.
 * **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, Java, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
@@ -70,7 +70,7 @@ by lightness instead of hue) — switch in Settings.
 * **Markdown preview** — a live rendered pane alongside the editor.
 
 <p align="center">
-  <img src="assets/screenshots/plugins-window.png" alt="Language Plugins manager — a native window listing every language pack (CSS, Go, HTML, JavaScript, JSON, LaTeX, Markdown, Python, R, …) with per-pack Install / Uninstall" width="900">
+  <img src="assets/screenshots/plugins-window.png" alt="Language Plugins manager — a native window listing every language pack (CSS, Go, HTML, Java, JavaScript, JSON, LaTeX, Markdown, Python, R, …) with per-pack Install / Uninstall" width="900">
 </p>
 
 <p align="center">
@@ -99,12 +99,13 @@ by lightness instead of hue) — switch in Settings.
 * **Commit view**: changed-files list + an editable side-by-side diff — base on the left, live working copy on the right, both highlighted.
 * **Stage / revert** per hunk from the center gutter, or whole files; commit via the message box.
 * **Rollback** in a native window — checkbox tree, optional deletion of added files, right-click for diff.
-* **Push / Pull / Fetch** — status-bar chips that appear when you're ahead or behind upstream, plus the context menu.
+* **Git toolbar** — Fetch, Pull, Commit, Push and History one click away in the title bar, with the behind / changed-file / ahead counts on their buttons.
+* **Push / Pull / Fetch** — from the toolbar, the status-bar chips that appear when you're ahead or behind upstream, or the context menu. Push lists the outgoing files as a folder tree before anything leaves.
 * **Branch switcher** — searchable tree, `/` as folders, Recent / Local roots, ahead/behind counts per branch.
 * **Worktree switcher** — a chip listing every linked worktree with its branch and changed-file count; switching restores that worktree's UI state, and the branch popup jumps to a worktree rather than failing a checkout that's already checked out elsewhere.
 * **Compare two files** — ⌘-click two files in the tree → right-click → **Compare Selected** (or right-click a tab → **Compare with Current Tab**) for a side-by-side compare in a native window, with a `«` `»` gutter that applies a hunk in either direction.
 * **Merge** — right-click a branch to merge it into the current one. Conflicts open a native two-stage resolver: a conflicts list (what each side did, Accept Yours / Accept Theirs / Merge…), then a 3-pane merge view — yours | result | theirs — with per-change apply/ignore gutters, "apply non-conflicting changes", Compare Contents pairs, and whitespace-ignoring diffs.
-* **History** — commit log for any branch, with the selected commit's changed files and a read-only diff that compares vs the parent, latest, or your local working tree.
+* **History** — an IntelliJ-style log: a branches sidebar (HEAD, Local, Remote, `/` as folders) picks what's logged, the commit list draws the branch / merge graph, and the selected commit's changed files open in a read-only diff that compares vs the parent, latest, or your local working tree.
 * **Local History** — per-file snapshots independent of git (saves, external changes, and markers before every destructive op). A timeline + snapshot ↔ current diff per file or folder, a changed-since files panel, per-hunk restore, and revert for one file, a folder, or everything since a snapshot — every revert is itself recorded. Configurable retention, clearable, or off entirely.
 * **File management** from the tree — New File / Directory / Scratch, Rename (files *and* folders, repointing open tabs across the moved subtree), Delete (with confirm), Cut / Copy / Paste (`⌘X`/`⌘C`/`⌘V`, including files copied in Finder and clipboard image data), drag & drop within the tree or in from Finder, and Reveal in Finder.
 * **Non-git folders work too** — file management and editing are plain filesystem ops; git actions hide themselves and offer an **Initialize Git Repository** button instead.
@@ -119,7 +120,7 @@ by lightness instead of hue) — switch in Settings.
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/history.png" alt="History view — commit log on the left, the selected commit's changed files, and a read-only side-by-side diff comparable against the parent, latest, or local working tree" width="900">
+  <img src="assets/screenshots/history.png" alt="History view — branches sidebar, commit list with a branch and merge graph, the selected commit's changed files, and a read-only side-by-side diff comparable against the parent, latest, or local working tree" width="900">
 </p>
 
 <p align="center">
@@ -159,6 +160,7 @@ by lightness instead of hue) — switch in Settings.
 
 * **WebStorm** / **VSCode** presets with per-action overrides in `~/.config/kyde/keymap.json`.
 * **Onboarding keymap picker** on first launch, reopenable via Settings.
+* **Keyboard navigation** everywhere — context menus and their submenus, the file trees, lists and popups: `↑` / `↓` move, `←` / `→` fold folders or step in and out of submenus, `⏎` activates, space ticks a checkbox, `⇧F10` opens a row's context menu, `Esc` closes.
 * **Install shell command** — optionally symlinks `ky` into `~/.local/bin`. No shell-rc editing, no sudo.
 
 ## Install
@@ -187,7 +189,7 @@ Default shortcuts (WebStorm → VSCode):
 * Go to File: `⌘⇧O` → `⌘P`
 * Find Action: `⌘⇧A`
 * Find in Files: `⌘⇧F`
-* Find / Replace in file: `⌘F` / `⌘R` (`⌘G` / `⇧⌘G` to cycle)
+* Find / Replace (file or diff): `⌘F` / `⌘R` (`⌘G` / `⇧⌘G` to cycle)
 * Save: `⌘S`
 * Commit: `⌘K` → `⌘⏎`
 * Commit view: `⌘9` → `⌃⇧G`

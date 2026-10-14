@@ -164,6 +164,39 @@ all | merge | merge-conflicts)
     ;;
 esac
 
+# history fixture: a clone of this repo with a short feature branch merged back `--no-ff`, so
+# the History log's graph shows a real branch + merge (main itself is squash-merged and draws
+# as a single line). The branch edits crates/kyde-ui/src/color.rs in two commits while the
+# mainline gets one commit of its own; apply_shot selects the branch's first commit.
+case "${1:-all}" in
+all | history)
+    echo "==> generating history fixture (clone with a merged feature branch)"
+    HIST_REPO="$FIX/kyde-history/kyde"
+    rm -rf "$FIX/kyde-history"
+    mkdir -p "$FIX/kyde-history"
+    git clone --quiet --no-hardlinks "$ROOT" "$HIST_REPO"
+    git -C "$HIST_REPO" config user.email "shot@example.com"
+    git -C "$HIST_REPO" config user.name "Kyde Screenshots"
+    git -C "$HIST_REPO" config commit.gpgsign false
+    git -C "$HIST_REPO" checkout -qB main
+    HCOLOR="$HIST_REPO/crates/kyde-ui/src/color.rs"
+    HTAB="$HIST_REPO/crates/kyde-ui/src/tab.rs"
+    git -C "$HIST_REPO" checkout -qb feature/eased-lerp
+    perl -0pi -e 's/(\n    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    let t = t * t * (3.0 - 2.0 * t); \/\/ smoothstep so the shimmer eases\n/' "$HCOLOR"
+    git -C "$HIST_REPO" commit -qam "feat: ease the shimmer lerp with smoothstep"
+    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$HCOLOR"
+    git -C "$HIST_REPO" commit -qam "docs: describe the eased lerp"
+    git -C "$HIST_REPO" checkout -q main
+    sed -i '' '1s;^;// Segmented tab strip (keyboard-focus ring).\n;' "$HTAB"
+    git -C "$HIST_REPO" commit -qam "chore: note the tab strip's focus ring"
+    git -C "$HIST_REPO" merge -q --no-ff -m "Merge branch 'feature/eased-lerp'" feature/eased-lerp
+    if git -C "$HIST_REPO" diff --quiet HEAD~1 HEAD -- crates/kyde-ui/src/color.rs; then
+        echo "    !! history fixture edit did not apply (anchors moved?) — fix screenshots.sh" >&2
+        exit 1
+    fi
+    ;;
+esac
+
 # shoot <shot-name> <output-file> <capture-mode> [extra env KEY=VAL ...]
 #   capture-mode: window  → screencapture -l<frontmost window>   (full-bleed window)
 #                 region  → screencapture -R<main-window bounds + margin>  (window over desktop)
@@ -313,7 +346,7 @@ run_one() {
         go-to-file)       shoot_until go-to-file       go-to-file.png       window ;;
         find-in-files)    shoot_until find-in-files    find-in-files.png    window ;;
         rollback)         shoot_until rollback         rollback.png         region ;;
-        history)          shoot_until history          history.png          window ;;
+        history)          shoot_until history          history.png          window KYDE_SHOT_REPO="$HIST_REPO" ;;
         local-history)    shoot_until local-history    local-history.png    region KYDE_SHOT_FILE="release-please-config.json" ;;
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
