@@ -27,9 +27,11 @@ feel. No web, no Electron, no React.
   a `ModalKind` arm in `ModalWindow::render`, and a `pub(crate) fn render_<x>_body(&mut self,
   cx)`. Do NOT build modal dialogs as `overlay(cx, _)` children of the root. (The fuzzy
   finder and first-run keymap picker are transient *overlays*, not modals — they stay as-is.)
-- **Buttons use the shared `btn_primary` / `btn_secondary` helpers** (`render.rs`), never
+- **Buttons use the shared `btn_primary` / `btn_secondary` helpers** (`kyde-ui`), never
   hand-rolled. Primary = accent fill + `primary_text`; secondary = transparent + `divider`
-  border + `secondary_text`. Caller chains `.on_mouse_down(...)`.
+  border + `secondary_text`. Caller chains `.on_mouse_down(...)`. Disabled → the `_state`
+  variants (not `.opacity()`, which leaves hover/pointer live); small square glyph/icon
+  buttons → `icon_btn`; tooltips → `.tooltip(ui::tip(..))`.
 - **New icons MUST be registered** in the `Assets` `include_bytes!` match in `main.rs`. An
   unregistered path renders as NOTHING, silently — this has bitten us in QA. Icons are
   Lucide SVGs (MIT) in `assets/icons/`, drawn via `svg().path(..)` with `stroke="currentColor"`
@@ -111,10 +113,13 @@ kyde-local-history  per-project snapshot store: content-addressed blobs + append
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
               feature → `From<Color>` for gpui `Rgba/Hsla/Fill/Background` (UI layer only).
 kyde-theme    runtime dark palette (theme::get/merge/update, hex JSON). (kyde-color, serde)
-kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary, tab_pill, Badge +
-              file_badge, checkbox, menu_icon, select, lerp_rgb, scrollbar_thumb, line_stats,
-              the file-tree row `tree::item<V>`, and `picker` (bounded nav + the selected/
-              hover row pill every list picker uses). Aliased back as `ui`. (gpui, kyde-theme)
+kyde-ui       reusable app-agnostic UI toolkit: btn_primary/secondary(+_state), icon_btn,
+              tab_pill, Badge + file_badge, count_badge, checkbox, menu_icon, select, tip
+              (tooltips), panels (modal_panel, collapsed_strip, hr, empty_state), lerp_rgb,
+              scrollbar_thumb, line_stats, the file-tree row `tree::item<V>`, `picker` (bounded
+              nav + the selected/hover row pill every list picker uses), and `diff` (the
+              side-by-side gutter column/rows/glyphs + editor panes). Check here before
+              hand-rolling a div. Aliased back as `ui`. (gpui, kyde-theme)
 kyde-syntax   tree-sitter highlight() + fold_regions() + error_ranges() + import_links/
               definition_sites/resolve_import + sort_object_keys; OWNS every grammar crate
               behind per-pack features. Binary depends with default-features=false and
