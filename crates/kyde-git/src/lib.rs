@@ -1062,7 +1062,9 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Select the index mode for partially staged content from the working file's executable bit.
+// Infallible on Unix, but the signature must match the fallible Windows variant below.
 #[cfg(unix)]
+#[allow(clippy::unnecessary_wraps)]
 fn stage_content_mode(root: &Path, rel: &Path) -> Result<&'static str> {
     use std::os::unix::fs::PermissionsExt;
     let executable = std::fs::metadata(root.join(rel))

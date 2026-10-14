@@ -11,7 +11,7 @@ description = "GitHub release check + self-update for Kyde. Pure, no GUI."
 # Typed errors for a library crate (rule: libs use thiserror, never anyhow).
 thiserror.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 
 [lints]
 workspace = true
