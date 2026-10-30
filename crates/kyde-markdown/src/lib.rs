@@ -27,6 +27,8 @@ pub enum Block {
     Code(String),
     /// List item with its nesting depth (1 = top level).
     ListItem(usize, Vec<Span>),
+    /// A task-list item (`- [ ]` / `- [x]`): its depth, whether it's ticked, its spans.
+    Task(usize, bool, Vec<Span>),
     /// A block quote's inline spans.
     Quote(Vec<Span>),
     /// A horizontal rule (`---`).
@@ -59,6 +61,8 @@ pub fn parse(src: &str) -> Vec<Block> {
     let mut in_code_block = false;
     let mut code_buf = String::new();
     let mut in_item = false;
+    // The current item's task-list tick, when it's a `- [ ]` / `- [x]` item.
+    let mut task: Option<bool> = None;
     let mut depth = 0usize;
     let mut quote = false;
     let mut in_image = false;
@@ -77,7 +81,11 @@ pub fn parse(src: &str) -> Vec<Block> {
         });
     };
 
-    for ev in Parser::new(src) {
+    // GitHub-flavoured: task lists, tables, strikethrough (issue / PR bodies use all three).
+    let opts = pulldown_cmark::Options::ENABLE_TASKLISTS
+        | pulldown_cmark::Options::ENABLE_TABLES
+        | pulldown_cmark::Options::ENABLE_STRIKETHROUGH;
+    for ev in Parser::new_ext(src, opts) {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
                 heading = Some(level_to_u8(level));
@@ -112,9 +120,26 @@ pub fn parse(src: &str) -> Vec<Block> {
             Event::Start(Tag::List(_)) => depth += 1,
             Event::End(TagEnd::List(_)) => depth = depth.saturating_sub(1),
             Event::Start(Tag::Item) => in_item = true,
+            Event::TaskListMarker(done) => task = Some(done),
             Event::End(TagEnd::Item) => {
                 in_item = false;
-                out.push(Block::ListItem(depth.max(1), std::mem::take(&mut spans)));
+                let item = std::mem::take(&mut spans);
+                out.push(match task.take() {
+                    Some(done) => Block::Task(depth.max(1), done, item),
+                    None => Block::ListItem(depth.max(1), item),
+                });
+            }
+            // A table: one line per row, cells split by a bar; the header row bold.
+            Event::Start(Tag::TableHead) => bold += 1,
+            Event::End(TagEnd::TableHead) => {
+                bold -= 1;
+                spans.pop(); // the last cell's separator
+                out.push(Block::Paragraph(std::mem::take(&mut spans)));
+            }
+            Event::End(TagEnd::TableCell) => push(&mut spans, "  │  ", 0, 0, false),
+            Event::End(TagEnd::TableRow) => {
+                spans.pop();
+                out.push(Block::Paragraph(std::mem::take(&mut spans)));
             }
             Event::Start(Tag::BlockQuote(_)) => quote = true,
             Event::End(TagEnd::BlockQuote(_)) => quote = false,
@@ -226,6 +251,19 @@ fn level_to_u8(level: pulldown_cmark::HeadingLevel) -> u8 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn github_task_lists_and_tables() {
+        let blocks = super::parse("- [ ] todo\n- [x] done\n\n| a | b |\n|---|---|\n| 1 | 2 |\n");
+        assert!(matches!(&blocks[0], Block::Task(1, false, _)));
+        assert!(matches!(&blocks[1], Block::Task(1, true, _)));
+        let row = |b: &Block| match b {
+            Block::Paragraph(s) => s.iter().map(|x| x.text.as_str()).collect::<String>(),
+            _ => String::new(),
+        };
+        assert_eq!(row(&blocks[2]), "a  │  b");
+        assert_eq!(row(&blocks[3]), "1  │  2");
+    }
+
     use super::*;
 
     #[test]

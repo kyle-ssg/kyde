@@ -581,6 +581,12 @@ fn load() -> Theme {
 }
 
 impl Theme {
+    /// Text size of the Explorer file tree — a touch larger than `ui_font_size`.
+    #[must_use]
+    pub fn tree_font_size(&self) -> f32 {
+        self.ui_font_size + 3.0
+    }
+
     /// Serialize this theme to `~/.config/kyde/theme.json` (pretty hex JSON).
     pub fn save(&self) {
         let path = config_path();

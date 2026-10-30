@@ -7,6 +7,8 @@ use super::*;
 
 impl Render for Kyde {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Agent alerts sound / bounce for the tab on screen too while Kyde is in the back.
+        self.agents.window_active = window.is_window_active();
         let ui = theme::font::UI_FAMILY;
         let fs = px(theme::get().ui_font_size);
         // Track the MAIN window's bounds (this `impl Render` runs only for the main window; the
@@ -14,8 +16,15 @@ impl Render for Kyde {
         // editor and lands over it.
         self.main_window_bounds = Some(window.window_bounds());
 
+        // Agents-only window: the Agents view is all there is, project or not.
+        let only = self.agents_only();
+        if only && (self.mode != Mode::Agents || self.diff_view_open) {
+            self.mode = Mode::Agents;
+            self.diff_view_open = false;
+        }
+
         // No project open → the Projects landing view.
-        if self.repo_root.is_none() {
+        if self.repo_root.is_none() && !only {
             // Drive the welcome-hero shimmer with a continuous repaint while it's shown.
             if self.recents.paths.is_empty() {
                 window.request_animation_frame();
@@ -30,6 +39,13 @@ impl Render for Kyde {
         }
         // A project is open → re-arm the landing auto-focus for next time it's shown.
         self.projects_search_focused = false;
+
+        // An agent tab opened/closed/switched where no `Window` was at hand → focus it now.
+        #[cfg(feature = "terminal")]
+        if self.agents.focus_pending && self.mode == Mode::Agents && self.agents.cfg.setup_done {
+            self.agents.focus_pending = false;
+            self.agents_focus_visible(window, cx);
+        }
 
         // A terminal tab closed last frame (^D / × on the focused tab) → focus the new active
         // tab now that it's in the window tree, so typing works without a mouse click.
@@ -115,7 +131,7 @@ impl Render for Kyde {
             .bg(theme::get().titlebar_bg)
             // With ≤1 project open there's no tab strip, so show the project title (chip +
             // name + chevron) right of the traffic lights.
-            .when(self.open_projects.len() <= 1, |d| {
+            .when(self.open_projects.len() <= 1 && !only, |d| {
                 d.child(self.render_titlebar_project(cx))
             })
             .child(
@@ -173,6 +189,36 @@ impl Render for Kyde {
                 Mode::History,
                 cx,
             ));
+        // Agents (herdr-style spaces → worktrees → agent tabs). A green badge marks an agent
+        // that finished while you were elsewhere.
+        #[cfg(feature = "terminal")]
+        let rail = {
+            let unseen = self.agents_any_unseen();
+            let t = theme::get();
+            rail.child(
+                mode_btn(
+                    "icons/bot.svg",
+                    "Agents",
+                    self.mode == Mode::Agents,
+                    Mode::Agents,
+                    cx,
+                )
+                .relative()
+                .when(unseen, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(6.0))
+                            .right(px(6.0))
+                            .size(px(8.0))
+                            .rounded_full()
+                            .border_1()
+                            .border_color(t.frame_bg)
+                            .bg(t.status_added),
+                    )
+                }),
+            )
+        };
         // Terminal toggle — pinned to the BOTTOM of the rail (IDE-style tool strip), only
         // when a project is open (the shell roots at the project). A flex spacer between the
         // top nav and this button pushes it down to the bottom edge.
@@ -216,6 +262,7 @@ impl Render for Kyde {
                 Mode::Commit => self.render_commit(ui, fs, window, cx),
                 Mode::Browse => self.render_browse(ui, fs, window, cx),
                 Mode::History => self.render_history(ui, fs, window, cx),
+                Mode::Agents => self.render_agents(ui, cx),
             }
         };
         // Frame gap around the island panels (rail provides the left chrome).
@@ -224,7 +271,9 @@ impl Render for Kyde {
             .flex_1()
             .min_h_0()
             .min_w_0() // contain the editor/tab strip so it scrolls instead of pushing the rail
-            // No left pad: the rail's own right margin is the gap to the island.
+            // No left pad: the rail's own right margin is the gap to the island (no rail in
+            // an Agents-only window → the island needs its own).
+            .when(only, |d| d.pl(px(theme::FRAME_GAP)))
             .pr(px(theme::FRAME_GAP))
             .pt(px(theme::FRAME_GAP))
             .pb(px(theme::FRAME_GAP))
@@ -246,12 +295,12 @@ impl Render for Kyde {
         // Maximized terminal hides the body (tree + editor) and fills the whole right column.
         #[cfg(feature = "terminal")]
         let term_max =
-            self.term.panel.open && self.repo_root.is_some() && self.term.panel.maximized;
+            self.term.panel.open && self.repo_root.is_some() && self.term.panel.maximized && !only;
         #[cfg(not(feature = "terminal"))]
         let term_max = false;
         let right_col = right_col.when(!term_max, |c| c.child(body));
         #[cfg(feature = "terminal")]
-        let right_col = if self.term.panel.open && self.repo_root.is_some() {
+        let right_col = if self.term.panel.open && self.repo_root.is_some() && !only {
             right_col.child(self.render_terminal_panel(ui, cx))
         } else {
             right_col
@@ -273,7 +322,7 @@ impl Render for Kyde {
             .flex_row()
             .flex_1()
             .min_h_0()
-            .child(rail)
+            .when(!only, |d| d.child(rail))
             .child(right_col);
 
         // `root` is reassigned only under the `terminal` feature (the panel's actions); without
@@ -387,7 +436,7 @@ impl Render for Kyde {
             .child(titlebar)
             // Project tabs sit directly under the title bar, above all other UI — but only
             // once more than one project is open.
-            .when(self.open_projects.len() > 1, |d| {
+            .when(self.open_projects.len() > 1 && !only, |d| {
                 d.child(self.render_project_tabs(ui, cx))
             })
             // Update-available banner sits directly under the titlebar (only when behind).
@@ -413,7 +462,11 @@ impl Render for Kyde {
             .when(self.pending_crash.is_some(), |d| {
                 d.child(self.render_crash_banner(ui, cx))
             })
-            .child(self.render_status_bar(ui, cx));
+            // The status bar describes the open project, not the agent worktree on screen —
+            // in the Agents view it would mislead, so it's hidden there.
+            .when(self.mode != Mode::Agents, |d| {
+                d.child(self.render_status_bar(ui, cx))
+            });
 
         if self.branch.popup_open {
             root = root.child(self.render_branch_popup(ui, fs, cx));
@@ -430,6 +483,10 @@ impl Render for Kyde {
         }
         if self.finder.open {
             root = root.child(self.render_finder(ui, fs, cx));
+        }
+        // First visit to the Agents view → its setup overlay (after the keymap picker).
+        if self.mode == Mode::Agents && !self.agents.cfg.setup_done && !self.onboarding.open {
+            root = root.child(self.render_agents_setup(ui, fs, window, cx));
         }
         if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));

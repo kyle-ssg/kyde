@@ -82,7 +82,7 @@ impl TermPanel {
 /// removal), given the previously-active index. `None` = no tabs left (panel should hide).
 /// Closing a tab *before* the active one shifts the selection left so it stays on the same
 /// logical tab; closing the active one lands on the tab that slides into its slot.
-fn active_after_close(len: usize, closed: usize, active: usize) -> Option<usize> {
+pub(crate) fn active_after_close(len: usize, closed: usize, active: usize) -> Option<usize> {
     let new_len = len.saturating_sub(1);
     if new_len == 0 || closed >= len {
         return (new_len > 0).then_some(active.min(new_len.saturating_sub(1)));

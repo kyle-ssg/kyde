@@ -237,6 +237,9 @@ impl Kyde {
             fonts_win: None,
             clear_data_win: None,
             clear_lh_win: None,
+            remove_wt_win: None,
+            scrollback_win: None,
+            cleanup_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme: ui::SelectState::new(cx),
@@ -285,8 +288,16 @@ impl Kyde {
             fs_watcher: None,
             watch_root: None,
             term: TermState::new(),
+            agents: AgentsView::new(cx),
         };
         me.refresh(cx);
+        // Learn every worktree's Claude sessions now: the first read reopens last session's
+        // agent tabs in the background (`agents_restore_saved`), whatever view is showing.
+        me.agents_refresh_contexts(cx);
+        // An Agents-only window opens straight into the Agents view (no project needed).
+        if me.agents.cfg.agents_only {
+            me.enter_agents(cx);
+        }
         // Background: ask GitHub if there's a newer release, then surface the update banner.
         // Network I/O off the UI thread; failures stay silent.
         cx.spawn(async move |this, cx| {
@@ -772,7 +783,9 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.context_menu.is_some() {
+        if self.agents.renaming.is_some() {
+            self.agents_finish_rename(false, cx);
+        } else if self.context_menu.is_some() {
             self.context_menu = None;
         } else if self.find_shown(FindHost::Main) {
             self.close_find(&CloseFind, window, cx);
@@ -801,7 +814,9 @@ impl Kyde {
     /// confirm windows (New Branch / Rollback / Clear Data) handle Enter themselves
     /// in `ModalWindow::render`. No dialog open → no-op.
     pub(crate) fn act_confirm(&mut self, _: &ConfirmKey, _: &mut Window, cx: &mut Context<Self>) {
-        if self.delete_target.is_some() {
+        if self.agents.renaming.is_some() {
+            self.agents_finish_rename(true, cx);
+        } else if self.delete_target.is_some() {
             self.do_delete(cx);
         }
     }
@@ -853,6 +868,7 @@ impl Kyde {
                 self.diff_view_open = false;
                 cx.notify();
             }
+            Mode::Agents => self.enter_agents(cx),
         }
     }
 }

@@ -78,11 +78,13 @@ focus_only_kyde() {
 }
 
 echo "==> building ($PROFILE)"
+# SHOT_CARGO_FLAGS: extra flags, e.g. "--features gpui/runtime_shaders" on a machine without
+# Apple's Metal Toolchain.
 if [ "$PROFILE" = release ]; then
-    cargo build --release >/dev/null
+    cargo build --release ${SHOT_CARGO_FLAGS:-} >/dev/null
     BIN="$ROOT/target/release/kyde"
 else
-    cargo build >/dev/null
+    cargo build ${SHOT_CARGO_FLAGS:-} >/dev/null
     BIN="$ROOT/target/debug/kyde"
 fi
 
@@ -207,6 +209,32 @@ all | history)
     ;;
 esac
 
+# agents fixture: a clone of this repo as the project, with two linked worktrees — one with
+# uncommitted changes, one with a commit not yet pushed — so the rows carry real git badges.
+case "${1:-all}" in
+all | agents)
+    echo "==> generating agents fixture (clone + two worktrees)"
+    AG="$FIX/kyde-agents"
+    rm -rf "$AG"
+    mkdir -p "$AG"
+    AGENTS_REPO="$AG/kyde"
+    git clone --quiet --no-hardlinks "$ROOT" "$AGENTS_REPO"
+    git -C "$AGENTS_REPO" config user.email "shot@example.com"
+    git -C "$AGENTS_REPO" config user.name "Kyde Screenshots"
+    git -C "$AGENTS_REPO" config commit.gpgsign false
+    # On `main`: the rows and the agent's git log read like a normal checkout.
+    git -C "$AGENTS_REPO" checkout -qB main
+    WT1="$AG/kyde-ease-lerp"
+    WT2="$AG/kyde-find-word"
+    git -C "$AGENTS_REPO" worktree add -q -b feat/ease-lerp "$WT1"
+    git -C "$AGENTS_REPO" worktree add -q -b feat/find-whole-word "$WT2"
+    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$WT1/crates/kyde-ui/src/color.rs"
+    printf '\n// whole-word matching\n' >> "$WT2/crates/kyde-ui/src/select.rs"
+    git -C "$WT2" commit -qam "feat(find): whole-word toggle"
+    AGENTS_WTS="$WT1:$WT2"
+    ;;
+esac
+
 # shoot <shot-name> <output-file> <capture-mode> [extra env KEY=VAL ...]
 #   capture-mode: window  → screencapture -l<frontmost window>   (full-bleed window)
 #                 region  → screencapture -R<main-window bounds + margin>  (window over desktop)
@@ -236,6 +264,8 @@ shoot() {
     fi
     focus_only_kyde "$pid" # Kyde frontmost + every other app hidden → nothing else in frame
     sleep 1  # let the hide settle + async layout / modal open / first paint settle
+    # The agents' dots settle from "working" (fresh output) to idle / done.
+    if [ "$name" = agents ]; then sleep 2; fi
 
     # Fix the capture target now the window exists (window id for full-bleed; largest-window
     # rect for a modal-over-main shot).
@@ -326,7 +356,7 @@ shoot_welcome_gif() {
 # (FPS counter, GIF burst) and run manually on demand:
 #   ./scripts/screenshots.sh fps
 #   ./scripts/screenshots.sh welcome-gif
-declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files find-diff rollback history local-history merge-conflicts merge terminal)
+declare -a ALL=(git-diff light plugins plugins-window markdown-support go-to-file find-in-files find-diff rollback history local-history merge-conflicts merge terminal agents)
 want="${1:-all}"
 
 MAX_TRIES="${MAX_TRIES:-5}"
@@ -362,6 +392,7 @@ run_one() {
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
+        agents)           shoot_until agents           agents.png           window KYDE_SHOT_REPO="$AGENTS_REPO" KYDE_SHOT_WORKTREES="$AGENTS_WTS" ;;
         changelog)        shoot_until changelog        changelog.png        region ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         welcome-gif)      shoot_welcome_gif ;;

@@ -9,6 +9,14 @@
 //! `[workspace.lints]` (Cargo.toml) and opted into via `[lints] workspace = true`.
 
 // ── core shell ──
+// The Agents view's pure model. Ungated so its tests always run, but only the
+// `terminal`-gated view code uses it.
+#[cfg(all(feature = "terminal", unix))]
+mod agent_cli;
+#[cfg(all(feature = "terminal", unix))]
+mod agent_host;
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+mod agents;
 mod app;
 mod divider;
 // Always compiled (so its unit tests run in any feature set), but only *used* behind the
@@ -49,6 +57,8 @@ use widgets::terminal;
 
 // ── small OS utilities ──
 mod platform;
+#[cfg(feature = "terminal")]
+use platform::alert;
 #[cfg(unix)]
 use platform::instance;
 use platform::{clipboard as os_clipboard, scratch, shellcmd};
@@ -108,6 +118,8 @@ actions!(
         TerminalEnter,
         TerminalBackspace,
         TerminalEscape,
+        TerminalCopy,
+        TerminalPaste,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -149,6 +161,28 @@ actions!(
         ReplaceAll
     ]
 );
+// The Agents view's shortcuts (configurable; bound in its "Agents" key context).
+actions!(
+    kyde_agents,
+    [
+        AgentNext,
+        AgentPrev,
+        AgentAttention,
+        AgentTabNext,
+        AgentTabPrev,
+        AgentNewWorktree,
+        AgentRename,
+        AgentScrollback,
+        AgentToggleSidebar
+    ]
+);
+
+/// Jump to the Nth worktree in the Agents sidebar (⌃1…⌃9). Carries the number, so it's a
+/// derived `Action`.
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = kyde_agents, no_json)]
+struct AgentJump(usize);
+
 // Native menu bar actions.
 actions!(
     kyde_menu,
@@ -271,6 +305,19 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "nav_forward", NavForward);
     bind_app(cx, km, "push", GitPush);
     bind_app(cx, km, "pull", GitPull);
+    bind_agents(cx, km, "agent_next", AgentNext);
+    bind_agents(cx, km, "agent_prev", AgentPrev);
+    bind_agents(cx, km, "agent_attention", AgentAttention);
+    bind_agents(cx, km, "agent_tab_next", AgentTabNext);
+    bind_agents(cx, km, "agent_tab_prev", AgentTabPrev);
+    bind_agents(cx, km, "agent_new_worktree", AgentNewWorktree);
+    bind_agents(cx, km, "agent_rename", AgentRename);
+    bind_agents(cx, km, "agent_scrollback", AgentScrollback);
+    bind_agents(cx, km, "agent_toggle_sidebar", AgentToggleSidebar);
+    // ⌃1…⌃9: the Nth worktree in the sidebar (fixed keys).
+    cx.bind_keys(
+        (1..=9).map(|n| KeyBinding::new(&format!("ctrl-{n}"), AgentJump(n), Some("Agents"))),
+    );
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
     // Enter: confirm the open confirmation dialog (currently the Delete overlay) —
@@ -329,6 +376,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         // backspace, not delete the tree-selected file out from under a typing user.
         KeyBinding::new("cmd-backspace", TerminalBackspace, Some("Terminal")),
         KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
+        // ⌘C / ⌘V copy and paste in the terminal — the root binds them to the file tree's
+        // copy / paste, which would swallow them.
+        KeyBinding::new("cmd-c", TerminalCopy, Some("Terminal")),
+        KeyBinding::new("cmd-v", TerminalPaste, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys).
     cx.bind_keys([
@@ -340,6 +391,13 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
     ]);
+}
+
+/// Like [`bind_app`], but only while the Agents view has focus (its "Agents" key context).
+fn bind_agents<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
+    if let Some(k) = km.key_for(name) {
+        cx.bind_keys([KeyBinding::new(&k, action, Some("Agents"))]);
+    }
 }
 
 fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
@@ -362,6 +420,8 @@ enum Mode {
     Commit,
     Browse,
     History,
+    /// The herdr-style AI workspace: spaces → worktrees → agent terminal tabs.
+    Agents,
 }
 
 /// Which window hosts the find/replace bar: the main window or one of the native modals.
@@ -1053,6 +1113,520 @@ impl TermState {
     }
 }
 
+/// The Agents view's state (spaces → worktrees → tabs; see `agents.rs` for the pure model and
+/// `views/agents.rs` for the UI). The persisted layout is `cfg`; the PTY-backed tabs are
+/// runtime-only and live behind the `terminal` feature. Global, NOT per project — switching
+/// the open project keeps every agent running.
+struct AgentsView {
+    /// Spaces + their worktrees, start commands, cleanup policy (`agents.json`).
+    cfg: kyde_config::agents::AgentsCfg,
+    /// The worktree on screen: a space's own folder or one of its linked worktrees.
+    selected: Option<PathBuf>,
+    /// Checked-out branch per worktree, gathered off the UI thread on entering the view.
+    branches: std::collections::HashMap<PathBuf, String>,
+    /// Spaces inside a git repo (new worktrees are offered only for these).
+    git_spaces: std::collections::HashSet<PathBuf>,
+    /// Changed-files / unpushed counts per worktree, refreshed with `branches`.
+    git: std::collections::HashMap<PathBuf, agents::WtGit>,
+    /// A git refresh is in flight (the periodic one skips rather than piling up).
+    git_refreshing: bool,
+    /// The sidebar's list: Code (spaces) / Issues / Pull Requests.
+    side_tab: SideTab,
+    /// Assigned issues / open PRs per project.
+    issues: std::collections::HashMap<PathBuf, GhList<kyde_git::github::Issue>>,
+    /// Whose issues / which PRs those tabs list, and the search narrowing both.
+    issue_filter: kyde_git::github::IssueFilter,
+    pr_filter: kyde_git::github::PrFilter,
+    gh_query: Entity<CodeEditor>,
+    /// Debounce generation for re-searching as you type.
+    gh_query_gen: u64,
+    /// When each GitHub tab's lists were last (re)fetched — they go stale as PRs merge.
+    gh_fetched: std::collections::HashMap<SideTab, std::time::Instant>,
+    /// The Issues / Pull Requests filter dropdown.
+    gh_filter_sel: ui::SelectState,
+    /// The issue / PR the main panel shows on those tabs: (project, tab, number).
+    gh_selected: Option<(PathBuf, SideTab, u64)>,
+    /// Its full text — `None` while loading, `Err` = gh's reason.
+    gh_detail: Option<Result<kyde_git::github::ItemDetail, String>>,
+    /// Its body, rendered as markdown.
+    gh_body: Entity<mdview::MarkdownView>,
+    /// Which part of a PR the detail shows.
+    gh_pr_tab: PrTab,
+    /// The selected issue / PR's conversation, ready to render.
+    gh_cards: Vec<GhCard>,
+    /// The comment box under it, and the inline-thread reply box (with the thread it's for).
+    gh_comment: Entity<CodeEditor>,
+    gh_reply: Entity<CodeEditor>,
+    gh_reply_to: Option<u64>,
+    /// A comment / reply / close is being sent.
+    gh_posting: bool,
+    /// Kyde's window is frontmost (alerts fire for on-screen tabs too when it isn't).
+    window_active: bool,
+    /// When the last alert sound played — a burst of agents finishing plays one.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    last_sound: Option<std::time::Instant>,
+
+    /// A read of the agents' hook state files is in flight.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    hooks_polling: bool,
+    /// The Claude Code hook was installed / removed per the setting this launch.
+    hooks_synced: bool,
+    /// The space / worktree / tab being renamed in place, and the name field.
+    renaming: Option<RenameTarget>,
+    rename_input: Entity<CodeEditor>,
+    /// The sidebar is hidden (just the agent on screen).
+    sidebar_hidden: bool,
+    /// Launch reattached the agent hosts still running (autostart waits for that).
+    hosts_restored: bool,
+    /// A scan for agent hosts to adopt is in flight.
+    #[cfg_attr(not(all(feature = "terminal", unix)), allow(dead_code))]
+    hosts_scanning: bool,
+    /// Hosts whose tab was closed (killed) — not to be adopted again while they wind down.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    closed_hosts: std::collections::HashSet<String>,
+    /// The scrollback window's editor.
+    scrollback: Entity<CodeEditor>,
+    /// The sidebar row under the mouse: only it shows its action / remove button (which then
+    /// takes room, pushing the git badges left).
+    hovered_row: Option<SharedString>,
+    /// That PR's diff, row by row — `None` while loading, `Err` = gh's reason.
+    gh_diff: Option<Result<std::sync::Arc<Vec<kyde_git::github::DiffRow>>, String>>,
+    prs: std::collections::HashMap<PathBuf, GhList<kyde_git::github::PullRequest>>,
+    /// What each worktree's agent session is about (Claude Code's own title + prompts).
+    contexts: std::collections::HashMap<PathBuf, agents::AgentContext>,
+    /// The context panel beside the terminal is open.
+    context_open: bool,
+    /// The worktree the "Remove worktree?" window is asking about: (space, worktree).
+    removing: Option<(PathBuf, PathBuf)>,
+    /// Worktrees being removed in the background — hidden from the sidebar meanwhile.
+    hiding: std::collections::HashSet<PathBuf>,
+    /// Worktrees whose tabs were opened this launch (their saved tabs are now the live ones).
+    #[cfg(feature = "terminal")]
+    restored: std::collections::HashSet<PathBuf>,
+    /// Each space's own checkout vs its remote mainline, from the last background sync.
+    main_sync: std::collections::HashMap<PathBuf, agents::MainSync>,
+    /// Per space: when its merged PRs were last fetched, and their head branches.
+    #[cfg(feature = "terminal")]
+    merged:
+        std::collections::HashMap<PathBuf, (std::time::Instant, std::collections::HashSet<String>)>,
+    /// A cleanup pass is gathering facts in the background.
+    #[cfg(feature = "terminal")]
+    sweeping: bool,
+    /// The Clean Up window's ticked worktrees.
+    #[cfg(feature = "terminal")]
+    cleanup_checked: std::collections::HashSet<PathBuf>,
+    /// A main sync is in flight / when the last one finished (throttle).
+    main_syncing: bool,
+    main_synced_at: Option<std::time::Instant>,
+    /// Width (px) of the spaces sidebar, drag-resizable.
+    sidebar_w: f32,
+    /// Live tabs per worktree path.
+    #[cfg(feature = "terminal")]
+    tabs: std::collections::HashMap<PathBuf, AgentTabs>,
+    /// Worktrees being checked out — each a pending row, and a setup screen when selected.
+    creating: Vec<Creating>,
+    /// A project / worktree row being dragged to a new place in the sidebar.
+    drag: Option<SideDrag>,
+    /// The issue / review / re-review prompt templates (Settings → Agents).
+    issue_prompt_input: Entity<CodeEditor>,
+    review_prompt_input: Entity<CodeEditor>,
+    rereview_prompt_input: Entity<CodeEditor>,
+    /// One-line status under the sidebar (cleanup result, git error, …).
+    note: Option<String>,
+    /// The start command input (Settings → Agents, and the first-run setup overlay).
+    default_cmd_input: Entity<CodeEditor>,
+    /// The setup overlay has taken keyboard focus (once per showing).
+    setup_focused: bool,
+    /// Debounce generation for persisting `cfg` while typing.
+    save_gen: u64,
+    /// The 1 s status/cleanup ticker is running (stops itself once no tabs remain).
+    #[cfg(feature = "terminal")]
+    ticking: bool,
+    /// Focus the visible agent tab on the next paint (set where no `Window` is at hand).
+    focus_pending: bool,
+    /// This launch already auto-started the selected worktree's agent (once — closing its
+    /// tabs later must not respawn them on every visit).
+    autostarted: bool,
+    /// `contexts` has been read at least once — so auto-start knows each worktree's latest
+    /// Claude session and can resume it.
+    contexts_loaded: bool,
+}
+
+/// Which list the Agents sidebar shows.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SideTab {
+    /// Spaces → worktrees (the agents).
+    Code,
+    /// GitHub issues assigned to you, for the chosen project.
+    Issues,
+    /// Open pull requests, for the chosen project.
+    Prs,
+}
+
+/// A GitHub list for one project, fetched with `gh` in the background.
+enum GhList<T> {
+    Loading,
+    Ready(Vec<T>),
+    /// `gh`'s reason (not logged in, issues disabled, not a GitHub repo…).
+    Failed(String),
+}
+
+/// What a new worktree is checked out from.
+#[derive(Clone)]
+enum WtSource {
+    /// A new branch (named so) off the freshly fetched remote mainline.
+    NewBranch(String),
+    /// Pull request #n's branch (`gh pr checkout`).
+    Pr(u64),
+}
+
+/// What's being dragged in the sidebar.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum DragItem {
+    Space(PathBuf),
+    /// A linked worktree (a project's own checkout stays first).
+    Worktree {
+        space: PathBuf,
+        wt: PathBuf,
+    },
+}
+
+/// A sidebar drag: pressed on a row, active once the mouse has moved, over a drop target
+/// (a project for a project; a worktree — or the project's own checkout, meaning the top —
+/// for a worktree).
+struct SideDrag {
+    item: DragItem,
+    from: gpui::Point<gpui::Pixels>,
+    active: bool,
+    over: Option<PathBuf>,
+}
+
+/// Where the drop line goes.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum DropLine {
+    BeforeSpace(PathBuf),
+    AfterSpace(PathBuf),
+    BeforeRow(PathBuf),
+    AfterRow(PathBuf),
+}
+
+/// A worktree being checked out.
+struct Creating {
+    space: PathBuf,
+    /// Its folder name (the pending row's label).
+    name: String,
+    path: PathBuf,
+    /// What the setup screen says ("Setting up a review of #12").
+    doing: String,
+}
+
+/// What a new worktree is for: its agent's first prompt and tab name, its title until the
+/// agent titles it, and what the setup screen says meanwhile.
+#[derive(Clone)]
+struct WtStart {
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    prompt: String,
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    tab: String,
+    origin: String,
+    doing: String,
+}
+
+/// What's being renamed in the Agents sidebar / tab strip.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RenameTarget {
+    Space(PathBuf),
+    Worktree(PathBuf),
+    /// A worktree's tab, by its id.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Tab(PathBuf, String),
+}
+
+/// Which part of a pull request its detail shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PrTab {
+    Conversation,
+    Commits,
+    Checks,
+    Files,
+}
+
+/// One entry of an issue / PR conversation, ready to render.
+enum GhCard {
+    /// The description or a comment.
+    Comment {
+        author: String,
+        at: String,
+        verb: &'static str,
+        body: Entity<mdview::MarkdownView>,
+    },
+    /// A submitted review, its summary and its inline threads.
+    Review {
+        author: String,
+        at: String,
+        state: String,
+        body: Option<Entity<mdview::MarkdownView>>,
+        threads: Vec<GhThread>,
+    },
+    /// A pushed commit.
+    Commit {
+        oid: String,
+        headline: String,
+        author: String,
+        at: String,
+    },
+}
+
+/// An inline review thread: the file, the last diff lines it's on, its comments.
+struct GhThread {
+    /// Its first comment's id — replies go to it.
+    root: u64,
+    path: String,
+    hunk: Vec<kyde_git::github::DiffRow>,
+    comments: Vec<(String, String, Entity<mdview::MarkdownView>)>,
+}
+
+/// One worktree's live tabs, left→right, and which one is shown.
+#[cfg(feature = "terminal")]
+struct AgentTabs {
+    tabs: Vec<AgentTab>,
+    active: usize,
+}
+
+/// One live agent tab: the PTY terminal plus the clock behind its status dot + cleanup.
+#[cfg(feature = "terminal")]
+struct AgentTab {
+    view: Entity<terminal::TerminalView>,
+    /// Its id — names its state file (written by the Claude Code hook) and agent host.
+    id: String,
+    /// A name you gave it.
+    name: Option<String>,
+    /// What its Claude Code hook last reported, and when (from the state file).
+    hook: Option<(agents::Hook, std::time::Instant)>,
+    /// The state file's mtime when last read — it's re-read only when it changes.
+    hook_seen: Option<std::time::SystemTime>,
+    /// Last output, for the working dot.
+    last_output: Option<std::time::Instant>,
+    /// Last output OR last time on screen — what the idle cleanup measures.
+    last_active: std::time::Instant,
+    /// Produced output while off screen (the "done, look at me" dot).
+    unseen: bool,
+    /// Started with the space's start command (vs a plain shell tab).
+    agent: bool,
+    /// The dot as last painted — repaint only when the state actually changes.
+    shown: agents::AgentState,
+    /// A prompt has been submitted here (the first one triggers a quick title read). Output
+    /// before that (a banner, a resume's replay) isn't "unseen".
+    prompted: bool,
+    /// It holds real work — started on a task, resumed, or prompted — so the "never used"
+    /// cleanup rule leaves it alone.
+    used: bool,
+    /// When it started — matched against new Claude Code session files to learn `session`.
+    spawned_at: std::time::SystemTime,
+    /// Its Claude Code session id, once known (saved, so a relaunch can `--resume` it).
+    session: Option<String>,
+    /// The cleanup's finding: why this tab can be closed (`None` = keep it).
+    verdict: Option<String>,
+    /// The last AI "is it done?" check: the output it had seen, and its answer.
+    ai: Option<AiCheck>,
+}
+
+/// One AI "is this tab done?" answer, and what it was asked about.
+#[cfg(feature = "terminal")]
+struct AiCheck {
+    /// The tab's last output when asked — it's asked again only after new output.
+    after: Option<std::time::Instant>,
+    /// `Some(why)` = done.
+    done: Option<String>,
+}
+
+impl AgentsView {
+    fn new(cx: &mut Context<Kyde>) -> Self {
+        let cfg = kyde_config::agents::AgentsCfg::load();
+        let default_cmd_input = cx.new(|cx| {
+            let mut e = CodeEditor::single_line(cx, kyde_config::agents::DEFAULT_COMMAND);
+            e.set_content(cfg.command.clone(), Lang::PlainText, cx);
+            e
+        });
+        // The Issues / Pull Requests search: re-query GitHub once typing pauses.
+        let gh_query =
+            cx.new(|cx| CodeEditor::single_line(cx, "Search — words, label:bug, assignee:name…"));
+        cx.subscribe(&gh_query, |this, _e, ev, cx| {
+            if matches!(ev, EditorEvent::Changed) {
+                this.agents_query_changed(cx);
+            }
+        })
+        .detach();
+        // The prompt templates: an editor each, saved as you type (blank = the standard one).
+        let prompt_editor = |text: &str, standard: &str, cx: &mut Context<Kyde>| {
+            cx.new(|cx| {
+                let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, standard);
+                e.soft_wrap = true;
+                e.fill_height = true;
+                e.set_content(
+                    if text.trim().is_empty() {
+                        standard
+                    } else {
+                        text
+                    }
+                    .to_string(),
+                    Lang::PlainText,
+                    cx,
+                );
+                e
+            })
+        };
+        let issue_prompt_input =
+            prompt_editor(&cfg.issue_prompt, kyde_config::agents::ISSUE_PROMPT, cx);
+        let review_prompt_input =
+            prompt_editor(&cfg.review_prompt, kyde_config::agents::REVIEW_PROMPT, cx);
+        let rereview_prompt_input = prompt_editor(
+            &cfg.rereview_prompt,
+            kyde_config::agents::REREVIEW_PROMPT,
+            cx,
+        );
+        let save_prompt = |which: fn(&mut kyde_config::agents::AgentsCfg) -> &mut String,
+                           standard: &'static str| {
+            move |this: &mut Kyde,
+                  e: Entity<CodeEditor>,
+                  ev: &EditorEvent,
+                  cx: &mut Context<Kyde>| {
+                if !matches!(ev, EditorEvent::Changed) {
+                    return;
+                }
+                let text = e.read(cx).text().trim().to_string();
+                // The standard text unchanged is stored as "use the standard" (it may improve).
+                let text = if text == standard {
+                    String::new()
+                } else {
+                    text
+                };
+                let slot = which(&mut this.agents.cfg);
+                if *slot != text {
+                    *slot = text;
+                    this.agents_save(cx);
+                }
+            }
+        };
+        cx.subscribe(
+            &issue_prompt_input,
+            save_prompt(|c| &mut c.issue_prompt, kyde_config::agents::ISSUE_PROMPT),
+        )
+        .detach();
+        cx.subscribe(
+            &review_prompt_input,
+            save_prompt(|c| &mut c.review_prompt, kyde_config::agents::REVIEW_PROMPT),
+        )
+        .detach();
+        cx.subscribe(
+            &rereview_prompt_input,
+            save_prompt(
+                |c| &mut c.rereview_prompt,
+                kyde_config::agents::REREVIEW_PROMPT,
+            ),
+        )
+        .detach();
+        // Persists as you type (debounced, off the UI thread).
+        cx.subscribe(&default_cmd_input, |this, e, ev, cx| {
+            if !matches!(ev, EditorEvent::Changed) {
+                return;
+            }
+            let text = e.read(cx).text().trim().to_string();
+            if this.agents.cfg.command != text {
+                this.agents.cfg.command = text;
+                this.agents_save(cx);
+            }
+        })
+        .detach();
+        Self {
+            // Reopen where you left off; else the first space.
+            selected: cfg
+                .selected
+                .clone()
+                .filter(|w| cfg.space_of(w).is_some())
+                .or_else(|| cfg.spaces.first().map(|s| s.path.clone())),
+            cfg,
+            branches: std::collections::HashMap::new(),
+            git_spaces: std::collections::HashSet::new(),
+            git: std::collections::HashMap::new(),
+            git_refreshing: false,
+            side_tab: SideTab::Code,
+            issues: std::collections::HashMap::new(),
+            issue_filter: kyde_git::github::IssueFilter::default(),
+            pr_filter: kyde_git::github::PrFilter::default(),
+            gh_query,
+            gh_query_gen: 0,
+            gh_fetched: std::collections::HashMap::new(),
+            gh_filter_sel: ui::SelectState::new(cx),
+            gh_selected: None,
+            gh_detail: None,
+            gh_body: cx.new(|cx| mdview::MarkdownView::new("", None, cx)),
+            gh_pr_tab: PrTab::Conversation,
+            gh_cards: Vec::new(),
+            gh_comment: cx.new(|cx| {
+                let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Leave a comment");
+                e.soft_wrap = true;
+                e.fill_height = true;
+                e
+            }),
+            gh_reply: cx.new(|cx| CodeEditor::single_line(cx, "Reply…")),
+            gh_reply_to: None,
+            gh_posting: false,
+            window_active: true,
+            last_sound: None,
+
+            hooks_polling: false,
+            hooks_synced: false,
+            renaming: None,
+            rename_input: cx.new(|cx| CodeEditor::single_line(cx, "Name")),
+            sidebar_hidden: false,
+            hosts_restored: false,
+            hosts_scanning: false,
+            closed_hosts: std::collections::HashSet::new(),
+            scrollback: cx.new(|cx| {
+                let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "");
+                e.fill_height = true;
+                e
+            }),
+            hovered_row: None,
+            gh_diff: None,
+            prs: std::collections::HashMap::new(),
+            contexts: std::collections::HashMap::new(),
+            context_open: false,
+            removing: None,
+            hiding: std::collections::HashSet::new(),
+            #[cfg(feature = "terminal")]
+            restored: std::collections::HashSet::new(),
+            main_sync: std::collections::HashMap::new(),
+            #[cfg(feature = "terminal")]
+            merged: std::collections::HashMap::new(),
+            #[cfg(feature = "terminal")]
+            sweeping: false,
+            #[cfg(feature = "terminal")]
+            cleanup_checked: std::collections::HashSet::new(),
+            main_syncing: false,
+            main_synced_at: None,
+            sidebar_w: 330.0,
+            #[cfg(feature = "terminal")]
+            tabs: std::collections::HashMap::new(),
+            creating: Vec::new(),
+            drag: None,
+            issue_prompt_input,
+            review_prompt_input,
+            rereview_prompt_input,
+            note: None,
+            default_cmd_input,
+            setup_focused: false,
+            save_gen: 0,
+            #[cfg(feature = "terminal")]
+            ticking: false,
+            focus_pending: false,
+            autostarted: false,
+            contexts_loaded: false,
+        }
+    }
+}
+
 /// The Browse (code) view's state, grouped out of the `Kyde` god-struct: the folder tree,
 /// the editor tabs (incl. the VS Code-style preview tab), the file editor entity, and the
 /// markdown split. Built via [`BrowseView::new`], which wires the editor's autosave
@@ -1662,6 +2236,11 @@ struct Kyde {
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Local History" confirmation — wipes the open project's snapshot store.
     clear_lh_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Agents view: the "Remove worktree?" confirmation window.
+    remove_wt_win: Option<gpui::WindowHandle<ModalWindow>>,
+    scrollback_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Agents view: the Clean Up window.
+    cleanup_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "What's New" changelog — a native modal window mirroring GitHub Releases (issue #71).
     changelog_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Its state: the fetched release list, the selected row, and the markdown pane.
@@ -1777,6 +2356,8 @@ struct Kyde {
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
     term: TermState,
+    /// The Agents view — spaces → worktrees → agent tabs (`views/agents.rs`).
+    agents: AgentsView,
 }
 
 /// Which native modal a `ModalWindow` is showing. Each delegates its body back into `Kyde`
@@ -1800,6 +2381,14 @@ enum ModalKind {
     ClearLocalHistory,
     /// "What's New": the published releases + their notes (issue #71).
     Changelog,
+    /// "Remove worktree?" confirmation (Agents view) — says what would be lost.
+    RemoveWorktree,
+    /// Agents view: pick which tabs to close; finished ones come pre-ticked.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Cleanup,
+    /// An agent tab's scrollback in an editor (search it, copy from it).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Scrollback,
 }
 
 /// Changelog-window state (issue #71): the GitHub release list, which one is showing, and
@@ -1953,6 +2542,7 @@ pub(crate) enum SettingsSection {
     Keymap,
     LanguagePacks,
     LocalHistory,
+    Agents,
 }
 
 impl SettingsSection {
@@ -1962,6 +2552,7 @@ impl SettingsSection {
         (SettingsSection::Keymap, "Keymap"),
         (SettingsSection::LanguagePacks, "Language Packs"),
         (SettingsSection::LocalHistory, "Local History"),
+        (SettingsSection::Agents, "Agents"),
     ];
 }
 
@@ -2026,6 +2617,9 @@ impl Render for ModalWindow {
             ModalKind::LocalHistory => k.render_local_history_body(kcx),
             ModalKind::ClearLocalHistory => k.render_clear_local_history_body(kcx),
             ModalKind::Changelog => k.render_changelog_body(kcx),
+            ModalKind::RemoveWorktree => k.render_remove_worktree_body(kcx),
+            ModalKind::Cleanup => k.render_cleanup_body(kcx),
+            ModalKind::Scrollback => k.render_scrollback_body(kcx),
         });
         let host = FindHost::Modal(kind);
         let find_bar = kyde.update(cx, |k, kcx| k.find_bar(host, theme::font::UI_FAMILY, kcx));
@@ -2571,6 +3165,14 @@ impl gpui::AssetSource for Assets {
             "icons/layers.svg" => include_bytes!("../assets/icons/layers.svg"),
             #[cfg(feature = "terminal")]
             "icons/terminal.svg" => include_bytes!("../assets/icons/terminal.svg"),
+            // Agents view (rail icon, add-space, clean-up-idle-tabs).
+            "icons/bot.svg" => include_bytes!("../assets/icons/bot.svg"),
+            "icons/eraser.svg" => include_bytes!("../assets/icons/eraser.svg"),
+            "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
+            "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+
+            "icons/chevrons-up-down.svg" => include_bytes!("../assets/icons/chevrons-up-down.svg"),
+            "icons/chevrons-down-up.svg" => include_bytes!("../assets/icons/chevrons-down-up.svg"),
             "icons/file-lines.svg" => include_bytes!("../assets/icons/file-lines.svg"),
             "icons/image.svg" => include_bytes!("../assets/icons/image.svg"),
             "icons/ban.svg" => include_bytes!("../assets/icons/ban.svg"),
@@ -2739,6 +3341,15 @@ fn reexec_with_proper_name() {
 
 #[cfg(not(target_os = "macos"))]
 fn reexec_with_proper_name() {}
+
+/// The most recent of `recents` that's still a folder on disk — its repo's top level when it's
+/// in git, else the folder itself (non-git folders open too).
+fn last_project(recents: &[PathBuf]) -> Option<PathBuf> {
+    recents
+        .iter()
+        .find(|p| p.is_dir())
+        .map(|p| Repo::discover(p).map_or_else(|_| p.clone(), |repo| repo.root().to_path_buf()))
+}
 
 /// Name the running process "Kyde" so the macOS dock tile / menu-bar app menu read "Kyde"
 /// instead of the lowercase executable name. Must run before `NSApplication` checks in with
@@ -3122,6 +3733,63 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.focus_active_terminal(window, cx);
             cx.notify();
         }
+        // The Agents view: the open project as a space (plus a linked worktree from
+        // KYDE_SHOT_WORKTREE, if given — its tab finishes off screen, so it shows the unseen
+        // dot). The start command is a harmless `git log`, and nothing is saved (shots share
+        // one config dir).
+        #[cfg(feature = "terminal")]
+        // The Agents view: KYDE_SHOT_REPO as the project, KYDE_SHOT_WORKTREES (`:`-separated)
+        // its worktrees, each running a harmless "agent" (a git log) — the first worktree on
+        // screen.
+        "agents" => {
+            // Real paths, as git lists them (a symlinked fixture dir would show twice).
+            let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
+            let root = std::env::var("KYDE_SHOT_REPO")
+                .map(PathBuf::from)
+                .ok()
+                .or_else(|| view.repo_root.clone())
+                .map(real)
+                .unwrap_or_default();
+            let wts: Vec<PathBuf> = std::env::var("KYDE_SHOT_WORKTREES")
+                .unwrap_or_default()
+                .split(':')
+                .filter(|s| !s.is_empty())
+                .map(|s| real(PathBuf::from(s)))
+                .collect();
+            view.agents.cfg.setup_done = true;
+            view.agents.cfg.command = "git --no-pager log --oneline --graph --decorate -16".into();
+            view.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                path: root.clone(),
+                worktrees: wts.clone(),
+                ..Default::default()
+            }];
+            for (wt, title) in wts.iter().zip([
+                "Ease the shimmer with smoothstep",
+                "Whole-word toggle in find",
+            ]) {
+                view.agents
+                    .cfg
+                    .origins
+                    .insert(wt.clone(), title.to_string());
+            }
+            view.open_project(root.clone(), cx);
+            view.switch_mode(Mode::Agents, cx);
+            view.agents_select(root, cx);
+            for wt in wts.iter().rev() {
+                view.agents_select(wt.clone(), cx);
+            }
+            // The second worktree's agent has finished while you were on the first: "done".
+            #[cfg(feature = "terminal")]
+            if let Some(t) = wts
+                .get(1)
+                .and_then(|wt| view.agents.tabs.get_mut(wt))
+                .and_then(|g| g.tabs.first_mut())
+            {
+                t.prompted = true;
+                t.unseen = true;
+            }
+            cx.notify();
+        }
         // The merge-conflict window. KYDE_SHOT_REPO is a clone with an in-progress
         // conflicted merge (started by screenshots.sh). `merge-conflicts` shows the
         // conflicts-list stage; `merge` drills into the first file's 3-pane resolve
@@ -3190,13 +3858,33 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
 }
 
 fn main() {
+    // `kyde --agent-host <spec> <fd>`: an agent's host process (see agent_host.rs) — no UI.
+    #[cfg(all(feature = "terminal", unix))]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("--agent-host") {
+            agent_host::host_main(
+                args.get(2).map_or("", String::as_str),
+                args.get(3).map_or("", String::as_str),
+            );
+        }
+        // `ky agent <command> …`: the agents CLI (`ky agent` alone still opens ./agent).
+        if args.get(1).map(String::as_str) == Some("agent")
+            && args
+                .get(2)
+                .is_some_and(|c| agent_cli::COMMANDS.contains(&c.as_str()) || c == "--help")
+        {
+            std::process::exit(agent_cli::run(args.get(2..).unwrap_or_default()));
+        }
+    }
     reexec_with_proper_name();
     set_app_name();
     install_crash_logger();
-    // A path arg opens that project directly; no arg → the Projects landing view.
-    // The path may be `.`, a relative dir, or any subdirectory of a repo — resolve it to
-    // the repo's top level (`git rev-parse --show-toplevel`, via Repo::discover). If it
-    // isn't inside a git repo, fall back to the Projects view rather than a broken state.
+    // A path arg opens that project directly; no arg → the project you had open last (the
+    // Projects landing view only when there's none to reopen). The path may be `.`, a
+    // relative dir, or any subdirectory of a repo — resolve it to the repo's top level
+    // (`git rev-parse --show-toplevel`, via Repo::discover). If it isn't inside a git repo,
+    // fall back to the Projects view rather than a broken state.
     let initial = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -3218,6 +3906,16 @@ fn main() {
             return;
         }
     }
+
+    // No path given (and not a screenshot run, which wants the landing view): reopen the
+    // last project. After the single-instance hand-off, so a bare `ky` just brings a running
+    // Kyde forward.
+    let initial = initial.or_else(|| {
+        std::env::var_os("KYDE_SHOT")
+            .is_none()
+            .then(|| last_project(&projects::Recents::load().paths))
+            .flatten()
+    });
 
     let (km, first_run) = Keymap::load();
 
@@ -5774,6 +6472,177 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Entering the Agents view fills every space's branch + git badges off the UI thread.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_refresh_fills_branch_and_git(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    k.agents.branches.contains_key(&dir),
+                    "branch: {:?}",
+                    k.agents.branches
+                );
+                assert!(k.agents.git_spaces.contains(&dir));
+                assert_eq!(k.agents.git.get(&dir).map(|g| g.changed), Some(2));
+            })
+            .unwrap();
+    }
+
+    /// Launching with no path reopens the most recent project that still exists.
+    #[test]
+    fn launch_reopens_the_last_project_that_still_exists() {
+        let gone = std::env::temp_dir().join("kyde-no-such-project-dir");
+        let here = std::env::temp_dir();
+        assert_eq!(last_project(&[gone.clone(), here.clone()]), Some(here));
+        assert_eq!(last_project(&[gone]), None);
+    }
+
+    /// Dragging a worktree row onto another moves it there (and the project's own checkout
+    /// stays first) — through real mouse events on the rendered sidebar.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_drag_reorders_worktrees(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+        };
+        let (a, b) = (dir.with_extension("wta"), dir.with_extension("wtb"));
+        git(&["worktree", "add", "-q", "-b", "wta", a.to_str().unwrap()]);
+        git(&["worktree", "add", "-q", "-b", "wtb", b.to_str().unwrap()]);
+        // As git lists them (macOS temp dirs resolve under /private).
+        let (a, b) = (a.canonicalize().unwrap(), b.canonicalize().unwrap());
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into();
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    worktrees: vec![a.clone(), b.clone()],
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let name = |p: &std::path::Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        let sel_b: &'static str = Box::leak(format!("agents-wt-{}", name(&b)).into_boxed_str());
+        let sel_a: &'static str = Box::leak(format!("agents-wt-{}", name(&a)).into_boxed_str());
+        let rb = vcx
+            .debug_bounds(sel_b)
+            .expect("worktree b's row is on screen");
+        let ra = vcx
+            .debug_bounds(sel_a)
+            .expect("worktree a's row is on screen");
+        let none = gpui::Modifiers::none();
+        vcx.simulate_mouse_down(rb.center(), gpui::MouseButton::Left, none);
+        let step = gpui::point(rb.center().x, rb.center().y - gpui::px(8.0));
+        vcx.simulate_mouse_move(step, gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_move(ra.center(), gpui::MouseButton::Left, none);
+        let state = handle
+            .update(&mut vcx, |k, _w, _cx| {
+                k.agents.drag.as_ref().map(|d| (d.active, d.over.clone()))
+            })
+            .unwrap();
+        assert_eq!(state, Some((true, Some(a.clone()))), "dragging b over a");
+        vcx.simulate_mouse_up(ra.center(), gpui::MouseButton::Left, none);
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                assert_eq!(k.agents.cfg.spaces[0].worktrees, vec![b.clone(), a.clone()]);
+            })
+            .unwrap();
+        // The project's own checkout drags too: down past both.
+        vcx.run_until_parked();
+        let sel_main: &'static str =
+            Box::leak(format!("agents-wt-{}", name(&dir)).into_boxed_str());
+        let rm = vcx.debug_bounds(sel_main).expect("the checkout's row");
+        let ra = vcx.debug_bounds(sel_a).expect("a's row");
+        vcx.simulate_mouse_down(rm.center(), gpui::MouseButton::Left, none);
+        let step = gpui::point(rm.center().x, rm.center().y + gpui::px(8.0));
+        vcx.simulate_mouse_move(step, gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_move(ra.center(), gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_up(ra.center(), gpui::MouseButton::Left, none);
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                assert_eq!(
+                    k.agents.cfg.spaces[0].rows(),
+                    vec![b.clone(), a.clone(), dir.clone()]
+                );
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// Agents view end-to-end: adding a space opens its default worktree (the folder itself)
+    /// with a first agent tab; the cleanup closes an off-screen tab whose agent has quit —
+    /// never the one on screen. Real PTYs.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_space_opens_tab_and_cleanup_spares_visible(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.agents.selected.as_deref(), Some(dir.as_path()));
+                assert_eq!(
+                    k.agents.tabs[&dir].tabs.len(),
+                    1,
+                    "first tab starts on select"
+                );
+                // A shell tab beside it — it becomes the visible one.
+                k.agents_new_tab(dir.clone(), false, None, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // Both tabs quiet for an hour, seen, with nothing running in their shells.
+                let hour_ago = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                let mut found = agents::SweepFound::default();
+                for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                    t.unseen = false;
+                    t.last_active = hour_ago;
+                    found.at_prompt.push(((dir.clone(), t.spawned_at), true));
+                }
+                // Auto mode (the default): the off-screen one closes, the visible one is spared.
+                assert_eq!(k.agents_apply_sweep(found, false, cx), 1);
+                let g = &k.agents.tabs[&dir];
+                assert_eq!(g.tabs.len(), 1);
+                assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
     /// Enter is also bound at the app root (`ConfirmKey`). The deeper Terminal binding must win
     /// and relay CR to the PTY instead of letting the root action consume the key.
     #[cfg(feature = "terminal")]
@@ -5814,6 +6683,48 @@ mod gpui_smoke_tests {
         assert!(
             routed.load(std::sync::atomic::Ordering::Relaxed),
             "TerminalEnter must shadow the root ConfirmKey binding"
+        );
+    }
+
+    /// ⌘C / ⌘V are the file tree's copy / paste at the app root; in a terminal they must be
+    /// the terminal's, or copying text out of an agent does nothing.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_copy_paste_beat_the_file_tree_bindings(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let routed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _observer = cx.update(|cx| {
+            let routed = routed.clone();
+            cx.observe_keystrokes(move |event, _window, _cx| {
+                if let Some(a) = event.action.as_ref() {
+                    routed.lock().unwrap().push(a.name().to_string());
+                }
+            })
+        });
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, window, cx| {
+                k.act_toggle_terminal(&ToggleTerminal, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, window, cx| k.focus_active_terminal(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |_k, window, cx| {
+                for key in ["cmd-c", "cmd-v"] {
+                    let stroke = gpui::Keystroke::parse(key).expect("valid keystroke");
+                    window.dispatch_keystroke(stroke, cx);
+                }
+            })
+            .unwrap();
+        let routed = routed.lock().unwrap().clone();
+        assert!(
+            routed.iter().any(|a| a.ends_with("TerminalCopy"))
+                && routed.iter().any(|a| a.ends_with("TerminalPaste")),
+            "⌘C / ⌘V in the terminal went to {routed:?}"
         );
     }
 

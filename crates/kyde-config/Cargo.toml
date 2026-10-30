@@ -9,7 +9,9 @@ description = "Kyde config + persistence: keymap, language-pack list, recent pro
 
 [dependencies]
 serde.workspace = true
-serde_json.workspace = true
+# Key order kept when Kyde edits another tool's JSON (Claude Code's settings.json).
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
 
 [lints]
 workspace = true

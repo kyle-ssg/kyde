@@ -411,6 +411,38 @@ fn build(src: &str) -> (Vec<MdBlock>, String, Vec<MdItem>) {
                     None,
                 );
             }
+            Block::Task(depth, done, spans) => {
+                let (mut text, mut runs) = spans_to_runs(&spans, t.text.into(), false);
+                // A checkbox in place of the bullet — ticked ones in the "added" green.
+                let mark = if done { "☑ " } else { "☐ " };
+                runs.insert(
+                    0,
+                    TextRun {
+                        len: mark.len(),
+                        font: mk_font(false, false, false),
+                        color: if done {
+                            t.status_added.into()
+                        } else {
+                            t.line_number.into()
+                        },
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    },
+                );
+                text.insert_str(0, mark);
+                push(
+                    &mut blocks,
+                    &mut doc,
+                    text,
+                    runs,
+                    14.0,
+                    2.0,
+                    depth as f32 * 14.0,
+                    None,
+                    None,
+                );
+            }
             Block::ListItem(depth, spans) => {
                 let (mut text, mut runs) = spans_to_runs(&spans, t.text.into(), false);
                 // Prepend a bullet as its own (line-number-colored) run.
@@ -578,7 +610,10 @@ impl Element for MarkdownElement {
                 let range = self_range.clone();
                 for b in &v.blocks[range] {
                     let lh = b.size * 1.45;
-                    let wrap = (f32::from(avail_w) - b.indent).max(40.0);
+                    // The same wrap width `prepaint` lays out at — it insets each block by
+                    // 20 px both sides — or a long paragraph measures short and the bottom of
+                    // the document gets cut off.
+                    let wrap = (f32::from(avail_w) - b.indent - 40.0).max(40.0);
                     let lines = window
                         .text_system()
                         .shape_text(b.text.clone(), b.size, &b.runs, Some(px(wrap)), None)

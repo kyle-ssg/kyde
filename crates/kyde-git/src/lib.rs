@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// GitHub issues / pull requests via the `gh` CLI (the Agents view's Issues + PRs tabs).
+pub mod github;
 /// Commit-graph lane layout for the History log.
 pub mod graph;
 
@@ -52,13 +54,22 @@ pub enum GitError {
         #[source]
         source: std::io::Error,
     },
+    /// A tool's JSON output didn't parse (e.g. `gh … --json`).
+    #[error("parsing {what}: {source}")]
+    Json {
+        /// What was being parsed.
+        what: String,
+        /// The parse error.
+        #[source]
+        source: serde_json::Error,
+    },
 }
 
 /// Result alias for every fallible `kyde-git` operation.
 pub type Result<T> = std::result::Result<T, GitError>;
 
 /// Build an [`GitError::Io`] from an operation description + the underlying I/O error.
-fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> GitError {
+pub(crate) fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> GitError {
     move |source| GitError::Io {
         operation: operation.into(),
         source,
@@ -784,6 +795,148 @@ impl Repo {
         Ok(parse_worktrees(&raw))
     }
 
+    /// Create a linked worktree at `path` on a NEW branch `branch`, forked from `base` (e.g.
+    /// `origin/main`, not tracked — the branch gets its own upstream on first push) or, when
+    /// `None`, this checkout's HEAD. Fails if the branch or the path already exists. The
+    /// checkout runs on every core (`checkout.workers=0`) — ~3× faster on a big tree
+    /// (measured 12.9 s → 4.6 s for 1.9 GB / 7.9k files).
+    pub fn add_worktree(&self, path: &Path, branch: &str, base: Option<&str>) -> Result<()> {
+        let branch = valid_ref(branch)?;
+        let path = path.to_string_lossy();
+        let mut args = vec!["-c", "checkout.workers=0", "worktree", "add"];
+        if base.is_some() {
+            args.push("--no-track");
+        }
+        args.extend(["-b", branch, &path]);
+        if let Some(base) = base {
+            args.push(valid_ref(base)?);
+        }
+        git(&self.root, &args).map(|_| ())
+    }
+
+    /// The remote's default branch as a ref like `origin/main`: `origin/HEAD`'s target, else
+    /// `origin/main`, else `origin/master`. `None` when there's no such remote branch.
+    pub fn remote_default(&self) -> Option<String> {
+        if let Ok(def) = git(&self.root, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+            let d = def.trim();
+            if !d.is_empty() && d != "origin/HEAD" {
+                return Some(d.to_string());
+            }
+        }
+        ["origin/main", "origin/master"]
+            .into_iter()
+            .find(|r| git(&self.root, &["rev-parse", "--verify", "--quiet", r]).is_ok())
+            .map(str::to_string)
+    }
+
+    /// Whether everything this branch changed since it forked from `mainline` (e.g.
+    /// `origin/main`) is already there, file for file — a squash- or rebase-merged branch,
+    /// whose own commits git would still count as unpushed.
+    pub fn landed_on(&self, mainline: &str) -> bool {
+        let Ok(base) = git(&self.root, &["merge-base", "HEAD", mainline]) else {
+            return false;
+        };
+        let Ok(files) = git(&self.root, &["diff", "--name-only", base.trim(), "HEAD"]) else {
+            return false;
+        };
+        let mut args = vec!["diff", "--quiet", mainline, "HEAD", "--"];
+        args.extend(files.lines().filter(|l| !l.is_empty()));
+        // `--quiet` exits non-zero when the files differ.
+        args.len() == 5 || git(&self.root, &args).is_ok()
+    }
+
+    /// Refresh one remote-tracking branch (`origin/main` → `git fetch origin main`). Never
+    /// prompts for credentials (it runs in the background): a fetch that would need them fails.
+    pub fn fetch_remote_branch(&self, remote_ref: &str) -> Result<()> {
+        let (remote, branch) = remote_ref
+            .split_once('/')
+            .ok_or_else(|| GitError::InvalidBranchName(remote_ref.to_string()))?;
+        let args = ["fetch", "--quiet", valid_ref(remote)?, valid_ref(branch)?];
+        let out = git_cmd(&self.root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(args)
+            .output()
+            .map_err(io_err(format!("running git {args:?}")))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(GitError::Command {
+                command: format!("{args:?}"),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+    }
+
+    /// Fast-forward the checked-out branch to `target` (`git merge --ff-only`). Never makes a
+    /// merge commit: git refuses — the error — when it can't fast-forward or local changes
+    /// are in the way.
+    pub fn fast_forward(&self, target: &str) -> Result<()> {
+        git(
+            &self.root,
+            &["merge", "--ff-only", "--quiet", valid_ref(target)?],
+        )
+        .map(|_| ())
+    }
+
+    /// Create a linked worktree at `path` on a detached HEAD (this checkout's), for a caller
+    /// that checks out its own branch next (e.g. `github::pr_checkout`). Parallel checkout,
+    /// like [`Self::add_worktree`].
+    pub fn add_worktree_detached(&self, path: &Path, at: Option<&str>) -> Result<()> {
+        let path = path.to_string_lossy();
+        let mut args = vec![
+            "-c",
+            "checkout.workers=0",
+            "worktree",
+            "add",
+            "--detach",
+            &path,
+        ];
+        if let Some(at) = at {
+            args.push(valid_ref(at)?);
+        }
+        git(&self.root, &args).map(|_| ())
+    }
+
+    /// Fetch pull request `n`'s head from `origin` into `refs/kyde/pr-<n>` (works for forks
+    /// too) and return that ref — so its worktree checks out straight at the PR. Never
+    /// prompts for credentials.
+    pub fn fetch_pr_head(&self, n: u64) -> Result<String> {
+        let local = format!("refs/kyde/pr-{n}");
+        let spec = format!("+refs/pull/{n}/head:{local}");
+        let args = ["fetch", "--quiet", "origin", spec.as_str()];
+        let out = git_cmd(&self.root)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(args)
+            .output()
+            .map_err(io_err(format!("running git {args:?}")))?;
+        if out.status.success() {
+            Ok(local)
+        } else {
+            Err(GitError::Command {
+                command: format!("git {args:?}"),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        }
+    }
+
+    /// Remove the linked worktree at `path` (`git worktree remove`, NOT forced): git
+    /// refuses while it has uncommitted changes or untracked files, so no work is lost —
+    /// that refusal is the error. The worktree's branch is kept.
+    pub fn remove_worktree(&self, path: &Path) -> Result<()> {
+        git(&self.root, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
+    }
+
+    /// Remove the linked worktree at `path` even with uncommitted or untracked changes
+    /// (`git worktree remove --force`) — those changes are LOST; committed work stays on the
+    /// branch, which is kept. Only after the user has confirmed.
+    pub fn remove_worktree_force(&self, path: &Path) -> Result<()> {
+        git(
+            &self.root,
+            &["worktree", "remove", "--force", &path.to_string_lossy()],
+        )
+        .map(|_| ())
+    }
+
     /// Switch to an existing local branch.
     pub fn checkout(&self, branch: &str) -> Result<()> {
         let branch = valid_ref(branch)?;
@@ -1249,6 +1402,18 @@ mod tests {
         assert_eq!(wts[1].branch.as_deref(), Some("agent/task"));
         assert!(wts[1].path.ends_with("wt-agent"));
 
+        // add_worktree forks a new branch; remove_worktree refuses while dirty, then
+        // removes once clean (keeping the branch).
+        let made = base.join("wt-made");
+        repo.add_worktree(&made, "worktree/made", None).unwrap();
+        assert_eq!(repo.worktrees().unwrap().len(), 3);
+        fs::write(made.join("wip.txt"), "x").unwrap();
+        assert!(repo.remove_worktree(&made).is_err(), "dirty worktree kept");
+        fs::remove_file(made.join("wip.txt")).unwrap();
+        repo.remove_worktree(&made).unwrap();
+        assert!(!made.exists());
+        assert!(repo.branches().unwrap().contains(&"worktree/made".into()));
+
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -1693,6 +1858,47 @@ mod tests {
         assert_eq!(files[0].path, PathBuf::from("b.txt"));
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A branch squash-merged into main still counts its commits as unpushed, but
+    /// `landed_on` sees every file it changed is already identical on main.
+    #[test]
+    fn landed_on_spots_a_squash_merged_branch() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-landed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        let commit = |file: &str, text: &str| {
+            fs::write(work.join(file), text).unwrap();
+            g(&work, &["add", "-A"]);
+            g(&work, &["commit", "-m", file]);
+        };
+        commit("a.txt", "1\n");
+        g(&work, &["checkout", "-b", "feature"]);
+        commit("a.txt", "2\n");
+        commit("b.txt", "new\n");
+        let repo = Repo::discover(&work).unwrap();
+        assert!(!repo.landed_on("main"), "main doesn't have the work yet");
+
+        // Squash it onto main (plus unrelated work there since).
+        g(&work, &["checkout", "main"]);
+        g(&work, &["merge", "--squash", "feature"]);
+        g(&work, &["commit", "-m", "squashed"]);
+        commit("c.txt", "other\n");
+        g(&work, &["checkout", "feature"]);
+        assert!(repo.landed_on("main"));
+
+        // New work on the branch isn't on main.
+        commit("b.txt", "more\n");
+        assert!(!repo.landed_on("main"));
+        let _ = fs::remove_dir_all(&work);
     }
 
     /// `unstage` on a newly-added file must drop it back to untracked — both in a normal

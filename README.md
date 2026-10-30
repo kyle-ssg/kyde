@@ -28,6 +28,7 @@ So Kyde is just that. A fast native commit and diff code editor — a Git client
 * **Familiar.** A tuned dark theme so it feels at home to anyone who's lived in a modern IDE.
 * **Side-by-side diff** with word-level highlighting and a center gutter to stage/revert hunks — `git add -p`, made visual.
 * **Open a folder and edit** with tree-sitter highlighting.
+* **Run AI agents.** An Agents view for driving many Claude Code agents across projects and worktrees — with everything around them in the same window: GitHub issues and pull requests, reviews, diffs, commits and cleanup.
 
 ## Stack
 
@@ -93,6 +94,32 @@ by lightness instead of hue) — switch in Settings.
 <p align="center">
   <img src="assets/screenshots/terminal.png" alt="Embedded terminal — a multi-tab PTY shell docked at the bottom, running git status + ls with live output and the shell's own git-aware prompt" width="900">
 </p>
+
+### Agents
+
+A home for AI coding agents — Claude Code by default (the start command is configurable). **Projects → worktrees → tabs**, each tab an agent.
+
+* **Projects → worktrees → tabs.** Every project's own checkout plus all of its git worktrees, whoever made them. New worktrees check out from a fresh `origin/main` in seconds, and each one runs one or more agent tabs. Drag to reorder, double-click to rename.
+* **Live status.** A dot per agent — working (blue), finished while you were away (green, "done"), **needs input** (red — a permission prompt, a question, a plan to approve). It comes from a small Claude Code hook Kyde installs (and can remove) in `~/.claude/settings.json`. A sound and a Dock bounce when an agent finishes or needs you, `⌘⌥J` to jump to it, and an optional "needs you first" ordering.
+* **Agents outlive the window.** Each agent runs in its own background host process: quit Kyde and they keep working; reopen it and they're back, scrollback and all. After a reboot, each tab resumes its exact Claude session.
+* **AI titles and context.** Rows are titled by what the agent is doing (Claude Code's own session title), with its task, latest prompt and git state one click away.
+* **GitHub built in** (via `gh`). Issues and Pull Requests tabs per project — filter (Mine / All / Unassigned; Review requested / Mine / All) and search. **Start** an issue: a worktree on a `feat/123-short-slug` branch with an agent already briefed. **Review** a PR: it's checked out in its own worktree with a review agent, and Kyde remembers, offering *Re-review* next time. Issues and PRs render like GitHub — the conversation, reviews with their inline threads (reply in place), commits, checks and files changed — and you can comment, close or reopen.
+* **Cleans up after itself.** It spots finished work — the PR merged, its changes already on main (squash-merged included), the agent quit, never used, idle, or a quick AI "is this done?" — and, as you choose (Off / Suggest / Auto), closes the tabs or lists them in a **Clean Up** window that removes finished worktrees, pre-ticking the ones where nothing would be lost.
+* **Main stays fresh.** Each project's own checkout fast-forwards to `origin/main` in the background (only on its default branch, only when clean), and agents resuming there start from it.
+* **Scriptable.** `ky agent list | read | prompt | send | keys | wait | new | kill` — see and drive agents from the command line, with or without the window open, so agents can watch and drive each other (`ky agent help`).
+* **Agents-only mode** hides the IDE around it, for when Kyde is just your agent cockpit. Keyboard shortcuts for all of it (below), scrollback in an editor window (`⌘⌥E`), and per-row display options.
+
+<p align="center">
+  <img src="assets/screenshots/agents.png" alt="Agents view — a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's agent running in its tab" width="900">
+</p>
+
+#### Why it replaced herdr for me
+
+I was running my agents in [herdr](https://herdr.dev), and it's very good at what it does: a terminal workspace built for agents. But my day isn't just terminals. Work starts in a GitHub issue or a review request, an agent's output ends up as a diff I read and commit, and finished worktrees pile up. Next to herdr that meant a browser, an IDE and a git tool open too — and remembering to tidy up.
+
+Kyde puts that whole loop in one native window. Pick an issue or a pull request; one click gives it a fresh worktree and an agent that already knows the job. See at a glance which agents are working, done or waiting on me — and hear about it. Read the diff, commit, push. The finished worktree gets cleared away. Fewer windows, nothing to remember.
+
+herdr still does things Kyde doesn't: it runs anywhere a terminal does (including on remote machines over SSH), splits panes, and works with many agent CLIs. Kyde's Agents view is macOS-first and built around Claude Code.
 
 ### Git — commit, diff, branches
 
@@ -204,6 +231,7 @@ Default shortcuts (WebStorm → VSCode):
 * New Scratch: `⌘⇧N`
 * Toggle terminal: ``⌃` ``
 * Settings: `⌘,`
+* Agents: next / previous agent `⌘⌥↓` / `⌘⌥↑`, the one that needs you `⌘⌥J`, the Nth `⌃1`–`⌃9`, next / previous tab `⌘⇧]` / `⌘⇧[`, new worktree `⌘⌥N`, rename tab `F2`, scrollback in an editor `⌘⌥E`, hide the sidebar `⌘⌥B`
 
 ## Build
 
@@ -237,7 +265,8 @@ Guarded by `perf_*` time-budget tests, headless-gpui smoke tests (render every s
 
 * **Prebuilt releases are macOS-only.** I develop on macOS and wouldn't actively test Linux/Windows, so I only ship a signed + notarized macOS build rather than binaries I can't stand behind. The code itself is cross-platform — gpui runs on all three, and Linux/Windows packaging already exists in `scripts/` (just unwired from the release). Re-enabling them is a **good first issue** for a contributor who runs those platforms. Until then, Linux/Windows users can `cargo build --release`.
 * No soft-wrap in the file editor (long lines scroll horizontally; the commit box does wrap). The editor holds a flat `String` and undo is whole-buffer snapshots — a rope-based buffer comes later for very large edits.
-* No scrollback search in the terminal.
+* No scrollback search in the terminal (open it in an editor with `⌘⌥E` and `⌘F` there).
+* Agents' needs-input / done states come from a Claude Code hook; other agent CLIs get a simpler dot based on their output.
 
 ## Contributing
 

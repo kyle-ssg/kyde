@@ -103,6 +103,61 @@ pub const ACTIONS: &[ActionDef] = &[
         vscode: "",
         label: "Pull (Update Project)",
     },
+    // The Agents view (active while it's on screen).
+    ActionDef {
+        name: "agent_next",
+        webstorm: "cmd-alt-down",
+        vscode: "cmd-alt-down",
+        label: "Next Agent",
+    },
+    ActionDef {
+        name: "agent_prev",
+        webstorm: "cmd-alt-up",
+        vscode: "cmd-alt-up",
+        label: "Previous Agent",
+    },
+    ActionDef {
+        name: "agent_attention",
+        webstorm: "cmd-alt-j",
+        vscode: "cmd-alt-j",
+        label: "Jump to the Agent That Needs You",
+    },
+    ActionDef {
+        name: "agent_tab_next",
+        webstorm: "cmd-shift-]",
+        vscode: "cmd-shift-]",
+        label: "Next Agent Tab",
+    },
+    ActionDef {
+        name: "agent_tab_prev",
+        webstorm: "cmd-shift-[",
+        vscode: "cmd-shift-[",
+        label: "Previous Agent Tab",
+    },
+    ActionDef {
+        name: "agent_new_worktree",
+        webstorm: "cmd-alt-n",
+        vscode: "cmd-alt-n",
+        label: "New Worktree",
+    },
+    ActionDef {
+        name: "agent_rename",
+        webstorm: "f2",
+        vscode: "f2",
+        label: "Rename Agent Tab",
+    },
+    ActionDef {
+        name: "agent_scrollback",
+        webstorm: "cmd-alt-e",
+        vscode: "cmd-alt-e",
+        label: "Open Scrollback in Editor",
+    },
+    ActionDef {
+        name: "agent_toggle_sidebar",
+        webstorm: "cmd-alt-b",
+        vscode: "cmd-alt-b",
+        label: "Toggle Agents Sidebar",
+    },
 ];
 
 /// A keystroke string in canonical form — modifiers in `cmd-ctrl-alt-shift-fn` order, then
