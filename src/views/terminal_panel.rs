@@ -242,6 +242,11 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ⌘W inside an Agents-view tab closes that tab, not the bottom panel's.
+        if self.agents_terminal_focused(window, cx) {
+            self.agents_close_visible_tab(cx);
+            return;
+        }
         if self.term.panel.open && !self.term.tabs.is_empty() {
             self.close_terminal_tab(self.term.panel.active, cx);
             // Keep focus on the terminal if any tab remains; otherwise the panel hid itself, so
@@ -261,6 +266,11 @@ impl Kyde {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // ⌘T inside an Agents-view tab opens another agent tab in that worktree.
+        if self.agents_terminal_focused(window, cx) {
+            self.agents_new_tab_here(cx);
+            return;
+        }
         if !self.term.panel.open {
             self.term.panel.open = true;
         }
@@ -285,6 +295,8 @@ impl Kyde {
             // each burst keeps postponing the one refresh until the output settles,
             // so the tree/status pick up terminal-made changes without refocusing.
             crate::terminal::TerminalEvent::Output => this.schedule_status_refresh(cx),
+            crate::terminal::TerminalEvent::Submitted
+            | crate::terminal::TerminalEvent::OpenScrollback => {}
         })
         .detach();
         self.term.tabs.push(view);

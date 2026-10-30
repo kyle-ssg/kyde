@@ -46,6 +46,8 @@ pub(crate) enum Divider {
     HistCommit,
     /// History view: bottom log-panel height (vertical, grows upward).
     HistPanel,
+    /// Agents view: spaces-sidebar width (horizontal).
+    AgentsSidebar,
     /// Bottom terminal panel height (vertical, grows upward). Only ever dragged when the
     /// `terminal` feature is built in (the panel doesn't exist otherwise).
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
@@ -78,6 +80,7 @@ impl Kyde {
             }
             Divider::HistCommit => self.history.commit_frac.clamp(0.15, 0.85) * hist_split_w(vw),
             Divider::HistPanel => self.history.panel_h,
+            Divider::AgentsSidebar => self.agents.sidebar_w,
             Divider::Term => {
                 #[cfg(feature = "terminal")]
                 {
@@ -110,6 +113,7 @@ impl Kyde {
             Divider::HistPanel => {
                 self.history.panel_h = size.clamp(140.0, (vh - 180.0).max(140.0));
             }
+            Divider::AgentsSidebar => self.agents.sidebar_w = size.clamp(200.0, 560.0),
             Divider::Term => {
                 #[cfg(feature = "terminal")]
                 {

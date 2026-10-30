@@ -55,7 +55,7 @@ fn windows_shell_from_comspec(comspec: Option<String>) -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn default_shell() -> String {
+pub(crate) fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
 }
 
@@ -71,17 +71,62 @@ impl EventListener for EventProxy {
     }
 }
 
+/// Where a terminal's bytes go and come from.
+enum Backend {
+    /// Its own PTY, driven by alacritty's IO thread.
+    Local {
+        notifier: Notifier,
+        /// IO-thread handle, kept for lifetime ownership. On `Drop` we send `Msg::Shutdown`
+        /// so the thread drains + exits and the PTY/child are torn down.
+        _io: std::thread::JoinHandle<(
+            EventLoop<tty::Pty, EventProxy>,
+            alacritty_terminal::event_loop::State,
+        )>,
+    },
+    /// An agent host's PTY (see `agent_host`), over its socket — it outlives this view.
+    #[cfg(unix)]
+    Host {
+        stream: std::sync::Mutex<std::os::unix::net::UnixStream>,
+    },
+}
+
+impl Backend {
+    fn write(&self, bytes: std::borrow::Cow<'static, [u8]>) {
+        match self {
+            Self::Local { notifier, .. } => notifier.notify(bytes),
+            #[cfg(unix)]
+            Self::Host { stream, .. } => {
+                let mut s = stream
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = crate::agent_host::write_frame(&mut *s, crate::agent_host::INPUT, &bytes);
+            }
+        }
+    }
+
+    fn resize(&mut self, ws: WindowSize) {
+        match self {
+            Self::Local { notifier, .. } => notifier.on_resize(ws),
+            #[cfg(unix)]
+            Self::Host { stream, .. } => {
+                let s = stream
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = crate::agent_host::write_frame(
+                    s,
+                    crate::agent_host::RESIZE,
+                    &crate::agent_host::resize_payload(ws),
+                );
+            }
+        }
+    }
+}
+
 /// One terminal tab: the grid + the PTY plumbing + render state.
 pub struct TerminalView {
     focus: FocusHandle,
     term: Arc<FairMutex<Term<EventProxy>>>,
-    notifier: Notifier,
-    /// IO-thread handle, kept for lifetime ownership. On `Drop` we send `Msg::Shutdown`
-    /// (see the `Drop` impl) so the thread drains + exits and the PTY/child are torn down.
-    _io: std::thread::JoinHandle<(
-        EventLoop<tty::Pty, EventProxy>,
-        alacritty_terminal::event_loop::State,
-    )>,
+    backend: Backend,
     /// Window/tab title as set by the shell (OSC 0/2). Falls back to "Local".
     pub title: String,
     /// Child process has exited — the tab shows a closed marker.
@@ -95,11 +140,31 @@ pub struct TerminalView {
     selecting: bool,
     /// Right-click context menu anchor (window-space), `None` = closed.
     menu_at: Option<gpui::Point<Pixels>>,
+    /// Rows the content is pushed down by bottom-anchoring (see `prepaint`), so mouse
+    /// positions map back onto the grid.
+    shift: u16,
+    /// Bottom-anchor content that hasn't filled the pane yet (agent tabs — their input box
+    /// sits at the bottom). Off for the IDE's bottom terminal panel.
+    pub anchor_bottom: bool,
+    /// The shell's process id — what runs under it (an agent) can be probed. Shared: a host
+    /// reports it in its first frame.
+    pid: Arc<std::sync::atomic::AtomicU32>,
+    /// When you last typed or pasted into it.
+    pub last_input: Option<std::time::Instant>,
 }
 
 impl TerminalView {
     pub fn new(working_dir: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
-        let (tx, mut rx) = unbounded::<AlacEvent>();
+        Self::with_env(working_dir, std::collections::HashMap::new(), cx)
+    }
+
+    /// A terminal whose shell gets `env` on top of Kyde's own environment.
+    pub fn with_env(
+        working_dir: Option<PathBuf>,
+        env: std::collections::HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (tx, rx) = unbounded::<AlacEvent>();
         let proxy = EventProxy(tx);
 
         let shell = default_shell();
@@ -107,7 +172,7 @@ impl TerminalView {
             shell: Some(Shell::new(shell, Vec::new())),
             working_directory: working_dir,
             drain_on_exit: false,
-            env: Default::default(),
+            env,
             #[cfg(target_os = "windows")]
             escape_args: true,
         };
@@ -134,14 +199,109 @@ impl TerminalView {
         // `tty::new` is safe; the PTY fd is owned by the returned Pty.
         #[allow(clippy::expect_used)]
         let pty = tty::new(&options, window_size, 0).expect("failed to spawn PTY");
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(pty.child().id()));
 
         #[allow(clippy::expect_used)]
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
             .expect("failed to create terminal event loop");
         let notifier = Notifier(event_loop.channel());
         let io = event_loop.spawn();
+        Self::pump_events(rx, cx);
+        Self::build(term, Backend::Local { notifier, _io: io }, pid, cx)
+    }
 
-        // Foreground pump: drain IO-thread events into entity updates (repaint, write-back).
+    /// Connect to agent host `id` as a viewer (for [`Self::attach`]). Fails when the host
+    /// isn't running.
+    #[cfg(unix)]
+    pub fn connect_host(
+        id: &str,
+    ) -> std::io::Result<(
+        std::os::unix::net::UnixStream,
+        std::os::unix::net::UnixStream,
+    )> {
+        use crate::agent_host as host;
+        let mut stream = std::os::unix::net::UnixStream::connect(host::sock_path(id))?;
+        host::write_frame(&mut stream, host::ATTACH, &[])?;
+        let reader = stream.try_clone()?;
+        Ok((stream, reader))
+    }
+
+    /// A view on an agent host's terminal (see `agent_host`), over a [`Self::connect_host`]
+    /// connection: its recent output is replayed, then it streams live.
+    #[cfg(unix)]
+    pub fn attach(
+        (stream, mut reader): (
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::UnixStream,
+        ),
+        cx: &mut Context<Self>,
+    ) -> Self {
+        use crate::agent_host as host;
+        let (tx, rx) = unbounded::<AlacEvent>();
+        let proxy = EventProxy(tx);
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &TermSize::new(INIT_COLS as usize, INIT_ROWS as usize),
+            proxy.clone(),
+        )));
+        let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        {
+            let (term, pid) = (term.clone(), pid.clone());
+            std::thread::spawn(move || {
+                let mut parser: alacritty_terminal::vte::ansi::Processor<
+                    alacritty_terminal::vte::ansi::StdSyncHandler,
+                > = alacritty_terminal::vte::ansi::Processor::new();
+                let mut frames = host::FrameReader::default();
+                loop {
+                    // A synchronized update left open is flushed at its deadline.
+                    let wait = parser.sync_timeout().sync_timeout().map(|d| {
+                        d.saturating_duration_since(std::time::Instant::now())
+                            .max(std::time::Duration::from_millis(1))
+                    });
+                    let _ = reader.set_read_timeout(wait);
+                    match frames.next(&mut reader) {
+                        Ok(Some((host::HELLO, json))) => {
+                            if let Ok(h) = serde_json::from_slice::<host::HostHello>(&json) {
+                                pid.store(h.pid, std::sync::atomic::Ordering::Relaxed);
+                                // Replay at the size it was drawn at.
+                                term.lock()
+                                    .resize(TermSize::new(h.cols as usize, h.rows as usize));
+                            }
+                        }
+                        Ok(Some((host::OUT, bytes))) => {
+                            parser.advance(&mut *term.lock(), &bytes);
+                            proxy.send_event(AlacEvent::Wakeup);
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            parser.stop_sync(&mut *term.lock());
+                            proxy.send_event(AlacEvent::Wakeup);
+                        }
+                        // EXIT, or the host went away: the tab closes.
+                        Err(_) => {
+                            proxy.send_event(AlacEvent::Exit);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+        Self::pump_events(rx, cx);
+        Self::build(
+            term,
+            Backend::Host {
+                stream: std::sync::Mutex::new(stream),
+            },
+            pid,
+            cx,
+        )
+    }
+
+    /// Foreground pump: drain IO-thread events into entity updates (repaint, write-back).
+    fn pump_events(
+        mut rx: futures::channel::mpsc::UnboundedReceiver<AlacEvent>,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             while let Some(ev) = rx.next().await {
                 let alive = this
@@ -153,12 +313,18 @@ impl TerminalView {
             }
         })
         .detach();
+    }
 
+    fn build(
+        term: Arc<FairMutex<Term<EventProxy>>>,
+        backend: Backend,
+        pid: Arc<std::sync::atomic::AtomicU32>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
             focus: cx.focus_handle(),
             term,
-            notifier,
-            _io: io,
+            backend,
             title: "Local".into(),
             exited: false,
             last_size: (INIT_COLS, INIT_ROWS),
@@ -166,6 +332,27 @@ impl TerminalView {
             bounds: None,
             selecting: false,
             menu_at: None,
+            shift: 0,
+            anchor_bottom: false,
+            pid,
+            last_input: None,
+        }
+    }
+
+    /// The shell's process id (0 until a host has reported it).
+    pub fn shell_pid(&self) -> u32 {
+        self.pid.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// End a hosted terminal's agent for good (closing its tab). A local terminal ends when
+    /// the view drops.
+    pub fn kill_host(&self) {
+        #[cfg(unix)]
+        if let Backend::Host { stream, .. } = &self.backend {
+            let mut s = stream
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = crate::agent_host::write_frame(&mut *s, crate::agent_host::KILL, &[]);
         }
     }
 
@@ -182,7 +369,7 @@ impl TerminalView {
             }
             AlacEvent::MouseCursorDirty => cx.notify(),
             // The emulator wants bytes written back to the PTY (query replies, etc.).
-            AlacEvent::PtyWrite(text) => self.notifier.notify(text.into_bytes()),
+            AlacEvent::PtyWrite(text) => self.backend.write(text.into_bytes().into()),
             AlacEvent::Title(t) => {
                 self.title = t;
                 cx.emit(TerminalEvent::TitleChanged);
@@ -198,7 +385,7 @@ impl TerminalView {
             }
             AlacEvent::ClipboardLoad(_, format) => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-                    self.notifier.notify(format(&text).into_bytes());
+                    self.backend.write(format(&text).into_bytes().into());
                 }
             }
             AlacEvent::ChildExit(_) | AlacEvent::Exit => {
@@ -218,10 +405,57 @@ impl TerminalView {
                     cell_width: self.cell.0 as u16,
                     cell_height: self.cell.1 as u16,
                 };
-                self.notifier.notify(format(ws).into_bytes());
+                self.backend.write(format(ws).into_bytes().into());
             }
         }
         true
+    }
+
+    /// The last `max_lines` non-blank lines of the live screen, as plain text (what the agent
+    /// last showed — fed to the cleanup's AI check).
+    pub fn tail_text(&self, max_lines: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let (rows, cols) = (grid.screen_lines(), grid.columns());
+        let mut lines: Vec<String> = (0..rows)
+            .map(|l| {
+                let row = &grid[Line(i32::try_from(l).unwrap_or(0))];
+                (0..cols)
+                    .map(|c| row[Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(max_lines);
+        lines[start..].join("\n")
+    }
+
+    /// Everything it has shown — scrollback and screen — as plain text (trailing blanks
+    /// trimmed), for reading in an editor.
+    pub fn scrollback_text(&self) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let (history, rows, cols) = (grid.history_size(), grid.screen_lines(), grid.columns());
+        let top = -i32::try_from(history).unwrap_or(0);
+        let bottom = i32::try_from(rows).unwrap_or(0);
+        let mut lines: Vec<String> = (top..bottom)
+            .map(|l| {
+                let row = &grid[Line(l)];
+                (0..cols)
+                    .map(|c| row[Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        lines.join("\n")
     }
 
     /// The widget's focus handle (so the panel can focus the active tab).
@@ -231,7 +465,7 @@ impl TerminalView {
 
     /// Write raw bytes to the PTY (typed text, pasted text, key escape sequences).
     fn write<B: Into<std::borrow::Cow<'static, [u8]>>>(&self, bytes: B) {
-        self.notifier.notify(bytes);
+        self.backend.write(bytes.into());
     }
 
     /// Feed a string to the shell as if typed (used by the screenshot harness to seed a
@@ -243,6 +477,7 @@ impl TerminalView {
     /// Relay a key's raw bytes to the PTY from an action handler (Enter / backspace / escape): jump to
     /// the live screen, write, repaint — the same steps `on_key` does for typed keys.
     fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
+        self.last_input = Some(std::time::Instant::now());
         self.term.lock().scroll_display(Scroll::Bottom);
         self.write(bytes);
         cx.notify();
@@ -258,7 +493,7 @@ impl TerminalView {
         self.term
             .lock()
             .resize(TermSize::new(cols as usize, rows as usize));
-        self.notifier.on_resize(WindowSize {
+        self.backend.resize(WindowSize {
             num_lines: rows,
             num_cols: cols,
             cell_width: cell_w as u16,
@@ -290,6 +525,7 @@ impl TerminalView {
         if let Some(bytes) = key_bytes(key, m.control, ks.key_char.as_deref()) {
             if !bytes.is_empty() {
                 // Any keystroke jumps back to the live screen (out of scrollback).
+                self.last_input = Some(std::time::Instant::now());
                 self.term.lock().scroll_display(Scroll::Bottom);
                 self.write(bytes);
                 cx.notify();
@@ -302,6 +538,7 @@ impl TerminalView {
         let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else {
             return;
         };
+        self.last_input = Some(std::time::Instant::now());
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
             self.write(b"\x1b[200~".to_vec());
@@ -358,7 +595,7 @@ impl TerminalView {
         let off = t.grid().display_offset() as i32;
         drop(t);
         let col_f = (lx / cw).floor();
-        let row = (ly / ch).floor().max(0.0) as i32;
+        let row = ((ly / ch).floor() as i32 - i32::from(self.shift)).max(0);
         let col = (col_f as i32).clamp(0, (cols - 1).max(0)) as usize;
         let side = if lx - col_f * cw < cw / 2.0 {
             Side::Left
@@ -472,7 +709,19 @@ impl Drop for TerminalView {
         // Closing a tab drops this entity. Tell the IO thread to shut down so it drains +
         // exits, closes the PTY (the child shell gets SIGHUP), and frees the grid/scrollback.
         // Without this the thread keeps running detached — leaking MBs of grid + a zombie shell.
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        match &self.backend {
+            Backend::Local { notifier, .. } => {
+                let _ = notifier.0.send(Msg::Shutdown);
+            }
+            // A hosted terminal keeps running; just hang up (the reader thread ends).
+            #[cfg(unix)]
+            Backend::Host { stream, .. } => {
+                let s = stream
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let _ = s.shutdown(std::net::Shutdown::Both);
+            }
+        }
     }
 }
 
@@ -483,11 +732,15 @@ pub enum TerminalEvent {
     CloseRequested,
     /// The shell produced output — files may have changed (subscriber debounces).
     Output,
+    /// Enter was pressed — a command or prompt was submitted.
+    Submitted,
+    /// "Open Scrollback in Editor" from its menu.
+    OpenScrollback,
 }
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
 impl Render for TerminalView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
         let menu_at = self.menu_at;
         div()
@@ -505,6 +758,7 @@ impl Render for TerminalView {
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
             .on_action(cx.listener(|this, _: &crate::TerminalEnter, _w, cx| {
                 this.send_key(b"\r".to_vec(), cx);
+                cx.emit(TerminalEvent::Submitted);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
                 this.send_key(vec![0x7f], cx);
@@ -512,11 +766,18 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
                 this.send_key(vec![0x1b], cx);
             }))
-            // Pin the mono font + editor size so the cell metrics the element measures (the
+            // ⌘C / ⌘V are the file tree's copy / paste at the app root; here they're the
+            // terminal's (selection → clipboard, clipboard → the shell).
+            .on_action(cx.listener(|this, _: &crate::TerminalCopy, _w, cx| {
+                this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::TerminalPaste, _w, cx| this.paste(cx)))
+            // Pin the mono font + a fixed size so the cell metrics the element measures (the
             // `M` advance) match the glyphs it actually shapes — otherwise the cursor, placed
             // at `col × cell_w`, drifts off the text (it inherits a proportional UI font).
+            // The UI size: dense like a real terminal, and the same as the Agents sidebar.
             .font_family(theme::font::FAMILY)
-            .text_size(px(theme::get().editor_font_size))
+            .text_size(px(theme::get().ui_font_size))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
@@ -563,7 +824,7 @@ impl Render for TerminalView {
                 this.scroll_lines(lines, cx);
             }))
             .child(TerminalElement { view })
-            .children(menu_at.map(|at| self.render_context_menu(at, cx)))
+            .children(menu_at.map(|at| self.render_context_menu(at, window, cx)))
     }
 }
 
@@ -572,81 +833,121 @@ impl TerminalView {
     fn render_context_menu(
         &self,
         at: gpui::Point<Pixels>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = theme::get();
-        let item = |label: &'static str| {
+        let has_selection = self
+            .term
+            .lock()
+            .selection_to_string()
+            .is_some_and(|s| !s.is_empty());
+        // A row: its label, the shortcut (muted) on the right; greyed out when `enabled` is off.
+        let item = |label: &'static str, key: &'static str, enabled: bool| {
             div()
                 .id(label)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_6()
                 .px_3()
                 .py_1()
                 .text_size(px(13.0))
-                .text_color(t.text)
                 .rounded_md()
-                .cursor_pointer()
-                .hover(|d| d.bg(t.selected_bg))
-                .child(label)
+                .text_color(if enabled { t.text } else { t.line_number })
+                .when(enabled, |d| {
+                    d.cursor_pointer().hover(|d| d.bg(t.selected_bg))
+                })
+                .child(div().flex_1().child(label))
+                .child(div().text_color(t.line_number).child(key))
         };
-        // Full-window backdrop: any click closes the menu (and doesn't fall through).
-        div()
-            .absolute()
-            .top(px(0.0))
-            .left(px(0.0))
-            .size_full()
-            .on_mouse_down(
+        let close = |this: &mut Self, cx: &mut Context<Self>| {
+            this.menu_at = None;
+            cx.notify();
+        };
+        let panel = div()
+            .flex()
+            .flex_col()
+            .min_w(px(220.0))
+            .p_1()
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded_md()
+            .shadow_md()
+            .font_family(theme::font::UI_FAMILY)
+            .child(item("Copy", "⌘C", has_selection).when(has_selection, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        close(this, cx);
+                        this.copy_selection(cx);
+                    }),
+                )
+            }))
+            .child(item("Paste", "⌘V", true).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| {
-                    this.menu_at = None;
-                    cx.notify();
+                cx.listener(move |this, _e, _w, cx| {
+                    cx.stop_propagation();
+                    close(this, cx);
+                    this.paste(cx);
                 }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _e, _w, cx| {
-                    this.menu_at = None;
-                    cx.notify();
-                }),
-            )
+            ))
             .child(
-                div()
-                    .absolute()
-                    .left(at.x)
-                    .top(at.y)
-                    .flex()
-                    .flex_col()
-                    .min_w(px(160.0))
-                    .p_1()
-                    .bg(t.panel_bg)
-                    .border_1()
-                    .border_color(t.divider)
-                    .rounded_md()
-                    .font_family(theme::font::UI_FAMILY)
-                    .child(item("Paste").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.menu_at = None;
-                            this.paste(cx);
-                        }),
-                    ))
-                    .child(item("Clear Screen").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.menu_at = None;
-                            this.clear_screen(cx);
-                        }),
-                    ))
-                    .child(item("Close").on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.menu_at = None;
-                            // Tabs live on Kyde — ask it to close this one.
-                            cx.emit(TerminalEvent::CloseRequested);
-                        }),
-                    )),
+                item("Open Scrollback in Editor", "⌥⌘E", true).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        close(this, cx);
+                        cx.emit(TerminalEvent::OpenScrollback);
+                    }),
+                ),
             )
+            .child(item("Clear Screen", "", true).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    cx.stop_propagation();
+                    close(this, cx);
+                    this.clear_screen(cx);
+                }),
+            ))
+            .child(item("Close", "", true).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    cx.stop_propagation();
+                    close(this, cx);
+                    // Tabs live on Kyde — ask it to close this one.
+                    cx.emit(TerminalEvent::CloseRequested);
+                }),
+            ));
+        // Drawn over everything (not clipped by the pane), at the cursor — flipped / nudged
+        // back inside the window near an edge — over a window-wide backdrop: any click
+        // outside closes it.
+        let viewport = window.viewport_size();
+        gpui::deferred(
+            gpui::anchored().position(point(px(0.0), px(0.0))).child(
+                div()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| close(this, cx)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _e, _w, cx| close(this, cx)),
+                    )
+                    .child(
+                        gpui::anchored()
+                            .position(at)
+                            .snap_to_window_with_margin(px(8.0))
+                            .child(panel),
+                    ),
+            ),
+        )
+        .with_priority(1)
     }
 }
 
@@ -663,6 +964,8 @@ struct Prepaint {
     /// Block/bar cursor quad, if visible (not in scrollback, not hidden).
     cursor: Option<gpui::PaintQuad>,
     line_height: Pixels,
+    /// Rows to push everything down by (bottom-anchoring).
+    shift: f32,
 }
 
 impl IntoElement for TerminalElement {
@@ -746,7 +1049,10 @@ impl Element for TerminalElement {
         let selection = content.selection;
         let sel_bg: Hsla = theme::get().selected_bg.into();
         let mut lines: Vec<ShapedLine> = Vec::new();
-        let mut bg_quads: Vec<gpui::PaintQuad> = Vec::new();
+        // (x, row, colour) of cells with a background — laid out once the shift is known.
+        let mut cell_bgs: Vec<(Pixels, f32, Hsla)> = Vec::new();
+        // Last row with anything on it, for bottom-anchoring.
+        let mut last_used: i32 = -1;
         let mut base_line: Option<i32> = None;
         let mut cur_row: Vec<(char, Hsla)> = Vec::new();
         let mut cur_line_idx: i32 = i32::MIN;
@@ -809,26 +1115,47 @@ impl Element for TerminalElement {
             let row_idx = (line - base_line.unwrap_or(line)) as f32;
             // Selection tint wins over the cell's own bg (pushed last → painted on top).
             let selected = selection.as_ref().is_some_and(|s| s.contains(cell.point));
+            let x = bounds.left() + px(col as f32 * cell_w_f);
             if let Some(bg) = bg {
-                let x = bounds.left() + px(col as f32 * cell_w_f);
-                let y = bounds.top() + line_height * row_idx;
-                bg_quads.push(fill(
-                    Bounds::new(point(x, y), gpui::size(px(cell_w_f), line_height)),
-                    bg,
-                ));
+                cell_bgs.push((x, row_idx, bg));
             }
             if selected {
-                let x = bounds.left() + px(col as f32 * cell_w_f);
-                let y = bounds.top() + line_height * row_idx;
-                bg_quads.push(fill(
-                    Bounds::new(point(x, y), gpui::size(px(cell_w_f), line_height)),
-                    sel_bg,
-                ));
+                cell_bgs.push((x, row_idx, sel_bg));
             }
             let ch = cell.c;
+            if (ch != ' ' && ch != '\0') || bg.is_some() {
+                last_used = last_used.max(line - base_line.unwrap_or(line));
+            }
             cur_row.push((if ch == '\0' { ' ' } else { ch }, fg));
         }
         flush_row(&mut lines, &mut cur_row);
+
+        // Bottom-anchor a terminal that hasn't filled its pane yet — live screen, no
+        // scrollback, not a fullscreen (alt-screen) app: push the content down so the prompt
+        // or an agent's input box sits at the bottom, herdr-style, rather than floating over
+        // an empty lower half. Once output fills the pane the shift is naturally zero.
+        let cursor_row = content.cursor.point.line.0 - base_line.unwrap_or(0);
+        let anchor = view.anchor_bottom
+            && content.display_offset == 0
+            && term.grid().history_size() == 0
+            && !content.mode.contains(TermMode::ALT_SCREEN);
+        let shift_rows = if anchor {
+            (i32::from(rows) - (last_used.max(cursor_row) + 1)).max(0)
+        } else {
+            0
+        };
+        #[allow(clippy::cast_precision_loss)] // a row count, far below f32's exact range
+        let shift = shift_rows as f32;
+        let bg_quads: Vec<gpui::PaintQuad> = cell_bgs
+            .into_iter()
+            .map(|(x, row, color)| {
+                let y = bounds.top() + line_height * (row + shift);
+                fill(
+                    Bounds::new(point(x, y), gpui::size(px(cell_w_f), line_height)),
+                    color,
+                )
+            })
+            .collect();
 
         // Block cursor — only on the live screen (no scrollback offset) and when shown.
         let cursor = if content.display_offset == 0 && content.cursor.shape != CursorShape::Hidden {
@@ -837,7 +1164,7 @@ impl Element for TerminalElement {
             let col = content.cursor.point.column.0;
             if row >= 0 && (row as u16) < rows {
                 let x = bounds.left() + px(col as f32 * cell_w_f);
-                let y = bounds.top() + line_height * row as f32;
+                let y = bounds.top() + line_height * (row as f32 + shift);
                 let focused = view.focus.is_focused(window);
                 let color: Hsla = theme::get().primary.into();
                 let rect = match content.cursor.shape {
@@ -859,11 +1186,14 @@ impl Element for TerminalElement {
         };
 
         drop(term);
+        let shift_u16 = u16::try_from(shift_rows).unwrap_or(0);
+        self.view.update(cx, |v, _| v.shift = shift_u16);
         Prepaint {
             lines,
             bg_quads,
             cursor,
             line_height,
+            shift,
         }
     }
 
@@ -886,7 +1216,7 @@ impl Element for TerminalElement {
         }
         let lh = pre.line_height;
         for (i, line) in pre.lines.iter().enumerate() {
-            let origin = point(bounds.left(), bounds.top() + lh * i as f32);
+            let origin = point(bounds.left(), bounds.top() + lh * (i as f32 + pre.shift));
             let _ = line.paint(origin, lh, window, cx);
         }
         self.view.update(cx, |v, _| v.bounds = Some(bounds));

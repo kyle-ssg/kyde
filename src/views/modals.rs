@@ -448,6 +448,9 @@ impl Kyde {
             ModalKind::LocalHistory => &mut self.local_history_win,
             ModalKind::ClearLocalHistory => &mut self.clear_lh_win,
             ModalKind::Changelog => &mut self.changelog_win,
+            ModalKind::RemoveWorktree => &mut self.remove_wt_win,
+            ModalKind::Cleanup => &mut self.cleanup_win,
+            ModalKind::Scrollback => &mut self.scrollback_win,
         }
     }
 

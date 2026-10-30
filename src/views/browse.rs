@@ -476,7 +476,7 @@ impl Kyde {
         .text_color(t.text)
         .font_family(ui)
         // A touch larger than the editor/code size for readability.
-        .text_size(px(theme::get().ui_font_size + 3.0))
+        .text_size(px(theme::get().tree_font_size()))
         // Catch-all for Finder files dropped on the tree's EMPTY area (below the rows):
         // they go to the repo root. Drops onto a row are handled per-row (with that
         // row highlighted) — see `on_ext_drop` above (issue #67). No pane-wide tint here,

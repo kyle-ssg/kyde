@@ -9,7 +9,8 @@ impl Kyde {
     /// The toolbar, for a project that's a git repo (hidden on the landing view and for a
     /// plain folder — issue #66).
     pub(crate) fn render_git_toolbar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if self.repo_root.is_none() || !self.is_git {
+        // Hidden in the Agents view: these act on the open project, not the agent worktree.
+        if self.repo_root.is_none() || !self.is_git || self.mode == Mode::Agents {
             return None;
         }
         let shortcut = |action: &str| {

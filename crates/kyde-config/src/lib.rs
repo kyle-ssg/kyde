@@ -4,8 +4,13 @@
 //! - [`keymap`] — the keybinding preset + per-action overrides,
 //! - [`plugins`] — the installed language-pack list,
 //! - [`projects`] — the recent-projects list for the landing view,
-//! - [`history`] — the local-history settings (enabled/retention/throttle).
+//! - [`history`] — the local-history settings (enabled/retention/throttle),
+//! - [`agents`] — the Agents view's spaces/worktrees + start command + tab cleanup.
 
+/// Agents-view layout + start command + idle-tab cleanup ([`agents::AgentsCfg`]).
+pub mod agents;
+/// The Claude Code hook that reports agent state to Kyde ([`claude_hooks::install`]).
+pub mod claude_hooks;
 /// Local-history settings ([`history::HistoryCfg`]).
 pub mod history;
 /// Keybinding preset + overrides ([`keymap::Keymap`]).

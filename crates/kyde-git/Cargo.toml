@@ -10,6 +10,9 @@ description = "Git operations for Kyde — shells out to the git binary. Pure, n
 [dependencies]
 # Typed errors for a library crate (rule: libs use thiserror, never anyhow).
 thiserror.workspace = true
+# `github` parses `gh … --json` output.
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

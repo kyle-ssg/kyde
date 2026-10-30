@@ -59,6 +59,7 @@ impl Kyde {
             SettingsSection::Keymap => self.settings_keymap(cx),
             SettingsSection::LanguagePacks => self.render_plugins_body(cx),
             SettingsSection::LocalHistory => self.settings_local_history(cx),
+            SettingsSection::Agents => self.settings_agents(cx),
         };
 
         div()
@@ -356,6 +357,488 @@ impl Kyde {
                             ),
                     ),
                 )
+            })
+            .into_any_element()
+    }
+
+    /// Agents section: the default start command (each space can override it from its header
+    /// in the Agents view) and the idle-tab cleanup policy. Persists as you edit.
+    fn settings_agents(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let cfg = &self.agents.cfg;
+        let (mode, rules, hours) = (cfg.cleanup_mode, cfg.cleanup, cfg.idle_hours);
+        // A `[−] value [+]` stepper writing into the config (clamped by `apply`).
+        let stepper = |id: &'static str,
+                       value: u32,
+                       apply: fn(&mut kyde_config::agents::AgentsCfg, i64),
+                       cx: &mut Context<Self>| {
+            let btn = |bid: SharedString, sym: &'static str, delta: i64, cx: &mut Context<Self>| {
+                div()
+                    .id(bid)
+                    .size(px(22.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(t.divider)
+                    .text_color(t.text)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.bg_mid))
+                    .child(sym)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            apply(&mut this.agents.cfg, delta);
+                            this.agents_save(cx);
+                            cx.notify();
+                        }),
+                    )
+            };
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(btn(format!("{id}-dec").into(), "−", -1, cx))
+                .child(
+                    div()
+                        .w(px(36.0))
+                        .flex()
+                        .justify_center()
+                        .text_color(t.text)
+                        .child(SharedString::from(value.to_string())),
+                )
+                .child(btn(format!("{id}-inc").into(), "+", 1, cx))
+        };
+        // One cleanup rule: a checkbox, its label, and maybe a stepper / a note.
+        let rule = |id: &'static str,
+                    on: bool,
+                    label: &'static str,
+                    toggle: fn(&mut kyde_config::agents::CleanupRules),
+                    cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(t.text)
+                .child(crate::checkbox_box(on))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        toggle(&mut this.agents.cfg.cleanup);
+                        this.agents_save(cx);
+                        cx.notify();
+                    }),
+                )
+        };
+        // An on/off setting of the Agents view.
+        let toggle = |id: &'static str,
+                      on: bool,
+                      label: &'static str,
+                      flip: fn(&mut kyde_config::agents::AgentsCfg),
+                      cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(t.text)
+                .child(crate::checkbox_box(on))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        let hooks = this.agents.cfg.claude_hooks;
+                        flip(&mut this.agents.cfg);
+                        if this.agents.cfg.claude_hooks != hooks {
+                            this.agents.hooks_synced = false;
+                            this.agents_sync_hooks(cx);
+                        }
+                        this.agents_save(cx);
+                        cx.notify();
+                    }),
+                )
+        };
+        let row = cfg.row;
+        // One prompt template: its label, a reset to the standard text, and the editor.
+        let prompt = |id: &'static str,
+                      label: &'static str,
+                      editor: gpui::Entity<crate::CodeEditor>,
+                      standard: &'static str,
+                      cx: &mut Context<Self>| {
+            let ed = editor.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_color(t.secondary_text).child(label))
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .id(id)
+                                .text_size(px(t.ui_font_size - 1.0))
+                                .text_color(t.line_number)
+                                .cursor_pointer()
+                                .hover(|d| d.text_color(t.text))
+                                .child("Reset to standard")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |_this, _e, _w, cx| {
+                                        // The editor's change saves it (as "standard").
+                                        ed.update(cx, |e, cx| {
+                                            e.set_content(
+                                                standard.to_string(),
+                                                crate::Lang::PlainText,
+                                                cx,
+                                            );
+                                        });
+                                    }),
+                                ),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(104.0))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(t.divider)
+                        .bg(t.main_bg)
+                        .child(editor),
+                )
+        };
+        let mode_pill = |id: &'static str,
+                         label: &'static str,
+                         m: kyde_config::agents::CleanupMode,
+                         cx: &mut Context<Self>| {
+            crate::tab_pill(id, label, 0, mode == m).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    this.agents.cfg.cleanup_mode = m;
+                    this.agents_save(cx);
+                    cx.notify();
+                }),
+            )
+        };
+        let mode_note = match mode {
+            kyde_config::agents::CleanupMode::Off => "Tabs stay open until you close them.",
+            kyde_config::agents::CleanupMode::Suggest => {
+                "Finished tabs get a ✓ — close them from the Clean Up window (the eraser)."
+            }
+            kyde_config::agents::CleanupMode::Auto => {
+                "Finished tabs close on their own (checked every minute)."
+            }
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child(settings_heading("Agents"))
+            .child(
+                div().text_color(t.line_number).child(
+                    "Projects → worktrees → tabs. Each new tab starts with the start command.",
+                ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(160.0))
+                            .text_color(t.secondary_text)
+                            .child("Start command"),
+                    )
+                    .child(
+                        div()
+                            .w(px(260.0))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(t.divider)
+                            .bg(t.main_bg)
+                            .font_family(theme::font::FAMILY)
+                            .child(self.agents.default_cmd_input.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("agents-only")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .text_color(t.text)
+                    .child(crate::checkbox_box(cfg.agents_only))
+                    .child("Agents-only window — hide the IDE rail, toolbars and status bar")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| {
+                            let on = !this.agents.cfg.agents_only;
+                            this.agents_set_only(on, cx);
+                        }),
+                    ),
+            )
+            .child(
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Prompts"),
+            )
+            .child(div().text_color(t.line_number).child(
+                "What an agent is told when you Start an issue or Review a pull request. \\
+                 Placeholders: {number} {title} {url} {branch} {base} {author}.",
+            ))
+            .child(prompt(
+                "prompt-issue-reset",
+                "Start an issue",
+                self.agents.issue_prompt_input.clone(),
+                kyde_config::agents::ISSUE_PROMPT,
+                cx,
+            ))
+            .child(prompt(
+                "prompt-review-reset",
+                "Review a pull request",
+                self.agents.review_prompt_input.clone(),
+                kyde_config::agents::REVIEW_PROMPT,
+                cx,
+            ))
+            .child(prompt(
+                "prompt-rereview-reset",
+                "Re-review a pull request",
+                self.agents.rereview_prompt_input.clone(),
+                kyde_config::agents::REREVIEW_PROMPT,
+                cx,
+            ))
+            .child(
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Alerts"),
+            )
+            .child(toggle(
+                "agents-hooks",
+                cfg.claude_hooks,
+                "Claude Code hook — shows when an agent needs input, and resumes the exact session",
+                |c| c.claude_hooks = !c.claude_hooks,
+                cx,
+            ))
+            .child(div().pl(px(26.0)).text_color(t.line_number).child(
+                "Adds a small hook to ~/.claude/settings.json that writes each Kyde agent's \
+                 state to ~/.kyde/agents. It does nothing outside Kyde's tabs.",
+            ))
+            .child(toggle(
+                "agents-sound",
+                cfg.sound,
+                "Play a sound when an agent finishes or needs input",
+                |c| c.sound = !c.sound,
+                cx,
+            ))
+            .child(toggle(
+                "agents-dock",
+                cfg.dock_alerts,
+                "Bounce the Dock icon while Kyde is in the background",
+                |c| c.dock_alerts = !c.dock_alerts,
+                cx,
+            ))
+            .child(
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Sidebar"),
+            )
+            .child(toggle(
+                "agents-sort",
+                cfg.sort_attention,
+                "List what needs you first (needs input, done, working, idle) — turns off drag to reorder",
+                |c| c.sort_attention = !c.sort_attention,
+                cx,
+            ))
+            .child(
+                div()
+                    .text_color(t.secondary_text)
+                    .child("Each worktree row shows:"),
+            )
+            .child(toggle(
+                "agents-row-title",
+                row.ai_title,
+                "Its agent's AI title (else the folder / branch name)",
+                |c| c.row.ai_title = !c.row.ai_title,
+                cx,
+            ))
+            .child(toggle(
+                "agents-row-status",
+                row.status,
+                "What the agent needs — \"needs input\", \"done\"",
+                |c| c.row.status = !c.row.status,
+                cx,
+            ))
+            .child(toggle(
+                "agents-row-git",
+                row.git,
+                "Git badges — changes, commits to push, clean",
+                |c| c.row.git = !c.row.git,
+                cx,
+            ))
+            .child(toggle(
+                "agents-row-activity",
+                row.activity,
+                "How long since its agent last did anything",
+                |c| c.row.activity = !c.row.activity,
+                cx,
+            ))
+            .child(toggle(
+                "agents-single-tab",
+                cfg.hide_single_tab,
+                "Hide the tab strip while a worktree has one tab",
+                |c| c.hide_single_tab = !c.hide_single_tab,
+                cx,
+            ))
+            .child(
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("Tab cleanup"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(mode_pill(
+                        "cleanup-off",
+                        "Off",
+                        kyde_config::agents::CleanupMode::Off,
+                        cx,
+                    ))
+                    .child(mode_pill(
+                        "cleanup-suggest",
+                        "Suggest",
+                        kyde_config::agents::CleanupMode::Suggest,
+                        cx,
+                    ))
+                    .child(mode_pill(
+                        "cleanup-auto",
+                        "Auto",
+                        kyde_config::agents::CleanupMode::Auto,
+                        cx,
+                    )),
+            )
+            .child(div().text_color(t.line_number).child(mode_note))
+            .when(mode != kyde_config::agents::CleanupMode::Off, |d| {
+                d.child(
+                    div()
+                        .text_color(t.secondary_text)
+                        .child("A tab is finished when:"),
+                )
+                .child(rule(
+                    "rule-unused",
+                    rules.unused,
+                    "It was never used — nothing typed into it (an auto-started agent)",
+                    |r| r.unused = !r.unused,
+                    cx,
+                ))
+                .child(rule(
+                    "rule-quit",
+                    rules.agent_quit,
+                    "Its agent has quit — only a shell prompt is left",
+                    |r| r.agent_quit = !r.agent_quit,
+                    cx,
+                ))
+                .child(rule(
+                    "rule-merged",
+                    rules.merged,
+                    "Its pull request is merged",
+                    |r| r.merged = !r.merged,
+                    cx,
+                ))
+                .child(rule(
+                    "rule-ai",
+                    rules.ai_done,
+                    "An AI check says its work is done",
+                    |r| r.ai_done = !r.ai_done,
+                    cx,
+                ))
+                .child(div().pl(px(26.0)).text_color(t.line_number).child(
+                    "`claude -p` on Haiku reads its title, prompts, git state and last screen \
+                         — asked of quiet tabs, and again only after new output.",
+                ))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(rule(
+                            "rule-idle",
+                            rules.idle,
+                            "Idle for",
+                            |r| r.idle = !r.idle,
+                            cx,
+                        ))
+                        .child(stepper(
+                            "idle-hours",
+                            hours,
+                            |c, d| {
+                                c.idle_hours =
+                                    u32::try_from((i64::from(c.idle_hours) + d).clamp(1, 720))
+                                        .unwrap_or(1);
+                            },
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .text_color(t.text)
+                                .child("hours, with a clean worktree"),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(t.secondary_text)
+                                .child("…once it's been quiet for"),
+                        )
+                        .child(stepper(
+                            "quiet-mins",
+                            rules.quiet_mins,
+                            |c, d| {
+                                c.cleanup.quiet_mins = u32::try_from(
+                                    (i64::from(c.cleanup.quiet_mins) + d).clamp(1, 240),
+                                )
+                                .unwrap_or(1);
+                            },
+                            cx,
+                        ))
+                        .child(div().text_color(t.secondary_text).child("minutes")),
+                )
+                .child(div().text_color(t.line_number).child(
+                    "The tab on screen and output you haven't seen are never closed. A closed \
+                         agent tab's Claude session can be resumed.",
+                ))
             })
             .into_any_element()
     }
@@ -888,6 +1371,20 @@ fn keymap_groups() -> Vec<(&'static str, Vec<&'static str>)> {
             vec!["save", "new_scratch", "sort_lines", "sort_keys"],
         ),
         ("Git", vec!["mode_commit", "commit", "push", "pull"]),
+        (
+            "Agents",
+            vec![
+                "agent_next",
+                "agent_prev",
+                "agent_attention",
+                "agent_tab_next",
+                "agent_tab_prev",
+                "agent_new_worktree",
+                "agent_rename",
+                "agent_scrollback",
+                "agent_toggle_sidebar",
+            ],
+        ),
         ("General", vec!["open_keymap"]),
     ];
     let other: Vec<&'static str> = keymap::ACTIONS

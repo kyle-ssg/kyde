@@ -142,6 +142,9 @@ futures.workspace = true
 # exactly like the language packs. `futures` provides the wakeup channel from the PTY
 # read thread back to the gpui foreground.
 alacritty_terminal = { version = "0.26.0", optional = true }
+# The agent hosts (see src/agent_host.rs): detach, signals, socket hand-over. Already in the
+# tree via alacritty; terminal-only.
+libc = { version = "0.2", optional = true }
 
 # Language packs — one feature per pack. A pack's feature pulls in its grammar
 # crate(s); the matching match arms in highlight.rs are `#[cfg]`-gated to the
@@ -188,7 +191,7 @@ full = [
 # Embedded multi-tab terminal panel. Pulls alacritty's engine + the futures channel
 # used to wake the UI on new PTY output. Drop with `--no-default-features` (or omit
 # `terminal`) to ship a build with no terminal — ~2MB lighter, faster compile.
-terminal = ["dep:alacritty_terminal"]
+terminal = ["dep:alacritty_terminal", "dep:libc"]
 # Remote http/https images in the Markdown preview. Deliberately NOT in `full` —
 # it's a networking concern, not a language pack, and adds a TLS stack. Local-file
 # images work without it. Build with: `cargo build --features remote-images`.

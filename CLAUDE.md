@@ -36,6 +36,13 @@ feel. No web, no Electron, no React.
   unregistered path renders as NOTHING, silently — this has bitten us in QA. Icons are
   Lucide SVGs (MIT) in `assets/icons/`, drawn via `svg().path(..)` with `stroke="currentColor"`
   so `.text_color` tints them.
+- **Agent tabs live in agent hosts** (`src/agent_host.rs`): each runs in a detached
+  `kyde --agent-host` process that owns its PTY, so agents survive quitting Kyde (relaunch
+  reattaches; closing a tab kills its host). `ky agent …` (`src/agent_cli.rs`) drives them
+  over the same sockets. Their live state comes from a Claude Code hook Kyde installs in
+  `~/.claude/settings.json` (`kyde-config::claude_hooks`). Tests run tabs locally
+  (`agents::hosted`). Build the slim binary LAST before launching — the zero-feature build
+  writes the same `target/debug/kyde`.
 - **Never run git on the UI thread.** `refresh` reads a `RepoSnapshot` on a background
   thread. Same for any store/network IO (local-history writes, release feeds).
 - **Menu availability is computed at menu-OPEN, never in the render arm** — an open menu
@@ -87,7 +94,7 @@ divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 # glue, not a reusable component. Everything reusable is the kyde-ui crate.
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
-branch  browse  changelog  commit  compare  diff_view  file_ops  find  finder  history
+agents  branch  browse  changelog  commit  compare  diff_view  file_ops  find  finder  history
 local_history  merge  modals  notifications  onboarding  projects_view  push  rollback
 settings  tabs  terminal_panel  worktree
 
@@ -107,7 +114,7 @@ kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap, plus the changelog feed
               (`release_notes`/`parse_releases`). (thiserror: UpdateError, serde_json)
-kyde-config   keymap + plugins + projects + history cfg: persistence (JSON, XDG). (serde)
+kyde-config   keymap + plugins + projects + history + agents cfg: persistence (JSON, XDG). (serde)
 kyde-local-history  per-project snapshot store: content-addressed blobs + append-only
               events.jsonl journal, prune/GC. (sha2)
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
