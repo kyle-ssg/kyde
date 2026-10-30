@@ -3742,16 +3742,19 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // its worktrees, each running a harmless "agent" (a git log) — the first worktree on
         // screen.
         "agents" => {
+            // Real paths, as git lists them (a symlinked fixture dir would show twice).
+            let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
                 .map(PathBuf::from)
                 .ok()
                 .or_else(|| view.repo_root.clone())
+                .map(real)
                 .unwrap_or_default();
             let wts: Vec<PathBuf> = std::env::var("KYDE_SHOT_WORKTREES")
                 .unwrap_or_default()
                 .split(':')
                 .filter(|s| !s.is_empty())
-                .map(PathBuf::from)
+                .map(|s| real(PathBuf::from(s)))
                 .collect();
             view.agents.cfg.setup_done = true;
             view.agents.cfg.command = "git --no-pager log --oneline --graph --decorate -16".into();

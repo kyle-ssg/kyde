@@ -222,9 +222,8 @@ all | agents)
     git -C "$AGENTS_REPO" config user.email "shot@example.com"
     git -C "$AGENTS_REPO" config user.name "Kyde Screenshots"
     git -C "$AGENTS_REPO" config commit.gpgsign false
-    # On `main`, no remote: the rows and the agent's git log read like a normal checkout.
+    # On `main`: the rows and the agent's git log read like a normal checkout.
     git -C "$AGENTS_REPO" checkout -qB main
-    git -C "$AGENTS_REPO" remote remove origin
     WT1="$AG/kyde-ease-lerp"
     WT2="$AG/kyde-find-word"
     git -C "$AGENTS_REPO" worktree add -q -b feat/ease-lerp "$WT1"
@@ -265,6 +264,8 @@ shoot() {
     fi
     focus_only_kyde "$pid" # Kyde frontmost + every other app hidden → nothing else in frame
     sleep 1  # let the hide settle + async layout / modal open / first paint settle
+    # The agents' dots settle from "working" (fresh output) to idle / done.
+    if [ "$name" = agents ]; then sleep 2; fi
 
     # Fix the capture target now the window exists (window id for full-bleed; largest-window
     # rect for a modal-over-main shot).
