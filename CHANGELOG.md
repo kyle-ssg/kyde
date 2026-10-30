@@ -14,6 +14,13 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.8.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.7.0...kyde-v2.8.0) (2026-10-30)
+
+
+### Features
+
+* **agents:** an Agents view for Claude Code — projects, worktrees, GitHub, agents that outlive Kyde ([#113](https://github.com/kyle-ssg/kyde/issues/113)) ([a8accec](https://github.com/kyle-ssg/kyde/commit/a8accecc998d46fa7d00f5c4983fe58b46f15050))
+
 ## [2.7.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.6.0...kyde-v2.7.0) (2026-10-14)
 
 
