@@ -25,6 +25,23 @@ use std::time::Duration;
 pub(crate) const VERSION: u32 = 1;
 /// Output a host keeps for a reattaching viewer.
 const RING_CAP: usize = 4 * 1024 * 1024;
+/// What a Claude Code session exports to the commands it runs. An agent host started from
+/// inside one (Kyde launched from a Claude Code terminal, or an agent's own `ky agent new`)
+/// must not hand these on: the agent would think it's that session's child — and, for one,
+/// stop saving its transcript (so it couldn't be resumed).
+const PARENT_SESSION_VARS: [&str; 10] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+];
+
 /// Largest frame accepted — anything bigger is a broken stream.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 
@@ -198,7 +215,11 @@ pub(crate) fn spawn(spec: &HostSpec) -> io::Result<()> {
     }
     let log = std::fs::File::create(dir.join(format!("{}.log", spec.id)))?;
     let json = serde_json::to_string(spec).map_err(io::Error::other)?;
-    let mut child = std::process::Command::new(std::env::current_exe()?)
+    let mut cmd = std::process::Command::new(std::env::current_exe()?);
+    for var in PARENT_SESSION_VARS {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd
         .arg("--agent-host")
         .arg(json)
         .arg(fd.to_string())
@@ -212,6 +233,18 @@ pub(crate) fn spawn(spec: &HostSpec) -> io::Result<()> {
         let _ = child.wait();
     });
     Ok(())
+}
+
+/// Wait (up to 2 s) for a just-spawned host to register — the CLI's `new`, so a `prompt`
+/// straight after finds it. (Kyde itself needn't: it connects to the socket it handed over.)
+pub(crate) fn wait_registered(id: &str) {
+    let info = info_path(id);
+    for _ in 0..100 {
+        if info.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn alive(pid: u32) -> bool {

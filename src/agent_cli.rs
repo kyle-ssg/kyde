@@ -327,6 +327,7 @@ fn new(rest: &[String]) -> Res {
         agent: !shell_only,
     };
     host::spawn(&spec).map_err(|e| e.to_string())?;
+    host::wait_registered(&id);
     println!("{id}");
     let _ = std::io::stdout().flush();
     Ok(0)
