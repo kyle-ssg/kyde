@@ -114,6 +114,10 @@ pub struct AgentsCfg {
     /// The command every new agent tab starts with.
     #[serde(default = "default_command")]
     pub command: String,
+    /// What a new agent tab does when its first task doesn't fit the work already in its
+    /// worktree.
+    #[serde(default)]
+    pub new_task: NewTask,
     /// What the cleanup does with tabs its rules find finished.
     #[serde(default)]
     pub cleanup_mode: CleanupMode,
@@ -219,6 +223,21 @@ fn default_quit_mins() -> u32 {
     10
 }
 
+/// What a new agent tab does when you give it a task unrelated to the work already in its
+/// worktree — another agent's, uncommitted changes, unpushed commits. Kyde tells the agent
+/// what's there through the Claude Code hook; the agent judges whether the task fits.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NewTask {
+    /// The agent moves itself to a fresh worktree, and its tab follows.
+    #[default]
+    Move,
+    /// The agent asks you before moving.
+    Ask,
+    /// It stays in the worktree it was opened in.
+    Stay,
+}
+
 /// What the cleanup does with a tab its rules find finished.
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
 #[serde(rename_all = "lowercase")]
@@ -288,6 +307,7 @@ impl Default for AgentsCfg {
             agents_only: false,
 
             command: default_command(),
+            new_task: NewTask::default(),
             cleanup_mode: CleanupMode::default(),
             cleanup: CleanupRules::default(),
             idle_hours: default_idle_hours(),
@@ -386,9 +406,14 @@ fn or_default<'a>(mine: &'a str, default: &'a str) -> &'a str {
     }
 }
 
-/// Where agent hosts keep their sockets and each agent's state files: `~/.kyde/agents`.
+/// Where agent hosts keep their sockets and each agent's state files: `~/.kyde/agents`
+/// (`$KYDE_AGENTS_DIR` when set).
 #[must_use]
 pub fn agents_dir() -> PathBuf {
+    // Tests point it at a throwaway folder.
+    if let Some(dir) = std::env::var_os("KYDE_AGENTS_DIR") {
+        return dir.into();
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".kyde").join("agents")
 }

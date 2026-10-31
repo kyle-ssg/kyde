@@ -534,6 +534,34 @@ impl Kyde {
                 }),
             )
         };
+        let new_task = cfg.new_task;
+        let task_pill = |id: &'static str,
+                         label: &'static str,
+                         m: kyde_config::agents::NewTask,
+                         cx: &mut Context<Self>| {
+            crate::tab_pill(id, label, 0, new_task == m).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    this.agents.cfg.new_task = m;
+                    this.agents_save(cx);
+                    cx.notify();
+                }),
+            )
+        };
+        let task_note = match new_task {
+            kyde_config::agents::NewTask::Move => {
+                "A new tab's agent hears what's already in its worktree — another agent's \
+                 work, uncommitted changes, unpushed commits. Give it an unrelated task and it \
+                 moves to a fresh worktree off the latest main; the tab follows."
+            }
+            kyde_config::agents::NewTask::Ask => {
+                "Same, but the agent asks you before it moves an unrelated task to a fresh \
+                 worktree."
+            }
+            kyde_config::agents::NewTask::Stay => {
+                "A new tab works where you opened it, whatever you ask."
+            }
+        };
         let mode_note = match mode {
             kyde_config::agents::CleanupMode::Off => "Tabs stay open until you close them.",
             kyde_config::agents::CleanupMode::Suggest => {
@@ -598,6 +626,44 @@ impl Kyde {
                         }),
                     ),
             )
+            .child(
+                div()
+                    .pt_2()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("New task in a busy worktree"),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(task_pill(
+                        "new-task-move",
+                        "Move",
+                        kyde_config::agents::NewTask::Move,
+                        cx,
+                    ))
+                    .child(task_pill(
+                        "new-task-ask",
+                        "Ask",
+                        kyde_config::agents::NewTask::Ask,
+                        cx,
+                    ))
+                    .child(task_pill(
+                        "new-task-stay",
+                        "Stay",
+                        kyde_config::agents::NewTask::Stay,
+                        cx,
+                    )),
+            )
+            .child(div().text_color(t.line_number).child(task_note))
+            .when(!cfg.claude_hooks && new_task != kyde_config::agents::NewTask::Stay, |d| {
+                d.child(
+                    div()
+                        .text_color(t.line_number)
+                        .child("Needs the Claude Code hook (under Alerts) — it's off."),
+                )
+            })
             .child(
                 div()
                     .pt_2()

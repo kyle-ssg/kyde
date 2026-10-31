@@ -1799,7 +1799,42 @@ impl Kyde {
         });
         // A tab started on a task (an issue, a review) is in use from the start.
         let seeded = agent && prompt.is_some();
-        self.agents_spawn_tab(wt, agent, line, None, seeded, cx);
+        // A blank agent tab hears what's already going on here with its first prompt.
+        let brief = (agent && prompt.is_none())
+            .then(|| self.agents_task_brief(&wt, cx))
+            .flatten();
+        self.agents_spawn_tab(wt, agent, line, None, seeded, brief, cx);
+    }
+
+    /// Kyde's note for a new agent tab in `wt` about the work already there — `None` when
+    /// the worktree is free or the setting says stay (see `agents::task_brief`).
+    fn agents_task_brief(&self, wt: &Path, cx: &gpui::App) -> Option<String> {
+        if !self.agents.cfg.claude_hooks {
+            return None; // the hook is what hands it over
+        }
+        let git = self.agents.git.get(wt).copied().unwrap_or_default();
+        let busy = crate::agents::Busy {
+            branch: self.agents.branches.get(wt).cloned(),
+            changed: git.changed,
+            ahead: git.ahead,
+            off_main: matches!(
+                self.agents.main_sync.get(wt),
+                Some(crate::agents::MainSync::OffBranch(_))
+            ),
+            others: self.agents.tabs.get(wt).map_or_else(Vec::new, |g| {
+                g.tabs
+                    .iter()
+                    .filter(|t| t.agent && t.used)
+                    .map(|t| t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx)))
+                    .collect()
+            }),
+            last_task: self
+                .agents
+                .contexts
+                .get(wt)
+                .and_then(|c| c.title.clone().or_else(|| c.last_prompt.clone())),
+        };
+        crate::agents::task_brief(&busy, self.agents.cfg.new_task)
     }
 
     /// A new agent tab started on `prompt`, named `name` in the tab strip.
@@ -1829,10 +1864,12 @@ impl Kyde {
             self.agents.cfg.default_command(),
             crate::agents::shell_quote(&session)
         );
-        self.agents_spawn_tab(wt, true, Some(line), Some(session), false, cx);
+        self.agents_spawn_tab(wt, true, Some(line), Some(session), false, None, cx);
     }
 
-    /// Spawn a tab's PTY in `wt`, typing `line` into its shell when given.
+    /// Spawn a tab's PTY in `wt`, typing `line` into its shell when given, with `brief` for
+    /// its agent's first prompt.
+    #[allow(clippy::too_many_arguments)]
     fn agents_spawn_tab(
         &mut self,
         wt: PathBuf,
@@ -1840,12 +1877,24 @@ impl Kyde {
         line: Option<String>,
         session: Option<String>,
         seeded: bool,
+        brief: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let id = crate::agents::tab_id();
         // The Claude Code hook (see `kyde_config::claude_hooks`) reports this tab's state into
         // its state file; agents can find themselves by id.
         let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+        if let Some(text) = brief {
+            // Long before the first prompt is typed. If the agent moves out, Claude Code's
+            // worktree mustn't make this checkout read as dirty.
+            let (path, dir) = (crate::agents::brief_path(&id), wt.clone());
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = std::fs::write(path, text);
+                    crate::agents::exclude_claude_worktrees(&dir);
+                })
+                .detach();
+        }
         let env = crate::agents::tab_env(&id);
         // In an agent host, so it keeps running when Kyde quits — else (no host: Windows, a
         // failed start, tests) in a terminal of its own.
@@ -1963,20 +2012,25 @@ impl Kyde {
         let spawned_at = std::time::SystemTime::now();
         // The agent's input box sits at the bottom of the pane, herdr-style.
         view.update(cx, |v, _| v.anchor_bottom = true);
-        let key = wt.clone();
-        cx.subscribe(&view, move |this, v, ev, cx| match ev {
-            terminal::TerminalEvent::Output => this.agents_on_output(&key, &v, cx),
-            terminal::TerminalEvent::TitleChanged => cx.notify(),
-            terminal::TerminalEvent::Submitted => this.agents_on_submit(&key, &v, cx),
-            terminal::TerminalEvent::OpenScrollback => this.agents_open_scrollback(&v, cx),
-            terminal::TerminalEvent::CloseRequested => {
-                if let Some(i) = this
-                    .agents
-                    .tabs
-                    .get(&key)
-                    .and_then(|g| g.tabs.iter().position(|t| t.view == v))
-                {
-                    this.agents_close_tab(&key, i, cx);
+        // Looked up per event: the tab moves when its agent moves to another worktree.
+        cx.subscribe(&view, move |this, v, ev, cx| {
+            let Some(key) = this.agents_wt_of(&v) else {
+                return;
+            };
+            match ev {
+                terminal::TerminalEvent::Output => this.agents_on_output(&key, &v, cx),
+                terminal::TerminalEvent::TitleChanged => cx.notify(),
+                terminal::TerminalEvent::Submitted => this.agents_on_submit(&key, &v, cx),
+                terminal::TerminalEvent::OpenScrollback => this.agents_open_scrollback(&v, cx),
+                terminal::TerminalEvent::CloseRequested => {
+                    if let Some(i) = this
+                        .agents
+                        .tabs
+                        .get(&key)
+                        .and_then(|g| g.tabs.iter().position(|t| t.view == v))
+                    {
+                        this.agents_close_tab(&key, i, cx);
+                    }
                 }
             }
         })
@@ -2024,10 +2078,15 @@ impl Kyde {
         // Closing the tab ends its agent (quitting Kyde doesn't).
         gone.view.read(cx).kill_host();
         self.agents.closed_hosts.insert(gone.id.clone());
-        let state = crate::agents::state_path(&gone.id);
+        let files = [
+            crate::agents::state_path(&gone.id),
+            crate::agents::brief_path(&gone.id),
+        ];
         cx.background_executor()
             .spawn(async move {
-                let _ = std::fs::remove_file(state);
+                for f in files {
+                    let _ = std::fs::remove_file(f);
+                }
             })
             .detach();
         match crate::term_panel::active_after_close(len, idx, g.active) {
@@ -2240,7 +2299,14 @@ impl Kyde {
                             let report = std::fs::read_to_string(&path)
                                 .ok()
                                 .and_then(|s| crate::agents::parse_hook(&s));
-                            Some((wt, id, m, report))
+                            let moved = report.as_ref().and_then(|r| {
+                                crate::agents::moved_worktree(
+                                    &wt,
+                                    r.cwd.as_deref()?,
+                                    r.transcript.as_deref()?,
+                                )
+                            });
+                            Some((wt, id, m, report, moved))
                         })
                         .collect()
                 })
@@ -2256,12 +2322,15 @@ impl Kyde {
 
     /// Take in fresh hook reports: the exact session (for resume), the agent's state — and
     /// alert when one finishes or starts waiting on you while you're not looking at it.
-    fn agents_apply_hooks(&mut self, found: Vec<HookRead>, cx: &mut Context<Self>) {
+    pub(crate) fn agents_apply_hooks(&mut self, found: Vec<HookRead>, cx: &mut Context<Self>) {
         use crate::agents::Hook;
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let active = self.agents.window_active;
-        let (mut learned, mut sound) = (false, None);
-        for (wt, id, mtime, report) in found {
+        let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
+        for (wt, id, mtime, report, moved) in found {
+            if let Some(to) = moved {
+                moves.push((wt.clone(), id.clone(), to));
+            }
             let Some(g) = self.agents.tabs.get_mut(&wt) else {
                 continue;
             };
@@ -2305,7 +2374,79 @@ impl Kyde {
         if learned {
             self.agents_save(cx);
         }
+        for (from, id, to) in moves {
+            self.agents_move_tab(&from, &id, to, cx);
+        }
         self.agents_refresh_states(cx);
+    }
+
+    /// The worktree tab `v` is in now.
+    fn agents_wt_of(&self, v: &Entity<terminal::TerminalView>) -> Option<PathBuf> {
+        self.agents
+            .tabs
+            .iter()
+            .find(|(_, g)| g.tabs.iter().any(|t| &t.view == v))
+            .map(|(wt, _)| wt.clone())
+    }
+
+    /// Tab `id`'s agent moved itself from worktree `from` to `to` (Claude Code's
+    /// `EnterWorktree` — a new task, see `agents_task_brief`): the tab follows, agent host and
+    /// session alike. `to` joins `from`'s project at once (git lists it on the next refresh
+    /// anyway), and is shown if the tab was on screen.
+    pub(crate) fn agents_move_tab(
+        &mut self,
+        from: &Path,
+        id: &str,
+        to: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let on_screen = self
+            .agents_visible_tab()
+            .and_then(|(w, i)| (w == from).then(|| self.agents.tabs.get(w)?.tabs.get(i)))
+            .flatten()
+            .is_some_and(|t| t.id == id);
+        let Some(g) = self.agents.tabs.get_mut(from) else {
+            return;
+        };
+        let Some(i) = g.tabs.iter().position(|t| t.id == id) else {
+            return;
+        };
+        let len = g.tabs.len();
+        let tab = g.tabs.remove(i);
+        match crate::term_panel::active_after_close(len, i, g.active) {
+            Some(a) => g.active = a,
+            None => {
+                self.agents.tabs.remove(from);
+            }
+        }
+        if let Some(s) = self
+            .agents
+            .cfg
+            .spaces
+            .iter_mut()
+            .find(|s| s.path == from || s.worktrees.iter().any(|w| w == from))
+        {
+            if s.path != to && !s.worktrees.contains(&to) {
+                s.worktrees.push(to.clone());
+            }
+        }
+        self.agents.restored.insert(to.clone());
+        let g = self
+            .agents
+            .tabs
+            .entry(to.clone())
+            .or_insert_with(|| AgentTabs {
+                tabs: Vec::new(),
+                active: 0,
+            });
+        g.tabs.push(tab);
+        g.active = g.tabs.len() - 1;
+        if on_screen {
+            self.agents_select(to, cx);
+        }
+        self.agents_save(cx);
+        self.agents_refresh_branches(cx);
+        cx.notify();
     }
 
     /// An agent finished or needs you: a sound (one per burst), and a Dock bounce (Linux: a
@@ -2550,6 +2691,22 @@ impl Kyde {
             .tabs
             .get(wt)
             .is_some_and(|g| g.tabs.iter().any(|t| t.shown == AgentState::Working));
+        // Removing it would take the worktree inside it along (git refuses; see
+        // `kyde_git::GitError::NestedWorktree`).
+        if let Some(inner) = self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .flat_map(|s| &s.worktrees)
+            .find(|w| *w != wt && w.starts_with(wt))
+        {
+            return (
+                format!("Holds worktree {} — remove it first", leaf_name(inner)),
+                false,
+                false,
+            );
+        }
         match self.agents.git.get(wt).copied() {
             None => ("Git state not read yet".into(), false, false),
             Some(g) if g.changed > 0 => (
@@ -5847,13 +6004,15 @@ fn tab_auto_title(t: &AgentTab, cx: &gpui::App) -> String {
     }
 }
 
-/// One changed hook state file: worktree, tab id, its mtime, and what it says.
+/// One changed hook state file: worktree, tab id, its mtime, what it says, and the other
+/// worktree its agent has moved to (if it has).
 #[cfg(feature = "terminal")]
 type HookRead = (
     PathBuf,
     String,
     std::time::SystemTime,
     Option<crate::agents::HookReport>,
+    Option<PathBuf>,
 );
 
 // ── keyboard navigation, renaming, scrollback ────────────────────────────────────────────

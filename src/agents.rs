@@ -47,11 +47,15 @@ pub(crate) enum Hook {
     Ended,
 }
 
-/// One hook event: what it means for the tab, and the Claude Code session it came from.
+/// One hook event: what it means for the tab, the Claude Code session it came from, the
+/// folder the agent is working in, and its session file (both move with Claude Code's
+/// `EnterWorktree`; a shell `cd` moves only the folder).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookReport {
     pub hook: Hook,
     pub session: Option<String>,
+    pub cwd: Option<std::path::PathBuf>,
+    pub transcript: Option<std::path::PathBuf>,
 }
 
 /// Read one Claude Code hook event (the JSON the hook wrote). `None` for events that don't
@@ -83,7 +87,13 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
         _ => return None,
     };
     let session = Some(s("session_id").to_string()).filter(|id| !id.is_empty());
-    Some(HookReport { hook, session })
+    let path = |k: &str| Some(s(k)).filter(|p| !p.is_empty()).map(Into::into);
+    Some(HookReport {
+        hook,
+        session,
+        cwd: path("cwd"),
+        transcript: path("transcript_path"),
+    })
 }
 
 /// Everything a tab's dot is decided from.
@@ -736,6 +746,144 @@ pub(crate) fn state_path(id: &str) -> std::path::PathBuf {
     kyde_config::agents::agents_dir().join(format!("{id}.state"))
 }
 
+/// Kyde's note for tab `id`'s first prompt (`$KYDE_AGENT_STATE.brief` — the prompt hook
+/// hands it to Claude, then deletes it; see `kyde_config::claude_hooks::brief_command`).
+pub(crate) fn brief_path(id: &str) -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join(format!("{id}.state.brief"))
+}
+
+/// What's already going on in a worktree when a new agent tab opens there.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Busy {
+    pub branch: Option<String>,
+    /// Files with uncommitted changes.
+    pub changed: usize,
+    /// Commits not yet pushed.
+    pub ahead: usize,
+    /// It's a project's own checkout, switched off the mainline onto another branch.
+    pub off_main: bool,
+    /// What the worktree's other (used) agent tabs are on — their titles.
+    pub others: Vec<String>,
+    /// What its latest Claude Code session was about (title, else latest prompt).
+    pub last_task: Option<String>,
+}
+
+/// The note a new agent tab's first prompt carries (see [`brief_path`]): what's in its
+/// worktree, and — per `mode` — to move an unrelated task to a worktree of its own (Claude
+/// Code's `EnterWorktree`; the tab follows, see [`moved_worktree`]) or to ask first. `None`
+/// when the worktree is free (no changes, nothing unpushed, no other agent at work, on its
+/// mainline) or `mode` is Stay.
+pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option<String> {
+    use kyde_config::agents::NewTask;
+    let free = b.changed == 0 && b.ahead == 0 && !b.off_main && b.others.is_empty();
+    if free || mode == NewTask::Stay {
+        return None;
+    }
+    let count = |n: usize, what: &str| match n {
+        0 => None,
+        1 => Some(format!("1 {what}")),
+        n => Some(format!("{n} {what}s")),
+    };
+    let git: Vec<String> = [
+        count(b.changed, "uncommitted file"),
+        count(b.ahead, "unpushed commit"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut facts = Vec::new();
+    match (&b.branch, git.is_empty()) {
+        (Some(br), true) => facts.push(format!("- branch `{br}`")),
+        (Some(br), false) => facts.push(format!("- branch `{br}`: {}", git.join(", "))),
+        (None, false) => facts.push(format!("- {}", git.join(", "))),
+        (None, true) => {}
+    }
+    if b.others.is_empty() {
+        if let Some(t) = &b.last_task {
+            facts.push(format!("- its last agent worked on: \"{t}\""));
+        }
+    } else {
+        let others: Vec<String> = b.others.iter().map(|t| format!("\"{t}\"")).collect();
+        facts.push(format!("- other agents here are on: {}", others.join(", ")));
+    }
+    let what = if mode == NewTask::Ask {
+        "The user has set Kyde to ask before moving a task. If this request starts a new task \
+         unrelated to that work, ask the user (one short question) whether to move it to a \
+         worktree of its own before you change any file; if they agree, call EnterWorktree"
+    } else {
+        "The user has set Kyde to give unrelated tasks a worktree of their own. If this request \
+         starts a new task unrelated to that work, call EnterWorktree"
+    };
+    Some(format!(
+        "Kyde (the agent manager running this tab): this worktree already has work in it —\n\
+         {}\n\n{what} (name: a short slug for the new task) before you change any file — Kyde \
+         moves this tab there. If it's related, a follow-up, a question or chit-chat, stay here \
+         and ignore this note.\n",
+        facts.join("\n")
+    ))
+}
+
+/// Where a tab's agent has moved itself, from what its hook reported: the worktree holding
+/// `cwd` when that's ANOTHER worktree of `wt`'s repository and the session moved there too
+/// (`transcript` in that worktree's Claude Code project folder — Claude Code's
+/// `EnterWorktree`; a shell `cd` into another worktree leaves it behind) — canonical. `None`
+/// while it's in `wt` (or a folder inside it), or outside the repository. Stats a few
+/// folders, and runs git only when the worktree differs: call it off the UI thread.
+pub(crate) fn moved_worktree(
+    wt: &std::path::Path,
+    cwd: &std::path::Path,
+    transcript: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    // Claude Code names the project folder after the path as it has it, not the real one.
+    let named = cwd.ancestors().find(|d| d.join(".git").exists())?;
+    let folder = claude_project_dir(named)?;
+    if transcript.parent().and_then(std::path::Path::file_name) != folder.file_name() {
+        return None;
+    }
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root = canon(named);
+    if root == canon(wt) {
+        return None;
+    }
+    let common = |p: &std::path::Path| kyde_git::Repo::discover(p).ok()?.common_dir().ok();
+    (common(&root)? == common(wt)?).then_some(root)
+}
+
+/// Keep Claude Code's worktrees (`.claude/worktrees/`, inside the checkout) out of git's
+/// changes — in the repository's own `info/exclude`, never a tracked file — so the checkout
+/// a task moved out of doesn't read as dirty (which would hold back its main sync and
+/// cleanup). Adds the line once. Runs git + file IO: call it off the UI thread.
+pub(crate) fn exclude_claude_worktrees(wt: &std::path::Path) {
+    const LINE: &str = ".claude/worktrees/";
+    let Some(dir) = kyde_git::Repo::discover(wt)
+        .ok()
+        .and_then(|r| r.common_dir().ok())
+    else {
+        return;
+    };
+    let path = dir.join("info").join("exclude");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return, // never rewrite rules it couldn't read
+    };
+    if text.lines().any(|l| l.trim() == LINE) {
+        return;
+    }
+    let sep = if text.is_empty() || text.ends_with('\n') {
+        ""
+    } else {
+        "\n"
+    };
+    let _ = std::fs::create_dir_all(dir.join("info"));
+    // Appended, so the user's own rules are never rewritten.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{sep}{LINE}\n").as_bytes()));
+}
+
 /// A project's worktrees after git lists `listed`: the ones still there keep `current`'s
 /// order (you may have dragged them), new ones follow in git's order.
 pub(crate) fn keep_order(
@@ -843,7 +991,9 @@ mod tests {
             parse_hook(r#"{"hook_event_name":"Stop","session_id":"s1"}"#),
             Some(HookReport {
                 hook: Hook::Done,
-                session: Some("s1".into())
+                session: Some("s1".into()),
+                cwd: None,
+                transcript: None,
             })
         );
         assert_eq!(
@@ -875,6 +1025,106 @@ mod tests {
         // …typing after it, then quiet, means you did (even if Claude reported nothing).
         s.last_input = Some(at(61));
         assert_eq!(AgentState::of_tab(&s, at(70)), AgentState::Idle);
+    }
+
+    #[test]
+    fn a_new_tab_hears_about_a_busy_worktree_only() {
+        use kyde_config::agents::NewTask;
+        let free = Busy {
+            branch: Some("main".into()),
+            last_task: Some("old work".into()),
+            ..Busy::default()
+        };
+        assert_eq!(task_brief(&free, NewTask::Move), None);
+        let busy = Busy {
+            branch: Some("feat/linux".into()),
+            changed: 3,
+            ahead: 1,
+            others: vec!["Linux AppImage packaging".into()],
+            ..free
+        };
+        let note = task_brief(&busy, NewTask::Move).unwrap();
+        assert!(note.contains("branch `feat/linux`: 3 uncommitted files, 1 unpushed commit"));
+        assert!(note.contains("\"Linux AppImage packaging\""));
+        assert!(note.contains("call EnterWorktree") && !note.contains("ask the user"));
+        assert!(task_brief(&busy, NewTask::Ask)
+            .unwrap()
+            .contains("ask the user"));
+        assert_eq!(task_brief(&busy, NewTask::Stay), None);
+    }
+
+    #[test]
+    fn an_agent_that_enters_another_worktree_is_found_there() {
+        let base = std::env::temp_dir().join(format!("kyde-moved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("src/a.rs"), "").unwrap();
+        git(&["add", "."]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        // Where Claude Code's EnterWorktree puts one.
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/style",
+            "-b",
+            "style",
+        ]);
+        let moved = repo.join(".claude/worktrees/style").canonicalize().unwrap();
+        // The session file follows EnterWorktree into its project folder; a `cd` leaves it.
+        let session = |wt: &std::path::Path| claude_project_dir(wt).unwrap().join("s1.jsonl");
+        let moved_to = |cwd: &std::path::Path, session: std::path::PathBuf| {
+            let json = serde_json::json!({
+                "hook_event_name": "Stop",
+                "cwd": cwd,
+                "transcript_path": session,
+            });
+            let r = parse_hook(&json.to_string()).unwrap();
+            moved_worktree(&repo, &r.cwd.unwrap(), &r.transcript.unwrap())
+        };
+        // Working in a folder of its own worktree isn't a move; entering the other one is.
+        assert_eq!(moved_to(&repo.join("src"), session(&repo)), None);
+        assert_eq!(
+            moved_to(&moved.join("src"), session(&moved)),
+            Some(moved.clone())
+        );
+        // A shell `cd` into it (the session stayed behind) isn't.
+        assert_eq!(moved_to(&moved, session(&repo)), None);
+        // Another repository entirely isn't one of its worktrees.
+        assert_eq!(
+            moved_worktree(&base.join("elsewhere"), &moved, &session(&moved)),
+            None
+        );
+        // The worktree left behind doesn't read as dirty for it.
+        assert!(git(&["status", "--porcelain"]).contains(".claude/"));
+        exclude_claude_worktrees(&repo);
+        exclude_claude_worktrees(&repo);
+        assert_eq!(git(&["status", "--porcelain"]), "");
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
+        assert_eq!(exclude.matches(".claude/worktrees/").count(), 1);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
