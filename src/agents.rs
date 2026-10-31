@@ -47,13 +47,15 @@ pub(crate) enum Hook {
     Ended,
 }
 
-/// One hook event: what it means for the tab, the Claude Code session it came from, and the
-/// folder the agent is working in (it moves with Claude Code's `EnterWorktree`).
+/// One hook event: what it means for the tab, the Claude Code session it came from, the
+/// folder the agent is working in, and its session file (both move with Claude Code's
+/// `EnterWorktree`; a shell `cd` moves only the folder).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct HookReport {
     pub hook: Hook,
     pub session: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
+    pub transcript: Option<std::path::PathBuf>,
 }
 
 /// Read one Claude Code hook event (the JSON the hook wrote). `None` for events that don't
@@ -85,8 +87,13 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
         _ => return None,
     };
     let session = Some(s("session_id").to_string()).filter(|id| !id.is_empty());
-    let cwd = Some(s("cwd")).filter(|c| !c.is_empty()).map(Into::into);
-    Some(HookReport { hook, session, cwd })
+    let path = |k: &str| Some(s(k)).filter(|p| !p.is_empty()).map(Into::into);
+    Some(HookReport {
+        hook,
+        session,
+        cwd: path("cwd"),
+        transcript: path("transcript_path"),
+    })
 }
 
 /// Everything a tab's dot is decided from.
@@ -816,23 +823,30 @@ pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option
     ))
 }
 
-/// Where a tab's agent has moved itself, from the folder its hook reported: the worktree
-/// holding `cwd` when that's ANOTHER worktree of `wt`'s repository (Claude Code's
-/// `EnterWorktree`) — canonical; `None` while it's in `wt` (or a folder inside it), or outside
-/// the repository. Stats a few folders, and runs git only when the worktree differs: call it
-/// off the UI thread.
+/// Where a tab's agent has moved itself, from what its hook reported: the worktree holding
+/// `cwd` when that's ANOTHER worktree of `wt`'s repository and the session moved there too
+/// (`transcript` in that worktree's Claude Code project folder — Claude Code's
+/// `EnterWorktree`; a shell `cd` into another worktree leaves it behind) — canonical. `None`
+/// while it's in `wt` (or a folder inside it), or outside the repository. Stats a few
+/// folders, and runs git only when the worktree differs: call it off the UI thread.
 pub(crate) fn moved_worktree(
     wt: &std::path::Path,
     cwd: &std::path::Path,
+    transcript: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
+    // Claude Code names the project folder after the path as it has it, not the real one.
+    let named = cwd.ancestors().find(|d| d.join(".git").exists())?;
+    let folder = claude_project_dir(named)?;
+    if transcript.parent().and_then(std::path::Path::file_name) != folder.file_name() {
+        return None;
+    }
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let cwd = canon(cwd);
-    let root = cwd.ancestors().find(|d| d.join(".git").exists())?;
+    let root = canon(named);
     if root == canon(wt) {
         return None;
     }
     let common = |p: &std::path::Path| kyde_git::Repo::discover(p).ok()?.common_dir().ok();
-    (common(root)? == common(wt)?).then(|| root.to_path_buf())
+    (common(&root)? == common(wt)?).then_some(root)
 }
 
 /// Keep Claude Code's worktrees (`.claude/worktrees/`, inside the checkout) out of git's
@@ -848,7 +862,11 @@ pub(crate) fn exclude_claude_worktrees(wt: &std::path::Path) {
         return;
     };
     let path = dir.join("info").join("exclude");
-    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(_) => return, // never rewrite rules it couldn't read
+    };
     if text.lines().any(|l| l.trim() == LINE) {
         return;
     }
@@ -858,7 +876,12 @@ pub(crate) fn exclude_claude_worktrees(wt: &std::path::Path) {
         "\n"
     };
     let _ = std::fs::create_dir_all(dir.join("info"));
-    let _ = std::fs::write(&path, format!("{text}{sep}{LINE}\n"));
+    // Appended, so the user's own rules are never rewritten.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{sep}{LINE}\n").as_bytes()));
 }
 
 /// A project's worktrees after git lists `listed`: the ones still there keep `current`'s
@@ -970,6 +993,7 @@ mod tests {
                 hook: Hook::Done,
                 session: Some("s1".into()),
                 cwd: None,
+                transcript: None,
             })
         );
         assert_eq!(
@@ -1069,18 +1093,30 @@ mod tests {
             "style",
         ]);
         let moved = repo.join(".claude/worktrees/style").canonicalize().unwrap();
-        let hook = |cwd: &std::path::Path| {
-            let json = serde_json::json!({ "hook_event_name": "Stop", "cwd": cwd }).to_string();
-            parse_hook(&json).and_then(|r| r.cwd).unwrap()
+        // The session file follows EnterWorktree into its project folder; a `cd` leaves it.
+        let session = |wt: &std::path::Path| claude_project_dir(wt).unwrap().join("s1.jsonl");
+        let moved_to = |cwd: &std::path::Path, session: std::path::PathBuf| {
+            let json = serde_json::json!({
+                "hook_event_name": "Stop",
+                "cwd": cwd,
+                "transcript_path": session,
+            });
+            let r = parse_hook(&json.to_string()).unwrap();
+            moved_worktree(&repo, &r.cwd.unwrap(), &r.transcript.unwrap())
         };
         // Working in a folder of its own worktree isn't a move; entering the other one is.
-        assert_eq!(moved_worktree(&repo, &hook(&repo.join("src"))), None);
+        assert_eq!(moved_to(&repo.join("src"), session(&repo)), None);
         assert_eq!(
-            moved_worktree(&repo, &hook(&moved.join("src"))),
+            moved_to(&moved.join("src"), session(&moved)),
             Some(moved.clone())
         );
+        // A shell `cd` into it (the session stayed behind) isn't.
+        assert_eq!(moved_to(&moved, session(&repo)), None);
         // Another repository entirely isn't one of its worktrees.
-        assert_eq!(moved_worktree(&base.join("elsewhere"), &moved), None);
+        assert_eq!(
+            moved_worktree(&base.join("elsewhere"), &moved, &session(&moved)),
+            None
+        );
         // The worktree left behind doesn't read as dirty for it.
         assert!(git(&["status", "--porcelain"]).contains(".claude/"));
         exclude_claude_worktrees(&repo);

@@ -2299,10 +2299,13 @@ impl Kyde {
                             let report = std::fs::read_to_string(&path)
                                 .ok()
                                 .and_then(|s| crate::agents::parse_hook(&s));
-                            let moved = report
-                                .as_ref()
-                                .and_then(|r| r.cwd.as_deref())
-                                .and_then(|cwd| crate::agents::moved_worktree(&wt, cwd));
+                            let moved = report.as_ref().and_then(|r| {
+                                crate::agents::moved_worktree(
+                                    &wt,
+                                    r.cwd.as_deref()?,
+                                    r.transcript.as_deref()?,
+                                )
+                            });
                             Some((wt, id, m, report, moved))
                         })
                         .collect()
@@ -2688,6 +2691,22 @@ impl Kyde {
             .tabs
             .get(wt)
             .is_some_and(|g| g.tabs.iter().any(|t| t.shown == AgentState::Working));
+        // Removing it would take the worktree inside it along (git refuses; see
+        // `kyde_git::GitError::NestedWorktree`).
+        if let Some(inner) = self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .flat_map(|s| &s.worktrees)
+            .find(|w| *w != wt && w.starts_with(wt))
+        {
+            return (
+                format!("Holds worktree {} — remove it first", leaf_name(inner)),
+                false,
+                false,
+            );
+        }
         match self.agents.git.get(wt).copied() {
             None => ("Git state not read yet".into(), false, false),
             Some(g) if g.changed > 0 => (

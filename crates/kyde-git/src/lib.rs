@@ -63,6 +63,11 @@ pub enum GitError {
         #[source]
         source: serde_json::Error,
     },
+    /// A worktree can't be removed while another worktree lives inside its folder (Claude
+    /// Code's `EnterWorktree` nests them in `.claude/worktrees/`) — deleting the folder would
+    /// take that checkout, uncommitted work and all, with it.
+    #[error("worktree {0:?} is inside it — remove that one first")]
+    NestedWorktree(PathBuf),
 }
 
 /// Result alias for every fallible `kyde-git` operation.
@@ -934,6 +939,7 @@ impl Repo {
     /// refuses while it has uncommitted changes or untracked files, so no work is lost —
     /// that refusal is the error. The worktree's branch is kept.
     pub fn remove_worktree(&self, path: &Path) -> Result<()> {
+        self.no_nested_worktree(path)?;
         git(&self.root, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
     }
 
@@ -943,6 +949,7 @@ impl Repo {
     /// (the second `--force`): Claude Code locks the worktrees it makes and leaves them
     /// locked after its session ends.
     pub fn remove_worktree_force(&self, path: &Path) -> Result<()> {
+        self.no_nested_worktree(path)?;
         git(
             &self.root,
             &[
@@ -954,6 +961,21 @@ impl Repo {
             ],
         )
         .map(|_| ())
+    }
+
+    /// [`GitError::NestedWorktree`] when another worktree of this repository lives inside
+    /// `path`. Neither `--force` nor git itself checks: an excluded `.claude/worktrees/`
+    /// even reads as clean.
+    fn no_nested_worktree(&self, path: &Path) -> Result<()> {
+        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let outer = canon(path);
+        match self.worktrees()?.into_iter().find(|w| {
+            let p = canon(&w.path);
+            p != outer && p.starts_with(&outer)
+        }) {
+            Some(inner) => Err(GitError::NestedWorktree(inner.path)),
+            None => Ok(()),
+        }
     }
 
     /// Switch to an existing local branch.
@@ -1441,6 +1463,15 @@ mod tests {
         let locked = base.join("wt-locked");
         repo.add_worktree(&locked, "worktree/locked", None).unwrap();
         g(&work, &["worktree", "lock", &locked.to_string_lossy()]);
+        // One holding another (EnterWorktree's `.claude/worktrees/`) stays, forced or not.
+        let nested = locked.join(".claude/worktrees/task");
+        repo.add_worktree(&nested, "worktree/task", None).unwrap();
+        assert!(matches!(
+            repo.remove_worktree_force(&locked),
+            Err(GitError::NestedWorktree(_))
+        ));
+        assert!(nested.exists());
+        repo.remove_worktree_force(&nested).unwrap();
         repo.remove_worktree_force(&locked).unwrap();
         assert!(!locked.exists());
 

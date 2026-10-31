@@ -7010,13 +7010,15 @@ mod gpui_smoke_tests {
             .unwrap();
         assert!(out.status.success());
         let cwd = dir.join(".claude/worktrees/style");
-        let to = agents::moved_worktree(&dir, &cwd).expect("another worktree of the repo");
+        let transcript = agents::claude_project_dir(&cwd).unwrap().join("s1.jsonl");
+        let to = agents::moved_worktree(&dir, &cwd, &transcript).expect("EnterWorktree'd");
         handle
             .update(cx, |k, _w, cx| {
                 let report = agents::HookReport {
                     hook: agents::Hook::Working,
                     session: Some("s1".into()),
                     cwd: Some(cwd.clone()),
+                    transcript: Some(transcript.clone()),
                 };
                 let read = (
                     dir.clone(),

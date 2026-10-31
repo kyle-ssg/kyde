@@ -44,13 +44,14 @@ pub fn command() -> String {
 
 /// The prompt hook that hands Claude Kyde's note about the tab's worktree: prints
 /// `$KYDE_AGENT_STATE.brief` (Claude adds a prompt hook's output to its context) and deletes
-/// it, so only the first real prompt sees it — a slash command (`/clear`, `/caveman`) leaves
-/// it for the next one. Always exits 0.
+/// it, so only the first real prompt sees it — a slash command (`/clear`, `/caveman`; not a
+/// prompt opening with a path like `/Users/…`) leaves it for the next one. Always exits 0.
 #[must_use]
 pub fn brief_command() -> String {
     format!(
         "f=\"$KYDE_AGENT_STATE.brief\"; if [ -n \"$KYDE_AGENT_STATE\" ] && [ -f \"$f\" ] && \
-         ! grep -q '\"prompt\" *: *\"/'; then cat \"$f\"; rm -f \"$f\"; else cat > /dev/null; fi; \
+         ! grep -q '\"prompt\" *: *\"/[A-Za-z0-9:_-]*[ \"\\]'; then cat \"$f\"; rm -f \"$f\"; \
+         else cat > /dev/null; fi; \
          exit 0 {MARKER}"
     )
 }
@@ -261,7 +262,7 @@ mod tests {
             String::from_utf8(sh.wait_with_output().unwrap().stdout).unwrap()
         };
         assert_eq!(prompt("/caveman"), "");
-        assert_eq!(prompt("add a style guide"), "busy here");
+        assert_eq!(prompt("/Users/me/notes.md add a style guide"), "busy here");
         assert_eq!(prompt("and a changelog"), "");
         assert!(!brief.exists());
         let _ = std::fs::remove_dir_all(&dir);
