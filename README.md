@@ -1,5 +1,12 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Kyde" width="112" height="112">
+  <img src="assets/logo.png" alt="Kyde logo" width="112" height="112">
+</p>
+
+<h1 align="center">Kyde</h1>
+
+<p align="center">
+  <b>A fast, native Git client and side-by-side diff editor for macOS and Linux.</b><br>
+  Stage hunks, resolve merge conflicts, browse history and run Claude Code agents across git worktrees — GPU-rendered, written in Rust, no Electron.
 </p>
 
 <p align="center">
@@ -16,13 +23,13 @@ I don't know Rust.
 
 These days I barely open my full IDE — pre-AI I was doing thousands of commits a year, and now I mostly live in its commit and diff view, one of the few things heavy enough to make me wait for a JVM to start.
 
-So Kyde is just that. A fast native commit and diff code editor — a Git client for macOs. (It should support Windows and Linux, I just commented out the builds since I won't actively QA and maintain these distributions).
+So Kyde is just that. A fast native commit and diff code editor — a Git GUI that opens instantly, with the commit view, side-by-side diff, merge tool and git log I used to start a whole IDE for. Prebuilt for macOS and Linux; Windows builds from source.
 
 <p align="center">
-  <img src="assets/screenshots/git-diff.png" alt="Commit view — side-by-side diff with word-level highlighting and a center gutter to stage/revert hunks" width="900">
+  <img src="assets/screenshots/git-diff.png" alt="Kyde commit view — side-by-side Git diff with word-level highlighting and a center gutter to stage or revert individual hunks" width="900">
 </p>
 
-## Goals
+## Why Kyde
 
 * **Fast.** Native GPU rendering, low latency. 120fps even on large files.
 * **Familiar.** A tuned dark theme so it feels at home to anyone who's lived in a modern IDE.
@@ -51,77 +58,7 @@ by lightness instead of hue) — switch in Settings.
 
 ## Features
 
-### Projects
-
-* **Landing view** when no project is open: searchable recents with branch + path, persisted to `~/.config/kyde/projects.json`.
-* **Open** / **New Project** via the native folder picker.
-
-### Code — browse & edit
-
-* **Folder tree** — expandable, resizable, file-type icons, git-status colors.
-* **Text editor** — selection, undo/redo, copy/cut/paste, Tab/Shift-Tab indent, ⌘-backspace, line numbers, current-line highlight, IME, auto-save.
-* **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace — in the editor and in every diff (Commit, History, Push, View Diff, Compare, Merge, Local History), with every match highlighted and the current one outlined.
-* **Editor tabs** that scroll and follow the active file.
-* **Image preview** for PNG/JPG/GIF/WebP/BMP/ICO/AVIF/TIFF.
-* **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, Java, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
-* **Code folding** for grammar-backed languages.
-* **Error highlighting** — wavy red squiggles under parse errors, on by default for every installed pack, opt-out per pack.
-* **⌘-click navigation** — ⌘-click an import to open the file it points at, a symbol to jump to its definition (same file, or the file it was imported from). Rust, TypeScript/TSX, JavaScript, Python, Java.
-* **Sort Lines** (`⌥⌘L`) and **Sort Object Keys** (`⌥⌘S`) — a line sort inside a JSON/JS/TS object delegates to the key sort, so entries move with their commas.
-* **Markdown preview** — a live rendered pane alongside the editor.
-
-<p align="center">
-  <img src="assets/screenshots/plugins-window.png" alt="Language Plugins manager — a native window listing every language pack (CSS, Go, HTML, Java, JavaScript, JSON, LaTeX, Markdown, Python, R, …) with per-pack Install / Uninstall" width="900">
-</p>
-
-<p align="center">
-  <img src="assets/screenshots/plugins.png" alt="Browse view — folder tree, editor tabs, and an opt-in language-pack install banner" width="900">
-</p>
-
-<p align="center">
-  <img src="assets/screenshots/markdown-support.png" alt="Markdown support — editing a Markdown file with a live rendered preview pane on the right" width="900">
-</p>
-
-### Terminal
-
-* **Embedded multi-tab terminal** — a real PTY-backed shell (alacritty's VTE engine),
-  bottom-docked, toggled with ``⌃` ``. Full color, scrollback, resize, multiple tabs.
-* **Mouse select + copy** (`⌘C`), **paste** (`⌘V`, bracketed-paste aware), **`⌘`-click URLs**.
-* History (`↑`), tab-completion, line-editing all work — it's your real shell.
-* Optional: drop it entirely with `--no-default-features` (the `terminal` Cargo feature)
-  for a ~2MB-lighter binary.
-
-<p align="center">
-  <img src="assets/screenshots/terminal.png" alt="Embedded terminal — a multi-tab PTY shell docked at the bottom, running git status + ls with live output and the shell's own git-aware prompt" width="900">
-</p>
-
-### Agents
-
-A home for AI coding agents — Claude Code by default (the start command is configurable). **Projects → worktrees → tabs**, each tab an agent.
-
-* **Projects → worktrees → tabs.** Every project's own checkout plus all of its git worktrees, whoever made them. New worktrees check out from a fresh `origin/main` in seconds, and each one runs one or more agent tabs. Drag to reorder, double-click to rename.
-* **Live status.** A dot per agent — working (blue), finished while you were away (green, "done"), **needs input** (red — a permission prompt, a question, a plan to approve). It comes from a small Claude Code hook Kyde installs (and can remove) in `~/.claude/settings.json`. A sound and a Dock bounce (on Linux, a desktop notification) when an agent finishes or needs you, `⌘⌥J` to jump to it, and an optional "needs you first" ordering.
-* **Agents outlive the window.** Each agent runs in its own background host process: quit Kyde and they keep working; reopen it and they're back, scrollback and all. After a reboot, each tab resumes its exact Claude session.
-* **AI titles and context.** Rows are titled by what the agent is doing (Claude Code's own session title), with its task, latest prompt and git state one click away.
-* **GitHub built in** (via `gh`). Issues and Pull Requests tabs per project — filter (Mine / All / Unassigned; Review requested / Mine / All) and search. **Start** an issue: a worktree on a `feat/123-short-slug` branch with an agent already briefed. **Review** a PR: it's checked out in its own worktree with a review agent, and Kyde remembers, offering *Re-review* next time. Issues and PRs render like GitHub — the conversation, reviews with their inline threads (reply in place), commits, checks and files changed — and you can comment, close or reopen.
-* **Cleans up after itself.** It spots finished work — the PR merged, its changes already on main (squash-merged included), the agent quit, never used, idle, or a quick AI "is this done?" — and, as you choose (Off / Suggest / Auto), closes the tabs or lists them in a **Clean Up** window that removes finished worktrees, pre-ticking the ones where nothing would be lost.
-* **Main stays fresh.** Each project's own checkout fast-forwards to `origin/main` in the background (only on its default branch, only when clean), and agents resuming there start from it.
-* **Scriptable.** `ky agent list | read | prompt | send | keys | wait | new | kill` — see and drive agents from the command line, with or without the window open, so agents can watch and drive each other (`ky agent help`).
-* **Agents-only mode** hides the IDE around it, for when Kyde is just your agent cockpit. Keyboard shortcuts for all of it (below), scrollback in an editor window (`⌘⌥E`), and per-row display options.
-
-<p align="center">
-  <img src="assets/screenshots/agents.png" alt="Agents view — a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's agent running in its tab" width="900">
-</p>
-
-#### Why it replaced herdr for me
-
-I was running my agents in [herdr](https://herdr.dev), and it's very good at what it does: a terminal workspace built for agents. But my day isn't just terminals. Work starts in a GitHub issue or a review request, an agent's output ends up as a diff I read and commit, and finished worktrees pile up. Next to herdr that meant a browser, an IDE and a git tool open too — and remembering to tidy up.
-
-Kyde puts that whole loop in one native window. Pick an issue or a pull request; one click gives it a fresh worktree and an agent that already knows the job. See at a glance which agents are working, done or waiting on me — and hear about it. Read the diff, commit, push. The finished worktree gets cleared away. Fewer windows, nothing to remember.
-
-herdr still does things Kyde doesn't: it runs anywhere a terminal does (including on remote machines over SSH), splits panes, and works with many agent CLIs. Kyde's Agents view is macOS-first and built around Claude Code.
-
-### Git — commit, diff, branches
+### Git client — commit, diff, merge, history
 
 * **Commit view**: changed-files list + an editable side-by-side diff — base on the left, live working copy on the right, both highlighted.
 * **Stage / revert** per hunk from the center gutter, or whole files; commit via the message box.
@@ -161,6 +98,76 @@ herdr still does things Kyde doesn't: it runs anywhere a terminal does (includin
 <p align="center">
   <img src="assets/screenshots/merge.png" alt="3-pane merge view — yours, result, and theirs aligned side by side; red unresolved conflicts with apply/ignore gutter controls, applied changes in blue, plus apply-non-conflicting, Compare Contents, and whitespace options in the toolbar" width="900">
 </p>
+
+### Projects
+
+* **Landing view** when no project is open: searchable recents with branch + path, persisted to `~/.config/kyde/projects.json`.
+* **Open** / **New Project** via the native folder picker.
+
+### Code editor — browse & edit
+
+* **Folder tree** — expandable, resizable, file-type icons, git-status colors.
+* **Text editor** — selection, undo/redo, copy/cut/paste, Tab/Shift-Tab indent, ⌘-backspace, line numbers, current-line highlight, IME, auto-save.
+* **Find & replace** — `⌘F` find (`⌘G`/`⇧⌘G` to cycle), `⌘R` replace — in the editor and in every diff (Commit, History, Push, View Diff, Compare, Merge, Local History), with every match highlighted and the current one outlined.
+* **Editor tabs** that scroll and follow the active file.
+* **Image preview** for PNG/JPG/GIF/WebP/BMP/ICO/AVIF/TIFF.
+* **Syntax highlighting** via tree-sitter, installed on demand from a built-in **Language Plugins** manager. Packs: **TypeScript/TSX, JavaScript, Rust, JSON, Markdown, Shell, CSS, SCSS, YAML, TOML, Python, HTML, Go, Java, R, LaTeX** — plus always-on `.env` and `.gitignore` highlighters, and a **Font preview** plugin. Each pack is also a Cargo feature, so a build can ship only the grammars it wants ([details](#build)).
+* **Code folding** for grammar-backed languages.
+* **Error highlighting** — wavy red squiggles under parse errors, on by default for every installed pack, opt-out per pack.
+* **⌘-click navigation** — ⌘-click an import to open the file it points at, a symbol to jump to its definition (same file, or the file it was imported from). Rust, TypeScript/TSX, JavaScript, Python, Java.
+* **Sort Lines** (`⌥⌘L`) and **Sort Object Keys** (`⌥⌘S`) — a line sort inside a JSON/JS/TS object delegates to the key sort, so entries move with their commas.
+* **Markdown preview** — a live rendered pane alongside the editor.
+
+<p align="center">
+  <img src="assets/screenshots/plugins-window.png" alt="Language Plugins manager — a native window listing every language pack (CSS, Go, HTML, Java, JavaScript, JSON, LaTeX, Markdown, Python, R, …) with per-pack Install / Uninstall" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/plugins.png" alt="Browse view — folder tree, editor tabs, and an opt-in language-pack install banner" width="900">
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/markdown-support.png" alt="Markdown support — editing a Markdown file with a live rendered preview pane on the right" width="900">
+</p>
+
+### Built-in terminal
+
+* **Embedded multi-tab terminal** — a real PTY-backed shell (alacritty's VTE engine),
+  bottom-docked, toggled with ``⌃` ``. Full color, scrollback, resize, multiple tabs.
+* **Mouse select + copy** (`⌘C`), **paste** (`⌘V`, bracketed-paste aware), **`⌘`-click URLs**.
+* History (`↑`), tab-completion, line-editing all work — it's your real shell.
+* Optional: drop it entirely with `--no-default-features` (the `terminal` Cargo feature)
+  for a ~2MB-lighter binary.
+
+<p align="center">
+  <img src="assets/screenshots/terminal.png" alt="Embedded terminal — a multi-tab PTY shell docked at the bottom, running git status + ls with live output and the shell's own git-aware prompt" width="900">
+</p>
+
+### Claude Code agents & git worktrees
+
+A home for AI coding agents — Claude Code by default (the start command is configurable). **Projects → worktrees → tabs**, each tab an agent.
+
+* **Projects → worktrees → tabs.** Every project's own checkout plus all of its git worktrees, whoever made them. New worktrees check out from a fresh `origin/main` in seconds, and each one runs one or more agent tabs. Drag to reorder, double-click to rename.
+* **Live status.** A dot per agent — working (blue), finished while you were away (green, "done"), **needs input** (red — a permission prompt, a question, a plan to approve). It comes from a small Claude Code hook Kyde installs (and can remove) in `~/.claude/settings.json`. A sound and a Dock bounce (on Linux, a desktop notification) when an agent finishes or needs you, `⌘⌥J` to jump to it, and an optional "needs you first" ordering.
+* **Agents outlive the window.** Each agent runs in its own background host process: quit Kyde and they keep working; reopen it and they're back, scrollback and all. After a reboot, each tab resumes its exact Claude session.
+* **AI titles and context.** Rows are titled by what the agent is doing (Claude Code's own session title), with its task, latest prompt and git state one click away.
+* **GitHub built in** (via `gh`). Issues and Pull Requests tabs per project — filter (Mine / All / Unassigned; Review requested / Mine / All) and search. **Start** an issue: a worktree on a `feat/123-short-slug` branch with an agent already briefed. **Review** a PR: it's checked out in its own worktree with a review agent, and Kyde remembers, offering *Re-review* next time. Issues and PRs render like GitHub — the conversation, reviews with their inline threads (reply in place), commits, checks and files changed — and you can comment, close or reopen.
+* **Cleans up after itself.** It spots finished work — the PR merged, its changes already on main (squash-merged included), the agent quit, never used, idle, or a quick AI "is this done?" — and, as you choose (Off / Suggest / Auto), closes the tabs or lists them in a **Clean Up** window that removes finished worktrees, pre-ticking the ones where nothing would be lost.
+* **Main stays fresh.** Each project's own checkout fast-forwards to `origin/main` in the background (only on its default branch, only when clean), and agents resuming there start from it.
+* **Scriptable.** `ky agent list | read | prompt | send | keys | wait | new | kill` — see and drive agents from the command line, with or without the window open, so agents can watch and drive each other (`ky agent help`).
+* **Agents-only mode** hides the IDE around it, for when Kyde is just your agent cockpit. Keyboard shortcuts for all of it (below), scrollback in an editor window (`⌘⌥E`), and per-row display options.
+
+<p align="center">
+  <img src="assets/screenshots/agents.png" alt="Agents view — a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's agent running in its tab" width="900">
+</p>
+
+#### Why it replaced herdr for me
+
+I was running my agents in [herdr](https://herdr.dev), and it's very good at what it does: a terminal workspace built for agents. But my day isn't just terminals. Work starts in a GitHub issue or a review request, an agent's output ends up as a diff I read and commit, and finished worktrees pile up. Next to herdr that meant a browser, an IDE and a git tool open too — and remembering to tidy up.
+
+Kyde puts that whole loop in one native window. Pick an issue or a pull request; one click gives it a fresh worktree and an agent that already knows the job. See at a glance which agents are working, done or waiting on me — and hear about it. Read the diff, commit, push. The finished worktree gets cleared away. Fewer windows, nothing to remember.
+
+herdr still does things Kyde doesn't: it runs anywhere a terminal does (including on remote machines over SSH), splits panes, and works with many agent CLIs. Kyde's Agents view is macOS-first and built around Claude Code.
 
 ### Search & navigation
 
@@ -292,6 +299,23 @@ Guarded by `perf_*` time-budget tests, headless-gpui smoke tests (render every s
 * No soft-wrap in the file editor (long lines scroll horizontally; the commit box does wrap). The editor holds a flat `String` and undo is whole-buffer snapshots — a rope-based buffer comes later for very large edits.
 * No scrollback search in the terminal (open it in an editor with `⌘⌥E` and `⌘F` there).
 * Agents' needs-input / done states come from a Claude Code hook; other agent CLIs get a simpler dot based on their output.
+
+## FAQ
+
+**Is Kyde free and open source?**
+Yes — Apache-2.0. Free to use, modify and redistribute.
+
+**Is it an Electron or web app?**
+No. It's native and GPU-rendered on [gpui](https://gpui.rs), the Rust UI framework behind Zed, and it drives the real `git` binary — no libgit2, no bundled browser.
+
+**Does it run on Windows?**
+Not as a prebuilt download yet. `cargo build --release` works; packaging it is a good first issue (see [Known limitations](#known-limitations--next)).
+
+**Does it replace my IDE?**
+It replaces the part I kept opening one for: commit, diff, merge, history and quick edits — with tree-sitter highlighting, folding, error squiggles and ⌘-click navigation. There's no language server, so no autocomplete or refactoring.
+
+**Which AI coding agents does it work with?**
+Claude Code by default, with live working / done / needs-input status from a hook Kyde installs. The start command is configurable, so other agent CLIs run too, with a simpler status dot.
 
 ## Contributing
 
