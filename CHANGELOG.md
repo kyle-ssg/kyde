@@ -8,8 +8,33 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 
 ## Unreleased
 
+### Features
+
+* **linux:** ship a Linux AppImage (`kyde-linux-x86_64.AppImage`) with every release again
+* **linux:** the menu bar's items (Open, Recent Projects, Settings, Plugins, What's New, FPS monitor, Clear Data & Restart, Quit) behind a ☰ button in the title strip
+* **linux:** agent alerts play their chime, and show a desktop notification while Kyde is in the background
+
 ### Bug Fixes
 
+* **linux:** group Kyde's windows under its own dock icon (window app id matches the `.desktop` entry)
+* **linux:** no second, empty title strip under the window manager's title bar on X11; on Wayland desktops that don't draw one (GNOME), Kyde draws its own with move, resize and window buttons
+* **linux:** Kyde's icon on its windows on X11, even when the AppImage isn't installed
+* **linux:** the `ky` shell command installed from the AppImage keeps working after Kyde quits
+* **linux:** the update banner's Download opens the release page with the system URL handler instead of fetching a macOS zip
+* **linux:** shortcuts are on Ctrl instead of the Super key the desktop takes; in the terminal Ctrl + a letter goes to the shell (`Ctrl+C` interrupts) and the terminal's own keys take `Ctrl+Shift`; `Ctrl+←` / `Ctrl+→` move by word in the editor
+* **linux:** Ctrl+click follows imports, multi-selects files for Compare and opens terminal links
+* **linux:** tooltips, hints and Settings → Keymap write shortcuts as `Ctrl+Shift+O`, not `⌘⇧O`
+* **linux:** Back / Forward, next / previous agent, agent tabs and Sort Lines take keys Linux desktops leave free (`Alt+←/→`, `Ctrl+Alt+PageDown/PageUp`, `Ctrl+PageDown/PageUp`, `F9`); the terminal leaves `Ctrl+Shift+K` to Push
+* **linux:** shortcuts written with Shift + a symbol bind on every keyboard layout, read from the active layout
+* **linux:** a dead key (´ ¨ ¸ or the grave accent, e.g. AltGr+= on a UK layout) no longer crashes Kyde on X11 with ibus; Kyde composes it itself when ibus only carries plain layouts
+* **linux:** Reveal in File Manager and Open in Terminal work; the terminal is yours (`$TERMINAL`, then your desktop's preferred terminal)
+* **linux:** paste files copied in a file manager into the tree, and middle-click paste the primary selection in the editor and terminal
+* **terminal:** fall back to your login shell, not a missing `/bin/zsh`, when `SHELL` is unset
+* **linux:** keep the single-instance socket in `$XDG_RUNTIME_DIR`, not the shared `/tmp`
+* show "Live refresh off" in the status bar when the OS won't watch the project (e.g. Linux's inotify watch limit)
+* say when the folder picker can't open (no XDG desktop portal) instead of doing nothing
+* a second Open (or Add Project) while the folder picker is open waits for it, instead of opening another picker that can hide behind the first
+* **linux:** a Kyde built from a shell inside the AppImage links `ky` to itself, not the AppImage
 * relay Enter to the embedded terminal instead of consuming it as an app confirmation shortcut
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows

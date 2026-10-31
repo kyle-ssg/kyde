@@ -1,7 +1,8 @@
-//! Reading file paths off the OS clipboard, so files **copied in Finder** can be pasted
-//! into Kyde's tree (issue #67). gpui's `read_from_clipboard` handles text + images but not
-//! file URLs, so this reaches `NSPasteboard` directly via objc2. Image data pasting rides
-//! gpui's `ClipboardEntry::Image`; only the file-URL case needs this module.
+//! Reading file paths off the OS clipboard, so files **copied in Finder** (or a Linux file
+//! manager) can be pasted into Kyde's tree (issue #67). gpui's `read_from_clipboard` handles
+//! text + images but not file URLs, so this reaches `NSPasteboard` directly via objc2 on
+//! macOS, and the X server's clipboard on Linux. Image data pasting rides gpui's
+//! `ClipboardEntry::Image`; only the file-URL case needs this module.
 
 use std::path::PathBuf;
 
@@ -33,14 +34,53 @@ pub(crate) fn file_paths() -> Vec<PathBuf> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// File paths on the clipboard (files Ctrl+C-copied in Nautilus, Nemo, Dolphin, Thunar…),
+/// or an empty vec when it holds none. gpui reads only text + images off the Linux
+/// clipboard, so this asks the X server for the `text/uri-list` that file managers offer,
+/// then GNOME's `x-special/gnome-copied-files`. On a Wayland desktop that is Xwayland, which
+/// mirrors the Wayland clipboard; with no X display at all the list is empty.
+#[cfg(target_os = "linux")]
+pub(crate) fn file_paths() -> Vec<PathBuf> {
+    let Ok(clip) = x11_clipboard::Clipboard::new() else {
+        return Vec::new();
+    };
+    let atoms = &clip.getter.atoms;
+    for target in ["text/uri-list", "x-special/gnome-copied-files"] {
+        let Ok(target) = clip.getter.get_atom(target) else {
+            continue;
+        };
+        // Bounded: a clipboard owner that never answers must not hang the paste.
+        let wait = std::time::Duration::from_millis(500);
+        if let Ok(list) = clip.load(atoms.clipboard, target, atoms.property, wait) {
+            let paths = uri_list_paths(&String::from_utf8_lossy(&list));
+            if !paths.is_empty() {
+                return paths;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// The local files in a `text/uri-list` (`file://` URLs, one per line, `#` comments) or a
+/// GNOME `x-special/gnome-copied-files` (the same, after a `copy` / `cut` line). Pure.
+#[cfg(target_os = "linux")]
+fn uri_list_paths(list: &str) -> Vec<PathBuf> {
+    list.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(url_to_path)
+        .filter(|p| p.is_absolute())
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub(crate) fn file_paths() -> Vec<PathBuf> {
     Vec::new()
 }
 
 /// Turn a `file://` URL into a filesystem path, percent-decoding the path portion.
 /// Returns `None` for a non-file URL. Pure — unit-tested below.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn url_to_path(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     // Drop an authority ("//host") if present — local file URLs use an empty authority, so
@@ -50,7 +90,7 @@ fn url_to_path(url: &str) -> Option<PathBuf> {
 }
 
 /// Minimal percent-decoding for file-URL paths (`%20` → space, etc.). Pure.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -71,7 +111,7 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
@@ -93,5 +133,29 @@ mod tests {
         assert_eq!(percent_decode("plain"), "plain");
         assert_eq!(percent_decode("a%2Fb"), "a/b");
         assert_eq!(percent_decode("bad%zz"), "bad%zz");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_file_lists_parse_to_paths() {
+        // text/uri-list: CRLF lines, a comment, a non-file URL.
+        assert_eq!(
+            uri_list_paths(
+                "# copied\r\nfile:///home/me/My%20Docs/a.txt\r\nfile:///tmp/b\r\nhttps://x.org\r\n"
+            ),
+            [
+                PathBuf::from("/home/me/My Docs/a.txt"),
+                PathBuf::from("/tmp/b")
+            ]
+        );
+        // GNOME / Nemo: the operation first, no trailing newline; UTF-8 escapes decode.
+        assert_eq!(
+            uri_list_paths("cut\nfile:///tmp/a\nfile:///tmp/%C3%A9"),
+            [PathBuf::from("/tmp/a"), PathBuf::from("/tmp/é")]
+        );
+        // A file URL naming another host is not a local path.
+        assert!(uri_list_paths("file://server/share/x").is_empty());
+        assert!(uri_list_paths("just some copied text").is_empty());
+        assert!(uri_list_paths("").is_empty());
     }
 }

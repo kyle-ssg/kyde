@@ -5,6 +5,7 @@ mod agents;
 mod branch;
 mod browse;
 mod changelog;
+pub(crate) mod chrome;
 mod commit;
 mod compare;
 mod context_menu;
@@ -30,4 +31,5 @@ mod toolbar;
 mod worktree;
 
 pub(crate) use context_menu::MenuEntry;
+pub(crate) use file_ops::{REVEAL_IN_FILES, REVEAL_IN_TERMINAL};
 pub(crate) use keyboard::{nav_keys, NavTarget};

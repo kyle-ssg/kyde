@@ -140,7 +140,8 @@ pub struct AgentsCfg {
     /// Play a sound when an agent finishes or needs input while you're elsewhere.
     #[serde(default = "yes")]
     pub sound: bool,
-    /// Bounce the Dock icon for the same, while Kyde isn't frontmost.
+    /// Bounce the Dock icon (Linux: show a desktop notification) for the same, while Kyde
+    /// isn't frontmost.
     #[serde(default = "yes")]
     pub dock_alerts: bool,
     /// List what needs you first: worktrees by attention (needs input, done, working, idle)

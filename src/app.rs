@@ -249,6 +249,7 @@ impl Kyde {
             pending_crash: crash_log_path()
                 .and_then(|p| std::fs::read_to_string(p).ok())
                 .filter(|s| !s.trim().is_empty()),
+            folder_picker_open: false,
             op_error: None,
             pending_error: None,
             context_menu: None,
@@ -256,6 +257,7 @@ impl Kyde {
             menu_focus_pending: false,
             menu_return_focus: None,
             main_window_bounds: None,
+            chrome: chrome::WindowChrome::default(),
             diff_view_open: false,
             rollback_win: None,
             new_branch_win: None,
@@ -287,6 +289,7 @@ impl Kyde {
             lh: LocalHistoryView::new(cx),
             fs_watcher: None,
             watch_root: None,
+            watch_off: None,
             term: TermState::new(),
             agents: AgentsView::new(cx),
         };
@@ -589,6 +592,7 @@ impl Kyde {
         }
         self.watch_root.clone_from(&root);
         self.fs_watcher = None; // drop the previous watcher (stops its thread)
+        self.watch_off = None;
         let Some(root) = root else { return };
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -605,9 +609,13 @@ impl Kyde {
                 let _ = tx.unbounded_send(());
             }
         });
-        let Ok(mut watcher) = watcher else { return };
-        if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
-            return; // path vanished / OS watch limit — stay on focus-refresh only
+        // Path vanished / OS watch limit — stay on focus-refresh only (and say so).
+        let mut watcher = match watcher {
+            Ok(w) => w,
+            Err(e) => return self.note_live_refresh_off(&e, &root),
+        };
+        if let Err(e) = watcher.watch(&root, RecursiveMode::Recursive) {
+            return self.note_live_refresh_off(&e, &root);
         }
         self.fs_watcher = Some(watcher);
         let watched = root;
@@ -636,6 +644,16 @@ impl Kyde {
             }
         })
         .detach();
+    }
+
+    /// The OS refused to watch the project, so outside edits show up only when Kyde's window
+    /// is focused again: the status bar says so for as long as that project is open. A
+    /// folder that vanished needs no note.
+    fn note_live_refresh_off(&mut self, e: &notify::Error, root: &std::path::Path) {
+        self.watch_off = live_refresh_off(e, root).map(|why| {
+            eprintln!("Live refresh off: {why}");
+            why.into()
+        });
     }
 
     /// Record a failed git operation so the user sees it (op-error banner) instead of a
@@ -870,5 +888,64 @@ impl Kyde {
             }
             Mode::Agents => self.enter_agents(cx),
         }
+    }
+}
+
+/// Why live refresh is off for a project the OS won't watch (the status bar's tooltip), or
+/// `None` when there is nothing to say (the folder vanished). Linux's inotify needs one watch
+/// per folder, so a big tree (`node_modules`, a monorepo) can exhaust the per-user limit,
+/// which macOS's `FSEvents` doesn't have.
+fn live_refresh_off(e: &notify::Error, root: &std::path::Path) -> Option<String> {
+    use notify::ErrorKind;
+    let why = match &e.kind {
+        ErrorKind::PathNotFound => return None,
+        ErrorKind::MaxFilesWatch => {
+            "The system's file-watch limit is reached (raise fs.inotify.max_user_watches)"
+                .to_string()
+        }
+        kind => {
+            let cause = match kind {
+                ErrorKind::Io(io) => io.to_string(),
+                ErrorKind::Generic(msg) => msg.clone(),
+                _ => e.to_string(),
+            };
+            // The folder it stopped at, relative to the project (e.g. one Kyde can't read).
+            match e.paths.first().and_then(|p| p.strip_prefix(root).ok()) {
+                Some(p) if !p.as_os_str().is_empty() => {
+                    format!("Can't watch {}: {cause}", p.display())
+                }
+                _ => format!("Can't watch this project: {cause}"),
+            }
+        }
+    };
+    Some(format!(
+        "{why}. Outside changes show when you switch back to Kyde."
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused watch is explained, with the Linux limit spelled out; a vanished folder isn't.
+    #[test]
+    fn a_refused_watch_says_live_refresh_is_off() {
+        use notify::{Error, ErrorKind};
+        let root = std::path::Path::new("/p");
+        let limit = live_refresh_off(&Error::new(ErrorKind::MaxFilesWatch), root).unwrap();
+        assert!(limit.contains("file-watch limit"), "{limit}");
+        assert!(limit.contains("fs.inotify.max_user_watches"), "{limit}");
+        let denied = || Error::io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        let at = live_refresh_off(&denied().add_path("/p/db/data".into()), root).unwrap();
+        assert!(
+            at.starts_with("Can't watch db/data: permission denied"),
+            "{at}"
+        );
+        let anywhere = live_refresh_off(&denied(), root).unwrap();
+        assert!(
+            anywhere.starts_with("Can't watch this project"),
+            "{anywhere}"
+        );
+        assert_eq!(live_refresh_off(&Error::path_not_found(), root), None);
     }
 }

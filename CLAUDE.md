@@ -94,8 +94,8 @@ divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 # glue, not a reusable component. Everything reusable is the kyde-ui crate.
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
-agents  branch  browse  changelog  commit  compare  diff_view  file_ops  find  finder  history
-local_history  merge  modals  notifications  onboarding  projects_view  push  rollback
+agents  branch  browse  changelog  chrome  commit  compare  diff_view  file_ops  find  finder
+history  local_history  merge  modals  notifications  onboarding  projects_view  push  rollback
 settings  tabs  terminal_panel  worktree
 
 # ── widgets/ — gpui-coupled widgets (own Entities/Elements) ──
@@ -103,6 +103,9 @@ editor/  mdview.rs  terminal.rs  remote_img.rs
 
 # ── platform/ — small OS utils (no gpui) ──
 clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
+terminal_app.rs (Open in Terminal off macOS)  window_icon.rs (X11 window icon)
+keyboard_layout.rs (Shift + symbol keys on the active Linux layout)  input_method.rs (no XIM for
+plain layouts on X11)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/

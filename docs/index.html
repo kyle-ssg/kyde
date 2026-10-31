@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
   <title>Kyde — fast native Git client &amp; diff editor</title>
-  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. Prebuilt for macOS; builds from source on Linux and Windows.">
+  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. Prebuilt for macOS and Linux; builds from source on Windows.">
   <link rel="canonical" href="https://kyle-ssg.github.io/Kyde/">
 
   <!-- Open Graph / social card -->
@@ -179,13 +179,16 @@
     <h2>Install</h2>
     <div class="platforms">
       <span class="pill">macOS — prebuilt</span>
-      <span class="pill">Linux — from source</span>
+      <span class="pill">Linux — prebuilt AppImage</span>
       <span class="pill">Windows — from source</span>
     </div>
     <pre><code># macOS — download from Releases and drag Kyde.app to /Applications:
 #   kyde-macos.zip          Apple Silicon
 #   kyde-macos-x86_64.zip   Intel
 # The build is Developer ID signed and notarized — no quarantine dance.
+
+# Linux — download kyde-linux-x86_64.AppImage from Releases, then:
+chmod +x kyde-linux-x86_64.AppImage && ./kyde-linux-x86_64.AppImage
 
 # or build from source (any platform)
 cargo build --release</code></pre>

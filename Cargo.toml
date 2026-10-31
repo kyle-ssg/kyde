@@ -171,6 +171,21 @@ objc2-app-kit = { workspace = true, features = [
     "NSPasteboardItem",
 ] }
 
+# Linux-only crates, all already in the tree for gpui's X11 backend / image loading, at the
+# same versions:
+# - x11rb + image: Kyde's icon on its X11 windows (`_NET_WM_ICON`, see
+#   src/platform/window_icon.rs).
+# - x11-clipboard: files copied in a file manager reach the clipboard as a `text/uri-list`
+#   target, which gpui doesn't read; `platform::clipboard` asks the X server for it (Xwayland
+#   on a Wayland desktop).
+# - xkbcommon: what Shift + a symbol key types on the active keyboard layout, so shortcuts
+#   written with Shift bind on every layout (`platform::keyboard_layout`).
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = "0.13"
+image = { version = "0.25", default-features = false, features = ["png"] }
+x11-clipboard = "0.9.3"
+xkbcommon = { version = "0.8", default-features = false }
+
 # Embeds the app icon + version into kyde.exe at build time (see build.rs).
 # Windows-only; nothing to compile on macOS/Linux.
 [target.'cfg(windows)'.build-dependencies]

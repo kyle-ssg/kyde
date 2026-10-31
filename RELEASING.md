@@ -18,8 +18,9 @@ Kyde follows [Semantic Versioning](https://semver.org/) — `MAJOR.MINOR.PATCH`.
    Apple-Silicon `kyde-macos.zip` and an Intel `kyde-macos-x86_64.zip`, each with a
    `.sha256` — Developer ID signs, notarizes and staples them (a no-op that leaves the
    ad-hoc signature if the signing secrets aren't set), and attaches them to the release.
-   Linux and Windows packaging exists in `scripts/`, but its matrix entries and package
-   steps are **commented out** in `release.yml`; uncomment both to revive a platform.
+   A Linux job does the same for `kyde-linux-x86_64.AppImage` (+ `.sha256`), built on a
+   pinned Ubuntu so its glibc floor stays put. Windows packaging's matrix entry and package
+   step are **commented out** in `release.yml`; uncomment both to revive it.
 
 That's it. Cutting a release = merging one PR.
 
@@ -62,5 +63,6 @@ yourself too: bump both `version` fields in `Cargo.toml` (and `Cargo.lock`), upd
 `CHANGELOG.md`, push a `vX.Y.Z` tag and create the GitHub Release yourself, then build
 the artifacts locally (`TARGET=aarch64-apple-darwin ./scripts/bundle-macos.sh`, then
 again for `x86_64-apple-darwin`, zipping each `dist/Kyde.app` as `kyde-macos.zip` /
-`kyde-macos-x86_64.zip`) and `gh release upload` each one. Locally built apps are
-ad-hoc-signed, not notarized. The automated path is strongly preferred.
+`kyde-macos-x86_64.zip`; on Ubuntu 24.04, `./scripts/bundle-linux.sh` renamed to
+`kyde-linux-x86_64.AppImage`) and `gh release upload` each one with a `.sha256`. Locally
+built apps are ad-hoc-signed, not notarized. The automated path is strongly preferred.

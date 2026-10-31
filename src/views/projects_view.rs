@@ -17,12 +17,9 @@ impl Kyde {
         let query = self.project_search.read(cx).text().to_lowercase();
 
         // A draggable title strip holds the macOS traffic lights on its own line, so the search
-        // row sits cleanly *below* them (not tucked under the close/minimise buttons).
-        let titlebar = div().flex().flex_none().h(px(38.0)).w_full().child(
-            div()
-                .size_full()
-                .window_control_area(gpui::WindowControlArea::Drag),
-        );
+        // row sits cleanly *below* them (not tucked under the close/minimise buttons). Off
+        // macOS it holds the menu button (and, drawing its own decorations, the window's).
+        let titlebar = self.render_bare_title_strip(38.0, cx);
         // One row below the titlebar: search box fills the left, New Project / Open inline right.
         let header = div()
             .flex()
@@ -99,7 +96,7 @@ impl Kyde {
         if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
-        root.into_any_element()
+        self.with_title_strip_extras(root, cx).into_any_element()
     }
 
     /// Recent projects matching the landing search (name or path), most recent first.
@@ -292,14 +289,9 @@ impl Kyde {
             .bg(t.frame_bg)
             .font_family(ui)
             .text_size(fs)
-            // Draggable strip over the traffic lights (the window has a transparent titlebar).
-            .child(
-                div()
-                    .h(px(40.0))
-                    .flex_none()
-                    .w_full()
-                    .window_control_area(gpui::WindowControlArea::Drag),
-            )
+            // Draggable strip over the traffic lights (the window has a transparent titlebar);
+            // off macOS it holds the menu button.
+            .child(self.render_bare_title_strip(40.0, cx))
             .child(hero)
             // Git-op error + crash banners pinned to the bottom of the window.
             .when(self.op_error.is_some(), |d| {
@@ -311,7 +303,7 @@ impl Kyde {
         if self.onboarding.open {
             root = root.child(self.render_onboarding(ui, fs, cx));
         }
-        root.into_any_element()
+        self.with_title_strip_extras(root, cx).into_any_element()
     }
 
     /// Editor tab strip: one tab per open file, left→right in open order. Click activates,
@@ -585,19 +577,59 @@ impl Kyde {
 
     /// Native folder picker for the "Open" / "New Project" buttons.
     pub(crate) fn pick_folder(&mut self, cx: &mut Context<Self>) {
+        self.prompt_folder("Open", cx, Self::open_project);
+    }
+
+    /// The native folder picker, then `then` with the folder picked — unless a picker is
+    /// already open. Off macOS the picker is the desktop portal's own window and doesn't block
+    /// Kyde, so a second press used to open a second picker, which could land hidden behind
+    /// the first; the first then wouldn't close until the hidden one did.
+    pub(crate) fn prompt_folder(
+        &mut self,
+        prompt: &str,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, PathBuf, &mut Context<Self>) + 'static,
+    ) {
+        if self.folder_picker_open {
+            return;
+        }
+        self.folder_picker_open = true;
         let rx = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open".into()),
+            prompt: Some(prompt.to_string().into()),
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(p) = paths.into_iter().next() {
-                    this.update(cx, |this, cx| this.open_project(p, cx)).ok();
+            let picked = rx.await;
+            this.update(cx, |this, cx| {
+                // closed, picked or failed: the next press opens a picker again
+                this.folder_picker_open = false;
+                let Ok(picked) = picked else { return };
+                if let Some(p) = this.picked_folder(picked, cx) {
+                    then(this, p, cx);
                 }
-            }
+            })
+            .ok();
         })
         .detach();
+    }
+
+    /// The folder a native picker returned, if one was picked. A picker that couldn't open
+    /// (Linux with no XDG desktop portal running, e.g. a bare i3 or sway session) says so on
+    /// the error banner, rather than leave an Open button that silently does nothing.
+    pub(crate) fn picked_folder(
+        &mut self,
+        picked: anyhow::Result<Option<Vec<PathBuf>>>,
+        cx: &mut Context<Self>,
+    ) -> Option<PathBuf> {
+        match picked {
+            Ok(paths) => paths?.into_iter().next(),
+            Err(e) => {
+                self.fail("Opening the folder picker", e);
+                cx.notify();
+                None
+            }
+        }
     }
 }

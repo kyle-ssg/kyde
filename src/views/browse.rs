@@ -387,8 +387,8 @@ impl Kyde {
                         // Cmd-click on a FILE toggles it in the multi-selection (for
                         // "Compare Selected" — issue #42) without opening it. The
                         // previously highlighted file seeds the set, so cmd-clicking a
-                        // second file selects the natural pair.
-                        if !is_dir && e.modifiers.platform {
+                        // second file selects the natural pair. (Ctrl-click off macOS.)
+                        if !is_dir && e.modifiers.secondary() {
                             if let Some(i) =
                                 this.browse.multi_selected.iter().position(|p| p == &p_act)
                             {

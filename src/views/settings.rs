@@ -656,7 +656,11 @@ impl Kyde {
             .child(toggle(
                 "agents-dock",
                 cfg.dock_alerts,
-                "Bounce the Dock icon while Kyde is in the background",
+                if cfg!(target_os = "macos") {
+                    "Bounce the Dock icon while Kyde is in the background"
+                } else {
+                    "Show a desktop notification while Kyde is in the background"
+                },
                 |c| c.dock_alerts = !c.dock_alerts,
                 cx,
             ))
@@ -1250,7 +1254,7 @@ impl Kyde {
             return;
         };
         let m = &ks.modifiers;
-        let bare = !(m.platform || m.control || m.alt);
+        let bare = held_modifiers(*m).iter().all(|&tok| tok == "shift");
         let key = ks.key.as_str();
         let f_key =
             key.len() > 1 && key.starts_with('f') && key[1..].chars().all(|c| c.is_ascii_digit());
@@ -1262,8 +1266,14 @@ impl Kyde {
                 self.persist_keymap(cx);
             }
             _ if bare && !f_key => {
-                self.keymap_editor.note =
-                    Some("Shortcuts need ⌘, ⌃ or ⌥ (or an F-key) — press again.".into());
+                self.keymap_editor.note = Some(
+                    if cfg!(target_os = "macos") {
+                        "Shortcuts need ⌘, ⌃ or ⌥ (or an F-key) — press again."
+                    } else {
+                        "Shortcuts need Ctrl or Alt (or an F-key) — press again."
+                    }
+                    .into(),
+                );
                 cx.notify();
                 return;
             }
@@ -1330,11 +1340,18 @@ fn key_caps(key: &str) -> gpui::Div {
         }))
 }
 
-/// The held modifiers as keymap tokens, in canonical order (`["cmd", "shift"]`).
+/// The held modifiers as keymap tokens, in canonical order (`["cmd", "shift"]`). A keymap
+/// writes the primary modifier as `cmd` on every OS (see `keymap::platform_key`), so off macOS
+/// Ctrl records as `cmd`; Super belongs to the desktop there and isn't recorded.
 fn held_modifiers(m: gpui::Modifiers) -> Vec<&'static str> {
+    let (cmd, ctrl) = if cfg!(target_os = "macos") {
+        (m.platform, m.control)
+    } else {
+        (m.control, false)
+    };
     [
-        (m.platform, "cmd"),
-        (m.control, "ctrl"),
+        (cmd, "cmd"),
+        (ctrl, "ctrl"),
         (m.alt, "alt"),
         (m.shift, "shift"),
     ]

@@ -137,14 +137,15 @@ impl Kyde {
             }
             _ => {
                 // No bundle to swap (dev binary). Download the zip to ~/Downloads and reveal
-                // it in Finder; only fall back to the release page if there's no zip asset.
+                // it in Finder; only fall back to the release page if there's no zip asset
+                // (always the case off macOS, see `update::check`), in the system browser.
                 if rel.zip_url.is_empty() {
                     let url = if rel.page_url.is_empty() {
                         "https://github.com/kyle-ssg/kyde/releases/latest".to_string()
                     } else {
                         rel.page_url.clone()
                     };
-                    let _ = std::process::Command::new("open").arg(url).spawn();
+                    cx.open_url(&url);
                     return;
                 }
                 if self.updating {

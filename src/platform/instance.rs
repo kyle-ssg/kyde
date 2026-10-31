@@ -2,7 +2,8 @@
 //! second `kyde <path>` from the terminal shouldn't start a second app — it should hand the
 //! path to the running one, which opens it as another project tab and comes to the front.
 //!
-//! Mechanism: a unix domain socket in the temp dir. First launch binds it and accepts
+//! Mechanism: a unix domain socket in the per-user runtime dir (`$XDG_RUNTIME_DIR` off macOS,
+//! else the temp dir). First launch binds it and accepts
 //! connections on a background thread, forwarding each payload over a channel to the UI
 //! thread. A later launch connects, writes the resolved project path (or nothing, meaning
 //! "just activate"), and exits before opening a window. A socket left behind by a crash is
@@ -70,13 +71,32 @@ const SUN_MAX: usize = 100;
 /// The socket this launch talks on: one per user + config dir ("profile"), so separate users
 /// on a shared `/tmp` and separate `XDG_CONFIG_HOME`s never collide.
 pub(crate) fn socket_path() -> PathBuf {
-    let dir = std::env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+    let dir = socket_dir(
+        std::env::var_os("XDG_RUNTIME_DIR"),
+        std::env::var_os("TMPDIR"),
+    );
     let profile = format!(
         "{}|{}",
         std::env::var("USER").unwrap_or_default(),
         std::env::var("XDG_CONFIG_HOME").unwrap_or_default()
     );
     socket_path_in(&dir, &profile)
+}
+
+/// Where the socket lives. Off macOS, `$XDG_RUNTIME_DIR` (Linux's per-user, owner-only
+/// `/run/user/<uid>`) when it is an absolute path to a directory: in a shared, world-writable
+/// `/tmp` another user could bind our socket name first and swallow every launch. Otherwise,
+/// and always on macOS (whose `TMPDIR` is already per-user), `$TMPDIR`, then `/tmp`.
+fn socket_dir(runtime: Option<std::ffi::OsString>, tmpdir: Option<std::ffi::OsString>) -> PathBuf {
+    if cfg!(not(target_os = "macos")) {
+        if let Some(dir) = runtime
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute() && d.is_dir())
+        {
+            return dir;
+        }
+    }
+    tmpdir.map_or_else(|| PathBuf::from("/tmp"), PathBuf::from)
 }
 
 /// Pure socket-path rule (the seam the tests drive): `<dir>/kyde-<profile hash>.sock`, or —
@@ -204,6 +224,34 @@ mod tests {
             ),
             "the fallback still separates temp dirs"
         );
+    }
+
+    /// Off macOS the socket sits in the per-user runtime dir; a missing, relative or
+    /// vanished one falls back to `TMPDIR`, then `/tmp`. macOS keeps its `TMPDIR`.
+    #[test]
+    fn socket_dir_prefers_the_runtime_dir_off_macos() {
+        let runtime = std::env::temp_dir();
+        let tmp = Some(std::ffi::OsString::from("/var/tmp-x"));
+        let want = if cfg!(target_os = "macos") {
+            PathBuf::from("/var/tmp-x")
+        } else {
+            runtime.clone()
+        };
+        assert_eq!(
+            socket_dir(Some(runtime.clone().into_os_string()), tmp.clone()),
+            want
+        );
+        assert_eq!(
+            socket_dir(Some("run/user/1".into()), tmp.clone()),
+            PathBuf::from("/var/tmp-x"),
+            "a relative runtime dir is ignored"
+        );
+        assert_eq!(
+            socket_dir(Some(runtime.join("kyde-no-such-dir").into()), tmp.clone()),
+            PathBuf::from("/var/tmp-x"),
+            "a runtime dir that isn't there is ignored"
+        );
+        assert_eq!(socket_dir(None, None), PathBuf::from("/tmp"));
     }
 
     /// The real handshake: a listener takes a launch, and a send with nothing listening

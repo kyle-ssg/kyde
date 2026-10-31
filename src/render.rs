@@ -15,6 +15,7 @@ impl Render for Kyde {
         // modals are `ModalWindow`). The Diff modal opens at these bounds so it's as big as the
         // editor and lands over it.
         self.main_window_bounds = Some(window.window_bounds());
+        self.chrome.update(window);
 
         // Agents-only window: the Agents view is all there is, project or not.
         let only = self.agents_only();
@@ -34,6 +35,10 @@ impl Render for Kyde {
                 self.projects_search_focused = true;
                 let handle = self.project_search.read(cx).focus_handle.clone();
                 window.defer(cx, move |window, _cx| window.focus(&handle));
+            }
+            // The menu button's menu (off macOS) opens over the Projects views too.
+            if self.context_menu.is_some() {
+                self.focus_menu_if_pending(None, window, cx);
             }
             return self.render_projects(ui, fs, cx);
         }
@@ -120,38 +125,43 @@ impl Render for Kyde {
         };
 
         // Native-blended title strip: a draggable frame-colored bar; the macOS traffic
-        // lights sit at its left (titlebar is transparent), so we inset past them.
+        // lights sit at its left (titlebar is transparent), so we inset past them. Off macOS
+        // the strip is a title bar only while the window draws its own decorations (see
+        // `chrome`); the menu button sits at its left then, and at its right end under a window
+        // manager's title bar (`app_menu_at_right`).
+        let client = self.chrome.client.is_some();
+        let menu = self.render_app_menu_button(40.0, cx);
+        let (menu_left, menu_right) = if self.app_menu_at_right() {
+            (None, menu)
+        } else {
+            (menu, None)
+        };
         let titlebar = div()
             .flex()
             .flex_row()
             .items_center()
             .h(px(40.0))
-            .pl(px(84.0))
+            .pl(px(chrome::TITLE_INSET))
             .gap_2()
             .bg(theme::get().titlebar_bg)
+            .children(menu_left)
             // With ≤1 project open there's no tab strip, so show the project title (chip +
             // name + chevron) right of the traffic lights.
             .when(self.open_projects.len() <= 1 && !only, |d| {
                 d.child(self.render_titlebar_project(cx))
             })
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .window_control_area(gpui::WindowControlArea::Drag)
-                    // Double-click the title bar to zoom (maximize), matching macOS — not
-                    // fullscreen.
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_this, e: &gpui::MouseDownEvent, window, _cx| {
-                            if e.click_count >= 2 {
-                                window.zoom_window();
-                            }
-                        }),
-                    ),
-            )
+            .child(chrome::drag_area(client, &self.chrome.drag_armed))
             // Git quick-access buttons, right-aligned (issue #92).
-            .children(self.render_git_toolbar(cx));
+            .children(self.render_git_toolbar(cx))
+            // ...and the menu button after them where the window manager draws the title bar.
+            .when(menu_right.is_some(), |d| d.pr(px(chrome::TITLE_INSET)))
+            .children(menu_right)
+            .when(client, |d| {
+                d.child(chrome::window_controls(
+                    self.chrome.maximized,
+                    self.chrome.controls,
+                ))
+            });
 
         // Left activity rail with the mode icons.
         let rail = div()
@@ -237,7 +247,7 @@ impl Render for Kyde {
                     .when(active, |d| d.bg(t.bg_light))
                     .when(!active, |d| d.hover(|d| d.bg(t.bg_mid)))
                     .cursor_pointer()
-                    .tooltip(ui::tip("Terminal  (⌃`)"))
+                    .tooltip(ui::tip(format!("Terminal  ({})", pretty_key("ctrl-`"))))
                     .child(
                         svg()
                             .path("icons/terminal.svg")
@@ -520,7 +530,8 @@ impl Render for Kyde {
                     .child(SharedString::from(format!("{:.0} fps", self.fps.shown))),
             );
         }
-        root.into_any_element()
+        root.children(chrome::resize_handles(self.chrome.client))
+            .into_any_element()
     }
 }
 
