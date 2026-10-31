@@ -39,6 +39,13 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.9.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.8.0...kyde-v2.9.0) (2026-10-31)
+
+
+### Features
+
+* **linux:** a working Linux build — AppImage releases, Ctrl shortcuts, window chrome and desktop integration ([#115](https://github.com/kyle-ssg/kyde/issues/115)) ([722dda2](https://github.com/kyle-ssg/kyde/commit/722dda208ace2bca1d71ca7257339bf56292cd21))
+
 ## [2.8.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.7.0...kyde-v2.8.0) (2026-10-30)
 
 
