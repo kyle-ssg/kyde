@@ -4341,6 +4341,8 @@ mod gpui_smoke_tests {
             // Config too: the keymap / plugin / theme stores would otherwise read — and a test
             // that saves would overwrite — the developer's real ~/.config/kyde (CI has none).
             std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+            // …and the agents' state files / notes would land in the real ~/.kyde/agents.
+            std::env::set_var("KYDE_AGENTS_DIR", dir.join("agents"));
         });
     }
 
@@ -6962,6 +6964,77 @@ mod gpui_smoke_tests {
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
+    /// A new agent tab in a worktree with work in it gets Kyde's note for its first prompt;
+    /// when its agent then enters another worktree (Claude Code's `EnterWorktree`), the tab
+    /// follows it there — and the sidebar with it.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_follows_its_agent_into_a_new_worktree(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx); // uncommitted changes: a busy worktree
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let id = handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents.tabs[&dir].tabs.last().unwrap().id.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let note = std::fs::read_to_string(agents::brief_path(&id)).unwrap();
+        assert!(note.contains("2 uncommitted files") && note.contains("EnterWorktree"));
+
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                ".claude/worktrees/style",
+                "-b",
+                "style",
+            ])
+            .current_dir(&dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let cwd = dir.join(".claude/worktrees/style");
+        let transcript = agents::claude_project_dir(&cwd).unwrap().join("s1.jsonl");
+        let to = agents::moved_worktree(&dir, &cwd, &transcript).expect("EnterWorktree'd");
+        handle
+            .update(cx, |k, _w, cx| {
+                let report = agents::HookReport {
+                    hook: agents::Hook::Working,
+                    session: Some("s1".into()),
+                    cwd: Some(cwd.clone()),
+                    transcript: Some(transcript.clone()),
+                };
+                let read = (
+                    dir.clone(),
+                    id.clone(),
+                    std::time::SystemTime::now(),
+                    Some(report),
+                    Some(to.clone()),
+                );
+                k.agents_apply_hooks(vec![read], cx);
+                assert_eq!(k.agents.tabs[&dir].tabs.len(), 1, "the first tab stays");
+                let moved = &k.agents.tabs[&to].tabs;
+                assert_eq!((moved.len(), moved[0].id.as_str()), (1, id.as_str()));
+                assert_eq!(moved[0].session.as_deref(), Some("s1"));
+                assert!(k.agents.cfg.spaces[0].worktrees.contains(&to));
+                // It was on screen, so the view went with it.
+                assert_eq!(k.agents.selected.as_deref(), Some(to.as_path()));
             })
             .unwrap();
     }
