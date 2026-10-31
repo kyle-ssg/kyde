@@ -919,6 +919,17 @@ impl Repo {
         }
     }
 
+    /// The repository's shared git folder (`git rev-parse --git-common-dir`), absolute — the
+    /// same for the main checkout and every linked worktree, so it tells whether two
+    /// checkouts are one repository.
+    pub fn common_dir(&self) -> Result<PathBuf> {
+        let out = git(
+            &self.root,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?;
+        Ok(PathBuf::from(out.trim()))
+    }
+
     /// Remove the linked worktree at `path` (`git worktree remove`, NOT forced): git
     /// refuses while it has uncommitted changes or untracked files, so no work is lost —
     /// that refusal is the error. The worktree's branch is kept.
@@ -928,11 +939,19 @@ impl Repo {
 
     /// Remove the linked worktree at `path` even with uncommitted or untracked changes
     /// (`git worktree remove --force`) — those changes are LOST; committed work stays on the
-    /// branch, which is kept. Only after the user has confirmed.
+    /// branch, which is kept. Only after the user has confirmed. A locked worktree goes too
+    /// (the second `--force`): Claude Code locks the worktrees it makes and leaves them
+    /// locked after its session ends.
     pub fn remove_worktree_force(&self, path: &Path) -> Result<()> {
         git(
             &self.root,
-            &["worktree", "remove", "--force", &path.to_string_lossy()],
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                "--force",
+                &path.to_string_lossy(),
+            ],
         )
         .map(|_| ())
     }
@@ -1407,12 +1426,23 @@ mod tests {
         let made = base.join("wt-made");
         repo.add_worktree(&made, "worktree/made", None).unwrap();
         assert_eq!(repo.worktrees().unwrap().len(), 3);
+        assert_eq!(
+            Repo::discover(&made).unwrap().common_dir().unwrap(),
+            repo.common_dir().unwrap()
+        );
         fs::write(made.join("wip.txt"), "x").unwrap();
         assert!(repo.remove_worktree(&made).is_err(), "dirty worktree kept");
         fs::remove_file(made.join("wip.txt")).unwrap();
         repo.remove_worktree(&made).unwrap();
         assert!(!made.exists());
         assert!(repo.branches().unwrap().contains(&"worktree/made".into()));
+
+        // A locked one (as Claude Code leaves its worktrees) still goes when forced.
+        let locked = base.join("wt-locked");
+        repo.add_worktree(&locked, "worktree/locked", None).unwrap();
+        g(&work, &["worktree", "lock", &locked.to_string_lossy()]);
+        repo.remove_worktree_force(&locked).unwrap();
+        assert!(!locked.exists());
 
         let _ = fs::remove_dir_all(&base);
     }
