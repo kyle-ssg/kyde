@@ -16,31 +16,42 @@
 //! The shell itself (zsh/bash) owns command history (Up arrow), tab-completion, line
 //! editing — all we do is faithfully relay keystrokes and render the bytes back. So
 //! Up-arrow history "just works" once we send the correct `ESC [ A` for the Up key.
+use crate::editor::{CodeEditor, EditorEvent};
 use crate::theme;
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, Notify, OnResize, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
+use alacritty_terminal::index::{Column, Direction, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{Match, RegexIter, RegexSearch};
 use alacritty_terminal::term::{test::TermSize, Config, Term, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 use gpui::{
-    div, fill, point, prelude::*, px, relative, App, Bounds, Context, ElementId, Entity,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyDownEvent, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent,
+    div, fill, point, prelude::*, px, relative, svg, App, Bounds, Context, DispatchPhase,
+    ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyDownEvent,
+    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent,
     ShapedLine, Style, TextRun, Window,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Default grid until the first paint measures the real cell size and resizes.
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
+
+/// Scrollbar gutter width, thumb thickness and end inset — the editor panes' (`with_scrollbars`).
+const SB_BAR: f32 = 12.0;
+const SB_THUMB: f32 = 6.0;
+const SB_END: f32 = 8.0;
+
+/// How often an open find re-counts while output streams in.
+const FIND_RESCAN: Duration = Duration::from_millis(500);
 
 #[cfg(target_os = "windows")]
 fn default_shell() -> String {
@@ -204,6 +215,60 @@ pub struct TerminalView {
     pid: Arc<std::sync::atomic::AtomicU32>,
     /// When you last typed or pasted into it.
     pub last_input: Option<std::time::Instant>,
+    /// Wheel pixels short of a whole line, carried to the next event (a trackpad sends a few
+    /// px at a time; rounding each event alone dropped every one under half a line).
+    scroll_px: f32,
+    /// A scrollbar thumb drag in progress.
+    sb_drag: Option<SbDrag>,
+    /// Find (⌘F), built the first time it opens.
+    find: Option<TermFind>,
+}
+
+/// A scrollbar drag: the cursor y it started at, and how many lines sat above the view then.
+#[derive(Clone, Copy)]
+struct SbDrag {
+    start_y: f32,
+    start_top: f32,
+}
+
+/// The scrollbar as drawn: thumb length and top in its track, lines of scrollback, and how
+/// many of them sit above the view.
+struct Sb {
+    track: f32,
+    len: f32,
+    pos: f32,
+    hist: usize,
+    top: usize,
+}
+
+/// Terminal find: the query box and the match it's on.
+struct TermFind {
+    open: bool,
+    query: Entity<CodeEditor>,
+    _query_sub: gpui::Subscription,
+    /// The query, compiled (`None` while empty).
+    regex: Option<RegexSearch>,
+    /// The current match where it was found, with the scrollback size and scroll offset then
+    /// (the offset adjusted for our own scrolling since) — see [`shifted`].
+    cur: Option<(Match, usize, isize)>,
+    /// Matches in the whole buffer at the last scan, and which is current (1 = newest; 0 =
+    /// none).
+    count: usize,
+    index: usize,
+    scanned: Option<Instant>,
+}
+
+/// Which match a find scan lands on.
+#[derive(Clone, Copy)]
+enum Pick {
+    /// The query changed: the newest match at or above the bottom of the view.
+    Fresh,
+    /// Toward the top of the scrollback (Enter, ⌘G).
+    Older,
+    /// Toward the live screen (⇧Enter, ⇧⌘G).
+    Newer,
+    /// Just re-count, staying on the current match.
+    Keep,
 }
 
 impl TerminalView {
@@ -389,6 +454,9 @@ impl TerminalView {
             anchor_bottom: false,
             pid,
             last_input: None,
+            scroll_px: 0.0,
+            sb_drag: None,
+            find: None,
         }
     }
 
@@ -418,6 +486,14 @@ impl TerminalView {
                 // batch; the subscriber debounces, so a build's stream of wakeups
                 // costs one refresh after it quiets down.
                 cx.emit(TerminalEvent::Output);
+                // An open find re-counts now and then as output streams in.
+                if self.find.as_ref().is_some_and(|f| {
+                    f.open
+                        && f.regex.is_some()
+                        && f.scanned.is_none_or(|t| t.elapsed() >= FIND_RESCAN)
+                }) {
+                    self.find_scan(Pick::Keep);
+                }
                 cx.notify();
             }
             AlacEvent::MouseCursorDirty => cx.notify(),
@@ -531,7 +607,7 @@ impl TerminalView {
     /// the live screen, write, repaint — the same steps `on_key` does for typed keys.
     fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
-        self.term.lock().scroll_display(Scroll::Bottom);
+        self.scroll(Scroll::Bottom);
         self.write(bytes);
         cx.notify();
     }
@@ -579,7 +655,7 @@ impl TerminalView {
             if !bytes.is_empty() {
                 // Any keystroke jumps back to the live screen (out of scrollback).
                 self.last_input = Some(std::time::Instant::now());
-                self.term.lock().scroll_display(Scroll::Bottom);
+                self.scroll(Scroll::Bottom);
                 self.write(bytes);
                 cx.notify();
             }
@@ -639,6 +715,9 @@ impl TerminalView {
             t.grid_mut().clear_history();
             t.scroll_display(Scroll::Bottom);
         }
+        if let Some(f) = self.find.as_mut() {
+            f.cur = None;
+        }
         self.write(b"\x0c".to_vec());
         cx.notify();
     }
@@ -656,9 +735,251 @@ impl TerminalView {
     /// Scroll the scrollback buffer by a number of lines (positive = up/back in history).
     fn scroll_lines(&mut self, lines: i32, cx: &mut Context<Self>) {
         if lines != 0 {
-            self.term.lock().scroll_display(Scroll::Delta(lines));
+            self.scroll(Scroll::Delta(lines));
             cx.notify();
         }
+    }
+
+    /// Scroll the view. Everything that scrolls comes through here, so an open find can tell
+    /// its own scrolling from output pushing lines up (see [`shifted`]).
+    fn scroll(&mut self, s: Scroll) {
+        let mut t = self.term.lock();
+        let before = t.grid().display_offset();
+        t.scroll_display(s);
+        let after = t.grid().display_offset();
+        drop(t);
+        if let Some((_, _, off)) = self.find.as_mut().and_then(|f| f.cur.as_mut()) {
+            *off += after as isize - before as isize;
+        }
+    }
+
+    /// The scrollbar, when there's scrollback to scroll through and the pane has painted.
+    fn scrollbar(&self) -> Option<Sb> {
+        let b = self.bounds?;
+        let t = self.term.lock();
+        let (hist, off) = (t.grid().history_size(), t.grid().display_offset());
+        drop(t);
+        if hist == 0 {
+            return None;
+        }
+        let ch = self.cell.1.max(1.0);
+        let track = f32::from(b.size.height);
+        let top = hist.saturating_sub(off);
+        let (len, pos) =
+            crate::ui::scrollbar_thumb(track, hist as f32 * ch, -(top as f32) * ch, SB_END);
+        Some(Sb {
+            track,
+            len,
+            pos,
+            hist,
+            top,
+        })
+    }
+
+    /// Press in the scrollbar gutter at window `y`: on the thumb, grab it; elsewhere, jump
+    /// the thumb's middle there first — either way it then follows the cursor.
+    fn sb_press(&mut self, y: f32, cx: &mut Context<Self>) {
+        let (Some(sb), Some(b)) = (self.scrollbar(), self.bounds) else {
+            return;
+        };
+        let rel = y - f32::from(b.top());
+        let on_thumb = rel >= sb.pos && rel <= sb.pos + sb.len;
+        let mut start_top = sb.top as f32;
+        if !on_thumb {
+            let span = sb.track - sb.len - 2.0 * SB_END;
+            if span > 0.0 {
+                let frac = ((rel - SB_END - sb.len / 2.0) / span).clamp(0.0, 1.0);
+                start_top = frac * sb.hist as f32;
+                self.scroll_to_top_lines(start_top);
+            }
+        }
+        self.sb_drag = Some(SbDrag {
+            start_y: y,
+            start_top,
+        });
+        cx.notify();
+    }
+
+    /// The thumb follows a drag to window `y`.
+    fn sb_drag_to(&mut self, y: f32, cx: &mut Context<Self>) {
+        let (Some(d), Some(sb)) = (self.sb_drag, self.scrollbar()) else {
+            return;
+        };
+        let span = sb.track - sb.len - 2.0 * SB_END;
+        if span <= 0.0 {
+            return;
+        }
+        self.scroll_to_top_lines(d.start_top + (y - d.start_y) * sb.hist as f32 / span);
+        cx.notify();
+    }
+
+    /// Scroll so `top` lines of scrollback sit above the view.
+    fn scroll_to_top_lines(&mut self, top: f32) {
+        let t = self.term.lock();
+        let (hist, off) = (t.grid().history_size(), t.grid().display_offset());
+        drop(t);
+        let top = (top.round().max(0.0) as usize).min(hist);
+        let delta = (hist - top) as i32 - off as i32;
+        if delta != 0 {
+            self.scroll(Scroll::Delta(delta));
+        }
+    }
+
+    /// Whether the find bar is open.
+    fn find_open(&self) -> bool {
+        self.find.as_ref().is_some_and(|f| f.open)
+    }
+
+    /// Open the find bar (⌘F) with its query selected, so typing replaces it.
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let f = self.find_state(cx);
+        f.open = true;
+        let query = f.query.clone();
+        query.update(cx, |e, cx| {
+            let n = e.text().len();
+            e.select_range(0..n, cx);
+        });
+        window.focus(&query.read(cx).focus_handle);
+        if let Some(m) = self.find_scan(Pick::Fresh) {
+            self.reveal(&m);
+        }
+        cx.notify();
+    }
+
+    /// The find state, built the first time it's needed.
+    fn find_state(&mut self, cx: &mut Context<Self>) -> &mut TermFind {
+        self.find.get_or_insert_with(|| {
+            let query = cx.new(|cx| {
+                let mut e = CodeEditor::single_line(cx, "Find");
+                // Enter / ⇧Enter / Escape: the find bar's keys, ahead of the terminal's.
+                e.ctx_override = Some("FindBar");
+                e
+            });
+            let sub = cx.subscribe(&query, |this, _q, ev: &EditorEvent, cx| {
+                if matches!(ev, EditorEvent::Changed) {
+                    this.find_query_changed(cx);
+                }
+            });
+            TermFind {
+                open: false,
+                query,
+                _query_sub: sub,
+                regex: None,
+                cur: None,
+                count: 0,
+                index: 0,
+                scanned: None,
+            }
+        })
+    }
+
+    /// Close the find bar and hand the keyboard back to the shell.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            f.open = false;
+            f.cur = None;
+        }
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// The query was edited: search for it afresh.
+    fn find_query_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = self.find.as_mut() else {
+            return;
+        };
+        let q = f.query.read(cx).text().to_string();
+        f.regex = (!q.is_empty())
+            .then(|| RegexSearch::new(&literal_regex(&q)).ok())
+            .flatten();
+        f.cur = None;
+        if let Some(m) = self.find_scan(Pick::Fresh) {
+            self.reveal(&m);
+        }
+        cx.notify();
+    }
+
+    /// Step to the next match up or down the buffer and bring it into view.
+    fn find_step(&mut self, pick: Pick, cx: &mut Context<Self>) {
+        if let Some(m) = self.find_scan(pick) {
+            self.reveal(&m);
+        }
+        cx.notify();
+    }
+
+    /// Search the whole buffer for the query and land on the match `pick` says — returned,
+    /// for scrolling to (`None` with no match, or for a [`Pick::Keep`] re-count).
+    fn find_scan(&mut self, pick: Pick) -> Option<Match> {
+        let f = self.find.as_mut()?;
+        f.scanned = Some(Instant::now());
+        let Some(regex) = f.regex.as_mut() else {
+            (f.cur, f.count, f.index) = (None, 0, 0);
+            return None;
+        };
+        let term = self.term.lock();
+        let all = scan_all(&term, regex);
+        let grid = term.grid();
+        let (hist, off) = (grid.history_size(), grid.display_offset());
+        let now = f.cur.as_ref().and_then(|c| shifted(&term, c));
+        let bottom = Line(term.screen_lines() as i32 - 1 - off as i32);
+        drop(term);
+        let n = all.len();
+        let last = n.checked_sub(1);
+        let i = match (pick, &now) {
+            _ if n == 0 => None,
+            (Pick::Keep, Some(c)) => all.iter().position(|m| m == c),
+            (Pick::Keep, None) => None,
+            (Pick::Fresh, _) => all.iter().rposition(|m| m.start().line <= bottom).or(last),
+            (Pick::Older, Some(c)) => all.iter().rposition(|m| m.start() < c.start()).or(last),
+            (Pick::Newer, Some(c)) => all.iter().position(|m| m.start() > c.start()).or(Some(0)),
+            (Pick::Older | Pick::Newer, None) => last,
+        };
+        f.count = n;
+        f.index = i.map_or(0, |i| n - i);
+        let m = i.map(|i| all[i].clone());
+        if let Some(m) = &m {
+            f.cur = Some((m.clone(), hist, off as isize));
+        } else if !matches!(pick, Pick::Keep) {
+            f.cur = None;
+        }
+        m.filter(|_| !matches!(pick, Pick::Keep))
+    }
+
+    /// Scroll `m` to the middle of the view, unless it's already all on screen.
+    fn reveal(&mut self, m: &Match) {
+        let t = self.term.lock();
+        let rows = t.screen_lines() as i32;
+        let (hist, off) = (
+            t.grid().history_size() as i32,
+            t.grid().display_offset() as i32,
+        );
+        drop(t);
+        let (first, last) = (m.start().line.0, m.end().line.0);
+        if first >= -off && last < rows - off {
+            return;
+        }
+        let target = (rows / 2 - first).clamp(0, hist);
+        self.scroll(Scroll::Delta(target - off));
+    }
+
+    /// The open find's matches on screen, and its current match wherever that is now.
+    fn visible_matches(&mut self) -> (Vec<Match>, Option<Match>) {
+        let Some(f) = self.find.as_mut().filter(|f| f.open) else {
+            return (Vec::new(), None);
+        };
+        let Some(regex) = f.regex.as_mut() else {
+            return (Vec::new(), None);
+        };
+        let term = self.term.lock();
+        let off = term.grid().display_offset() as i32;
+        let top = GridPoint::new(Line(-off), Column(0));
+        let bottom = GridPoint::new(
+            Line(term.screen_lines() as i32 - 1 - off),
+            term.last_column(),
+        );
+        let on_screen = RegexIter::new(top, bottom, Direction::Right, &term, regex).collect();
+        let cur = f.cur.as_ref().and_then(|c| shifted(&term, c));
+        (on_screen, cur)
     }
 
     /// Map a window-space cursor position to a grid point + which half of the cell it's in.
@@ -771,6 +1092,39 @@ fn url_at(line: &str, col: usize) -> Option<String> {
     None
 }
 
+/// `query` as a regex that matches it literally.
+fn literal_regex(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() * 2);
+    for c in query.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Every match of `regex` in `term` — scrollback and screen — top to bottom.
+fn scan_all<T>(term: &Term<T>, regex: &mut RegexSearch) -> Vec<Match> {
+    let start = GridPoint::new(term.topmost_line(), Column(0));
+    let end = GridPoint::new(term.bottommost_line(), term.last_column());
+    RegexIter::new(start, end, Direction::Right, term, regex).collect()
+}
+
+/// Where a find's current match `(m, history size, scroll offset)` is now. Output pushes
+/// lines up: by as many as the scrollback grew, or — once it's full and stops growing — as
+/// many as a scrolled-back view moved to stay on them (our own scrolling is already taken
+/// out of the offset). `None` once it's gone off the top or the buffer was cleared.
+fn shifted<T>(term: &Term<T>, (m, hist, off): &(Match, usize, isize)) -> Option<Match> {
+    let grid = term.grid();
+    let grew = grid.history_size() as isize - *hist as isize;
+    let moved = grid.display_offset() as isize - off;
+    let up = i32::try_from(grew.max(moved)).ok()?;
+    let lift = |p: &GridPoint| GridPoint::new(Line(p.line.0 - up), p.column);
+    let (a, b) = (lift(m.start()), lift(m.end()));
+    (a.line >= term.topmost_line() && b.line <= term.bottommost_line()).then_some(a..=b)
+}
+
 /// Open a URI in the OS default handler.
 fn open_uri(uri: &str) {
     #[cfg(target_os = "macos")]
@@ -832,7 +1186,37 @@ impl Render for TerminalView {
             .bg(theme::get().main_bg)
             // ⌘K clears the current (unsubmitted) input line — overrides the global commit
             // binding in this context.
-            .on_action(cx.listener(|this, _: &crate::ClearTerminal, _w, cx| this.clear_input(cx)))
+            .on_action(cx.listener(|this, _: &crate::ClearTerminal, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.clear_input(cx);
+                }
+            }))
+            // ⌘F searches the scrollback. While the bar is open, Enter / ⌘G step up to older
+            // matches, ⇧Enter / ⇧⌘G back down, Escape closes it; closed, they're the app's.
+            .on_action(cx.listener(|this, _: &crate::TerminalFind, window, cx| {
+                this.open_find(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::FindNext, _w, cx| {
+                if this.find_open() {
+                    this.find_step(Pick::Older, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &crate::FindPrev, _w, cx| {
+                if this.find_open() {
+                    this.find_step(Pick::Newer, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &crate::CloseFind, window, cx| {
+                if this.find_open() {
+                    this.close_find(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
             // Enter / Backspace / Escape are also app shortcuts. gpui dispatches
             // binding actions before on_key_down and consumes the key, so we relay the PTY byte
             // here rather than let it fall through to the app action (which deleted the selected
@@ -904,19 +1288,166 @@ impl Render for TerminalView {
                     cx.notify();
                 }),
             )
-            .on_key_down(cx.listener(|this, e: &KeyDownEvent, _w, cx| this.on_key(e, cx)))
-            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _w, cx| {
-                // 3 lines per wheel notch, matching the editor panes' feel.
-                let dy = e.delta.pixel_delta(px(this.cell.1.max(1.0))).y;
-                let lines = (f32::from(dy) / this.cell.1.max(1.0)).round() as i32;
-                this.scroll_lines(lines, cx);
+            // Keys typed in the find box aren't the shell's.
+            .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                if this.focus.is_focused(window) {
+                    this.on_key(e, cx);
+                }
             }))
-            .child(TerminalElement { view })
+            .on_scroll_wheel(cx.listener(|this, e: &ScrollWheelEvent, _w, cx| {
+                let ch = this.cell.1.max(1.0);
+                if matches!(e.touch_phase, gpui::TouchPhase::Started) {
+                    this.scroll_px = 0.0;
+                }
+                this.scroll_px += f32::from(e.delta.pixel_delta(px(ch)).y);
+                let lines = (this.scroll_px / ch).trunc();
+                this.scroll_px -= lines * ch;
+                this.scroll_lines(lines as i32, cx);
+            }))
+            .flex()
+            .flex_row()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(TerminalElement { view }),
+            )
+            .child(self.render_scrollbar(cx))
+            .children(
+                self.find
+                    .as_ref()
+                    .filter(|f| f.open)
+                    .map(|f| self.render_find(f, cx)),
+            )
             .children(menu_at.map(|at| self.render_context_menu(at, window, cx)))
     }
 }
 
 impl TerminalView {
+    /// The scrollbar's gutter at the right edge — always there, so the grid doesn't reflow
+    /// when scrollback first appears; the thumb shows once there's something to scroll.
+    fn render_scrollbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        let sb = self.scrollbar();
+        let dragging = self.sb_drag.is_some();
+        div()
+            .id("term-scrollbar")
+            .w(px(SB_BAR))
+            .flex_none()
+            .h_full()
+            .relative()
+            .when(sb.is_some(), |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, e: &MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        this.sb_press(f32::from(e.position.y), cx);
+                    }),
+                )
+            })
+            .children(sb.map(|sb| {
+                div()
+                    .absolute()
+                    .left(px((SB_BAR - SB_THUMB) / 2.0))
+                    .top(px(sb.pos))
+                    .w(px(SB_THUMB))
+                    .h(px(sb.len))
+                    .rounded_full()
+                    .bg(t.line_number)
+                    .opacity(if dragging { 0.85 } else { 0.5 })
+                    .hover(|s| s.opacity(0.85))
+                    .cursor_pointer()
+            }))
+    }
+
+    /// The find bar, floated at the top right over the output.
+    fn render_find(&self, f: &TermFind, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        let has_query = f.regex.is_some();
+        let label = match (has_query, f.count, f.index) {
+            (false, ..) => String::new(),
+            (true, 0, _) => "No results".to_string(),
+            (true, n, 0) => n.to_string(),
+            (true, n, i) => format!("{i}/{n}"),
+        };
+        let btn = |id: &'static str, icon: &'static str, tip: &'static str| {
+            crate::ui::icon_btn(id, 22.0)
+                .tooltip(crate::ui::tip(tip))
+                .child(svg().path(icon).size(px(14.0)).text_color(t.line_number))
+        };
+        let (older, newer) = if cfg!(target_os = "macos") {
+            ("Older match  (↩ / ⌘G)", "Newer match  (⇧↩ / ⇧⌘G)")
+        } else {
+            (
+                "Older match  (Enter / F3)",
+                "Newer match  (Shift+Enter / Shift+F3)",
+            )
+        };
+        div()
+            .absolute()
+            .top(px(6.0))
+            .right(px(SB_BAR + 6.0))
+            .occlude()
+            // Clicks on the bar stay on it (not a selection in the output underneath).
+            .on_mouse_down(MouseButton::Left, |_e, _w, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_e, _w, cx| cx.stop_propagation())
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .pl_2()
+            .pr_1()
+            .py_1p5()
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded_md()
+            .shadow_md()
+            .font_family(theme::font::UI_FAMILY)
+            .text_size(px(t.ui_font_size))
+            .child(
+                div()
+                    .w(px(200.0))
+                    .h(px(26.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .bg(t.main_bg)
+                    .border_1()
+                    .border_color(t.divider)
+                    .rounded_md()
+                    .child(f.query.clone()),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .min_w(px(64.0))
+                    .px_1()
+                    .text_color(t.line_number)
+                    .text_size(px(t.ui_font_size - 1.0))
+                    .child(label),
+            )
+            .child(
+                btn("term-find-older", "icons/arrow-up.svg", older).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.find_step(Pick::Older, cx)),
+                ),
+            )
+            .child(
+                btn("term-find-newer", "icons/arrow-down.svg", newer).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.find_step(Pick::Newer, cx)),
+                ),
+            )
+            .child(
+                btn("term-find-close", "icons/x.svg", "Close  (Esc)").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, window, cx| this.close_find(window, cx)),
+                ),
+            )
+    }
+
     /// Right-click menu: a transparent dismiss backdrop + a small box anchored at the click.
     fn render_context_menu(
         &self,
@@ -1058,6 +1589,8 @@ struct Prepaint {
     lines: Vec<ShapedLine>,
     /// Background quads (cell rects with a non-default bg), painted under the text.
     bg_quads: Vec<gpui::PaintQuad>,
+    /// Find matches on screen (the current one outlined), over the backgrounds.
+    find_quads: Vec<gpui::PaintQuad>,
     /// Block/bar cursor quad, if visible (not in scrollback, not hidden).
     cursor: Option<gpui::PaintQuad>,
     line_height: Pixels,
@@ -1136,6 +1669,7 @@ impl Element for TerminalElement {
         // Push geometry changes back to the grid/PTY before reading the content.
         self.view
             .update(cx, |v, _| v.resize(cols, rows, cell_w_f, cell_h_f));
+        let (found, current) = self.view.update(cx, |v, _| v.visible_matches());
 
         let view = self.view.read(cx);
         let term = view.term.lock();
@@ -1146,8 +1680,11 @@ impl Element for TerminalElement {
         let selection = content.selection;
         let sel_bg: Hsla = theme::get().selected_bg.into();
         let mut lines: Vec<ShapedLine> = Vec::new();
-        // (x, row, colour) of cells with a background — laid out once the shift is known.
-        let mut cell_bgs: Vec<(Pixels, f32, Hsla)> = Vec::new();
+        // Background and selection runs — one quad per run of same-coloured cells, not per
+        // cell: a full-width coloured line was ~200 quads, and quads were most of a frame.
+        // Laid out once the shift is known.
+        let mut bg_runs: Vec<BgRun> = Vec::new();
+        let mut sel_runs: Vec<BgRun> = Vec::new();
         // Last row with anything on it, for bottom-anchoring.
         let mut last_used: i32 = -1;
         let mut base_line: Option<i32> = None;
@@ -1209,15 +1746,19 @@ impl Element for TerminalElement {
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg.unwrap_or(default_bg);
             }
-            let row_idx = (line - base_line.unwrap_or(line)) as f32;
-            // Selection tint wins over the cell's own bg (pushed last → painted on top).
+            let row_idx = line - base_line.unwrap_or(line);
+            // Selection tint wins over the cell's own bg (its runs paint after).
             let selected = selection.as_ref().is_some_and(|s| s.contains(cell.point));
-            let x = bounds.left() + px(col as f32 * cell_w_f);
+            let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                2
+            } else {
+                1
+            };
             if let Some(bg) = bg {
-                cell_bgs.push((x, row_idx, bg));
+                push_run(&mut bg_runs, row_idx, col, width, bg);
             }
             if selected {
-                cell_bgs.push((x, row_idx, sel_bg));
+                push_run(&mut sel_runs, row_idx, col, width, sel_bg);
             }
             let ch = cell.c;
             if (ch != ' ' && ch != '\0') || bg.is_some() {
@@ -1243,16 +1784,42 @@ impl Element for TerminalElement {
         };
         #[allow(clippy::cast_precision_loss)] // a row count, far below f32's exact range
         let shift = shift_rows as f32;
-        let bg_quads: Vec<gpui::PaintQuad> = cell_bgs
-            .into_iter()
-            .map(|(x, row, color)| {
-                let y = bounds.top() + line_height * (row + shift);
-                fill(
-                    Bounds::new(point(x, y), gpui::size(px(cell_w_f), line_height)),
-                    color,
-                )
-            })
+        let quad = |row: i32, col: usize, len: usize, color: Hsla| {
+            let x = bounds.left() + px(col as f32 * cell_w_f);
+            let y = bounds.top() + line_height * (row as f32 + shift);
+            fill(
+                Bounds::new(
+                    point(x, y),
+                    gpui::size(px(len as f32 * cell_w_f), line_height),
+                ),
+                color,
+            )
+        };
+        let bg_quads: Vec<gpui::PaintQuad> = bg_runs
+            .iter()
+            .chain(&sel_runs)
+            .map(|r| quad(r.row, r.col, r.len, r.color))
             .collect();
+        let off = i32::try_from(content.display_offset).unwrap_or(0);
+        let last_col = term.columns().saturating_sub(1);
+        let find_bg: Hsla = theme::get().find_match_bg.into();
+        let mut find_quads: Vec<gpui::PaintQuad> = found
+            .iter()
+            .flat_map(|m| match_rows(m, off, i32::from(rows), last_col))
+            .map(|(row, c0, c1)| quad(row, c0, c1 - c0 + 1, find_bg))
+            .collect();
+        if let Some(m) = &current {
+            let caret: Hsla = theme::get().caret.into();
+            find_quads.extend(
+                match_rows(m, off, i32::from(rows), last_col)
+                    .into_iter()
+                    .map(|(row, c0, c1)| {
+                        quad(row, c0, c1 - c0 + 1, find_bg)
+                            .border_widths(px(1.0))
+                            .border_color(caret)
+                    }),
+            );
+        }
 
         // Block cursor — only on the live screen (no scrollback offset) and when shown.
         let cursor = if content.display_offset == 0 && content.cursor.shape != CursorShape::Hidden {
@@ -1288,6 +1855,7 @@ impl Element for TerminalElement {
         Prepaint {
             lines,
             bg_quads,
+            find_quads,
             cursor,
             line_height,
             shift,
@@ -1304,7 +1872,7 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        for q in pre.bg_quads.drain(..) {
+        for q in pre.bg_quads.drain(..).chain(pre.find_quads.drain(..)) {
             window.paint_quad(q);
         }
         // Cursor under the glyph so an inverse block still shows the character.
@@ -1317,7 +1885,64 @@ impl Element for TerminalElement {
             let _ = line.paint(origin, lh, window, cx);
         }
         self.view.update(cx, |v, _| v.bounds = Some(bounds));
+        // A scrollbar drag follows the cursor anywhere in the window, until the button's up.
+        if self.view.read(cx).sb_drag.is_some() {
+            let view = self.view.clone();
+            window.on_mouse_event(move |e: &MouseMoveEvent, phase, _w, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |v, cx| v.sb_drag_to(f32::from(e.position.y), cx));
+                }
+            });
+            let view = self.view.clone();
+            window.on_mouse_event(move |_: &MouseUpEvent, phase, _w, cx| {
+                if phase == DispatchPhase::Bubble {
+                    view.update(cx, |v, cx| {
+                        v.sb_drag = None;
+                        cx.notify();
+                    });
+                }
+            });
+        }
     }
+}
+
+/// A run of same-coloured cell backgrounds on one row (painted as one quad).
+struct BgRun {
+    row: i32,
+    col: usize,
+    len: usize,
+    color: Hsla,
+}
+
+/// Add `width` cells at (`row`, `col`) to `runs`, extending the last run when they continue
+/// it in its colour.
+fn push_run(runs: &mut Vec<BgRun>, row: i32, col: usize, width: usize, color: Hsla) {
+    if let Some(r) = runs.last_mut() {
+        if r.row == row && r.col + r.len == col && r.color == color {
+            r.len += width;
+            return;
+        }
+    }
+    runs.push(BgRun {
+        row,
+        col,
+        len: width,
+        color,
+    });
+}
+
+/// The screen rows `m` covers — `(row, first column, last column)` — given the view's scroll
+/// offset; rows off screen are left out.
+fn match_rows(m: &Match, off: i32, rows: i32, last_col: usize) -> Vec<(i32, usize, usize)> {
+    let (a, b) = (m.start(), m.end());
+    (a.line.0..=b.line.0)
+        .filter(|l| (0..rows).contains(&(l + off)))
+        .map(|l| {
+            let c0 = if l == a.line.0 { a.column.0 } else { 0 };
+            let c1 = if l == b.line.0 { b.column.0 } else { last_col };
+            (l + off, c0, c1.max(c0))
+        })
+        .collect()
 }
 
 /// Resolve an alacritty cell color to an `Hsla`, falling back to `default` for the
@@ -1560,6 +2185,44 @@ mod tests {
         );
         // Grayscale ramp is monotonic.
         assert!(default_indexed(232).r < default_indexed(255).r);
+    }
+
+    /// Perf guard (see CLAUDE.md "Performance regression tests"): find re-scans the whole
+    /// buffer per keystroke / step, so a full 10k-line scrollback must scan fast. Also pins the
+    /// query being literal (`a.b` isn't a regex) and smart-case (lowercase = any case).
+    #[test]
+    fn perf_find_scans_full_scrollback() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(120, 40),
+            alacritty_terminal::event::VoidListener,
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        let mut out = String::new();
+        for i in 0..10_000 {
+            let tag = if i % 2 == 0 { "a.b" } else { "AxB" };
+            out.push_str(&format!(
+                "line {i} {tag} the quick brown fox jumps over\r\n"
+            ));
+        }
+        parser.advance(&mut term, out.as_bytes());
+        let count = |q: &str, term: &Term<_>| {
+            let mut re = RegexSearch::new(&literal_regex(q)).unwrap();
+            scan_all(term, &mut re).len()
+        };
+        let t0 = Instant::now();
+        let fox = count("fox", &term);
+        let took = t0.elapsed();
+        // 10k written, minus the lines scrolled past the 10k-line history cap.
+        assert!(fox > 9_900, "{fox}");
+        assert!(
+            took < Duration::from_secs(2),
+            "full-buffer find took {took:?}"
+        );
+        assert_eq!(count("a.b", &term), fox / 2 + fox % 2, "a.b is literal");
+        assert_eq!(count("axb", &term), fox / 2, "lowercase matches AxB");
+        assert_eq!(count("AXB", &term), 0, "uppercase is case-sensitive");
     }
 
     #[test]

@@ -121,6 +121,7 @@ actions!(
         TerminalEscape,
         TerminalCopy,
         TerminalPaste,
+        TerminalFind,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -433,6 +434,14 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
     ]);
+    // ⌘F (Ctrl+Shift+F elsewhere — Ctrl+F is the shell's) in a terminal searches its own
+    // scrollback. After the context-less ⌘F above, which ties with it on depth (later wins).
+    #[cfg(feature = "terminal")]
+    cx.bind_keys([KeyBinding::new(
+        &format!("{TERMINAL_MOD}-f"),
+        TerminalFind,
+        Some("Terminal"),
+    )]);
     // Off macOS the app's shortcuts are on Ctrl, and so are the shell's keys (Ctrl+C
     // interrupts, Ctrl+W rubs out a word, Ctrl+R searches history…). In a terminal, Ctrl+letter
     // goes to the shell: a `NoAction` in the "Terminal" context masks every app binding on it,
@@ -3947,7 +3956,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 .map(|s| real(PathBuf::from(s)))
                 .collect();
             view.agents.cfg.setup_done = true;
-            view.agents.cfg.command = "git --no-pager log --oneline --graph --decorate -16".into();
+            view.agents.cfg.command = std::env::var("KYDE_SHOT_AGENT_CMD")
+                .unwrap_or_else(|_| "git --no-pager log --oneline --graph --decorate -16".into());
             view.agents.cfg.spaces = vec![kyde_config::agents::Space {
                 path: root.clone(),
                 worktrees: wts.clone(),
@@ -7105,6 +7115,20 @@ mod gpui_smoke_tests {
                         ran.first().is_some_and(|a| a.ends_with("TerminalCopy")),
                         "{ran:?}"
                     );
+                    // ⌘F is the terminal's own find, not the editor's / Find in Files…
+                    let find = format!("{TERMINAL_MOD}-f");
+                    let ran = resolve(&find, &ctx);
+                    assert!(
+                        ran.first().is_some_and(|a| a.ends_with("TerminalFind")),
+                        "{ran:?}"
+                    );
+                    // …and in its query box Enter / Escape drive the find, not the shell.
+                    let mut in_box = ctx.clone();
+                    in_box.push(gpui::KeyContext::parse("CodeInput FindBar").unwrap());
+                    for (key, action) in [("enter", "FindNext"), ("escape", "CloseFind")] {
+                        let ran = resolve(key, &in_box);
+                        assert!(ran.first().is_some_and(|a| a.ends_with(action)), "{ran:?}");
+                    }
                 }
                 if !cfg!(target_os = "macos") {
                     let ran = resolve("ctrl-s", &stack(&["Kyde"]));
