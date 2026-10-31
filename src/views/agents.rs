@@ -2756,7 +2756,8 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// Whether an agent tab owns keyboard focus (⌘T / ⌘W then act on agent tabs).
+    /// Whether an agent tab owns keyboard focus, its find box included (⌘T / ⌘W then act on
+    /// agent tabs).
     pub(crate) fn agents_terminal_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         self.mode == Mode::Agents
             && self.agents_visible_tab().is_some_and(|(wt, i)| {
@@ -2764,7 +2765,7 @@ impl Kyde {
                     .view
                     .read(cx)
                     .handle()
-                    .is_focused(window)
+                    .contains_focused(window, cx)
             })
     }
 

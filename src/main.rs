@@ -442,6 +442,21 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         TerminalFind,
         Some("Terminal"),
     )]);
+    // In the terminal's find box ("Terminal" one level up) the context-less ⌘W / ⌘F outrank
+    // the terminal's keys and would close an editor tab or open the editor's find (Ctrl+F too,
+    // off macOS); these tie with them on depth instead and win as the later bindings. Off
+    // macOS Ctrl+Shift+C / V copy and paste the query, not the shell's selection / clipboard.
+    #[cfg(feature = "terminal")]
+    {
+        let in_box = Some("Terminal > CodeInput");
+        cx.bind_keys([
+            KeyBinding::new(&term("f"), TerminalFind, in_box),
+            KeyBinding::new("secondary-f", TerminalFind, in_box),
+            KeyBinding::new(&term("w"), CloseTerminalTab, in_box),
+            KeyBinding::new(&term("c"), editor::Copy, in_box),
+            KeyBinding::new(&term("v"), editor::Paste, in_box),
+        ]);
+    }
     // Off macOS the app's shortcuts are on Ctrl, and so are the shell's keys (Ctrl+C
     // interrupts, Ctrl+W rubs out a word, Ctrl+R searches history…). In a terminal, Ctrl+letter
     // goes to the shell: a `NoAction` in the "Terminal" context masks every app binding on it,
@@ -7128,6 +7143,21 @@ mod gpui_smoke_tests {
                     for (key, action) in [("enter", "FindNext"), ("escape", "CloseFind")] {
                         let ran = resolve(key, &in_box);
                         assert!(ran.first().is_some_and(|a| a.ends_with(action)), "{ran:?}");
+                    }
+                    // ⌘W / ⌘F there stay the terminal's, not CloseTab / the editor's find, and
+                    // its paste goes into the query, not the shell.
+                    let term = |k: &str| format!("{TERMINAL_MOD}-{k}");
+                    for (key, action) in [
+                        (term("w"), "CloseTerminalTab"),
+                        (term("f"), "TerminalFind"),
+                        ("secondary-f".into(), "TerminalFind"),
+                        (term("v"), "::Paste"),
+                    ] {
+                        let ran = resolve(&key, &in_box);
+                        assert!(
+                            ran.first().is_some_and(|a| a.ends_with(action)),
+                            "{key}: {ran:?}"
+                        );
                     }
                 }
                 if !cfg!(target_os = "macos") {

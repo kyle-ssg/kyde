@@ -226,12 +226,12 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Whether the active terminal tab currently owns keyboard focus.
+    /// Whether the active terminal tab currently owns keyboard focus, its find box included.
     pub(crate) fn terminal_is_focused(&self, window: &Window, cx: &gpui::App) -> bool {
         self.term
             .tabs
             .get(self.term.panel.active)
-            .is_some_and(|v| v.read(cx).handle().is_focused(window))
+            .is_some_and(|v| v.read(cx).handle().contains_focused(window, cx))
     }
 
     /// ⌘W while the terminal is focused: close the active tab (iTerm-style — unconditional).

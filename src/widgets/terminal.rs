@@ -256,6 +256,8 @@ struct TermFind {
     count: usize,
     index: usize,
     scanned: Option<Instant>,
+    /// The re-count held back by [`FIND_RESCAN`], so one still follows the last output.
+    rescan: Option<gpui::Task<()>>,
 }
 
 /// Which match a find scan lands on.
@@ -486,13 +488,28 @@ impl TerminalView {
                 // batch; the subscriber debounces, so a build's stream of wakeups
                 // costs one refresh after it quiets down.
                 cx.emit(TerminalEvent::Output);
-                // An open find re-counts now and then as output streams in.
-                if self.find.as_ref().is_some_and(|f| {
-                    f.open
-                        && f.regex.is_some()
-                        && f.scanned.is_none_or(|t| t.elapsed() >= FIND_RESCAN)
-                }) {
-                    self.find_scan(Pick::Keep);
+                // An open find re-counts now and then as output streams in, and once more
+                // after it stops.
+                if let Some(f) = self.find.as_mut().filter(|f| f.open && f.regex.is_some()) {
+                    let since = f.scanned.map_or(FIND_RESCAN, |t| t.elapsed());
+                    if since >= FIND_RESCAN {
+                        self.find_scan(Pick::Keep);
+                    } else if f.rescan.is_none() {
+                        f.rescan = Some(cx.spawn(async move |this, cx| {
+                            cx.background_executor()
+                                .timer(FIND_RESCAN.saturating_sub(since))
+                                .await;
+                            let _ = this.update(cx, |this, cx| {
+                                if let Some(f) = this.find.as_mut() {
+                                    f.rescan = None;
+                                }
+                                if this.find_open() {
+                                    this.find_scan(Pick::Keep);
+                                    cx.notify();
+                                }
+                            });
+                        }));
+                    }
                 }
                 cx.notify();
             }
@@ -869,6 +886,7 @@ impl TerminalView {
                 count: 0,
                 index: 0,
                 scanned: None,
+                rescan: None,
             }
         })
     }
@@ -937,11 +955,9 @@ impl TerminalView {
         f.count = n;
         f.index = i.map_or(0, |i| n - i);
         let m = i.map(|i| all[i].clone());
-        if let Some(m) = &m {
-            f.cur = Some((m.clone(), hist, off as isize));
-        } else if !matches!(pick, Pick::Keep) {
-            f.cur = None;
-        }
+        // A re-count that can't find the current match any more (cleared, scrolled off the
+        // top, or lost track of once the scrollback is full) drops it.
+        f.cur = m.clone().map(|m| (m, hist, off as isize));
         m.filter(|_| !matches!(pick, Pick::Keep))
     }
 
@@ -962,7 +978,7 @@ impl TerminalView {
         self.scroll(Scroll::Delta(target - off));
     }
 
-    /// The open find's matches on screen, and its current match wherever that is now.
+    /// The open find's matches on screen, and its current match if it's one of them.
     fn visible_matches(&mut self) -> (Vec<Match>, Option<Match>) {
         let Some(f) = self.find.as_mut().filter(|f| f.open) else {
             return (Vec::new(), None);
@@ -977,8 +993,15 @@ impl TerminalView {
             Line(term.screen_lines() as i32 - 1 - off),
             term.last_column(),
         );
-        let on_screen = RegexIter::new(top, bottom, Direction::Right, &term, regex).collect();
-        let cur = f.cur.as_ref().and_then(|c| shifted(&term, c));
+        let on_screen: Vec<Match> =
+            RegexIter::new(top, bottom, Direction::Right, &term, regex).collect();
+        // Only outlined where a match still is: with the scrollback full, output scrolls the
+        // text without moving any count `shifted` can follow.
+        let cur = f
+            .cur
+            .as_ref()
+            .and_then(|c| shifted(&term, c))
+            .filter(|c| on_screen.contains(c));
         (on_screen, cur)
     }
 
@@ -1114,10 +1137,13 @@ fn scan_all<T>(term: &Term<T>, regex: &mut RegexSearch) -> Vec<Match> {
 /// Where a find's current match `(m, history size, scroll offset)` is now. Output pushes
 /// lines up: by as many as the scrollback grew, or — once it's full and stops growing — as
 /// many as a scrolled-back view moved to stay on them (our own scrolling is already taken
-/// out of the offset). `None` once it's gone off the top or the buffer was cleared.
+/// out of the offset). `None` once it's gone off the top or the scrollback shrank (cleared).
 fn shifted<T>(term: &Term<T>, (m, hist, off): &(Match, usize, isize)) -> Option<Match> {
     let grid = term.grid();
     let grew = grid.history_size() as isize - *hist as isize;
+    if grew < 0 {
+        return None;
+    }
     let moved = grid.display_offset() as isize - off;
     let up = i32::try_from(grew.max(moved)).ok()?;
     let lift = |p: &GridPoint| GridPoint::new(Line(p.line.0 - up), p.column);
@@ -2223,6 +2249,31 @@ mod tests {
         assert_eq!(count("a.b", &term), fox / 2 + fox % 2, "a.b is literal");
         assert_eq!(count("axb", &term), fox / 2, "lowercase matches AxB");
         assert_eq!(count("AXB", &term), 0, "uppercase is case-sensitive");
+    }
+
+    /// A find's current match follows output up the scrollback, and is gone once the
+    /// scrollback is cleared — even from a scrolled-back view, whose offset drops with it.
+    #[test]
+    fn find_match_follows_output_and_goes_with_a_clear() {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(40, 5),
+            alacritty_terminal::event::VoidListener,
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        let mut re = RegexSearch::new(&literal_regex("needle")).unwrap();
+        parser.advance(&mut term, b"needle\r\n");
+        let m = scan_all(&term, &mut re).remove(0);
+        let cur = (m, term.grid().history_size(), 0);
+        parser.advance(&mut term, b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n");
+        let now = shifted(&term, &cur).unwrap();
+        assert_eq!(now, scan_all(&term, &mut re)[0]);
+        term.scroll_display(Scroll::Delta(3));
+        let cur = (now, term.grid().history_size(), 3);
+        // What `clear` sends.
+        parser.advance(&mut term, b"\x1b[H\x1b[2J\x1b[3J");
+        assert_eq!(shifted(&term, &cur), None);
     }
 
     #[test]
