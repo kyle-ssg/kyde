@@ -44,6 +44,7 @@ pub(crate) use kyde_ui::{
 
 // ── per-feature views (impl Kyde blocks; see src/views/) ──
 mod views;
+pub(crate) use views::chrome;
 pub(crate) use views::{nav_keys, MenuEntry, NavTarget};
 
 // ── gpui-coupled widgets; re-aliased so `editor::`/`mdview::`/… paths stay unchanged ──
@@ -270,6 +271,26 @@ fn dock_menu(recents: &Recents) -> Vec<gpui::MenuItem> {
     })]
 }
 
+/// Read what Shift + each symbol key types on the active keyboard layout
+/// (`platform::keyboard_layout`, off the UI thread: it may ask the X server or `gsettings`),
+/// hand it to the keymap and re-bind every shortcut from the saved keymap.
+#[cfg(target_os = "linux")]
+fn learn_keyboard_layout(cx: &mut App) {
+    let active = cx.keyboard_layout().name().to_string();
+    let read = cx
+        .background_executor()
+        .spawn(async move { platform::keyboard_layout::shifted_map(&active) });
+    cx.spawn(async move |cx| {
+        let map = read.await;
+        cx.update(|cx| {
+            keymap::set_layout_shifted(map);
+            apply_keymap(cx, &Keymap::load().0);
+        })
+        .ok();
+    })
+    .detach();
+}
+
 /// Clear and (re)apply all key bindings from a keymap config.
 fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.clear_key_bindings();
@@ -314,9 +335,15 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_agents(cx, km, "agent_rename", AgentRename);
     bind_agents(cx, km, "agent_scrollback", AgentScrollback);
     bind_agents(cx, km, "agent_toggle_sidebar", AgentToggleSidebar);
-    // ⌃1…⌃9: the Nth worktree in the sidebar (fixed keys).
+    // ⌃1…⌃9: the Nth worktree in the sidebar (fixed keys). Off macOS Ctrl+digit is the ⌘1 /
+    // ⌘9 view switch, so the jump takes Alt+digit, the Linux tab-switch key.
+    let jump = if cfg!(target_os = "macos") {
+        "ctrl"
+    } else {
+        "alt"
+    };
     cx.bind_keys(
-        (1..=9).map(|n| KeyBinding::new(&format!("ctrl-{n}"), AgentJump(n), Some("Agents"))),
+        (1..=9).map(|n| KeyBinding::new(&format!("{jump}-{n}"), AgentJump(n), Some("Agents"))),
     );
     // Escape: close any open modal, else cancel the Commit view (fixed key).
     cx.bind_keys([KeyBinding::new("escape", EscapeKey, Some("Kyde"))]);
@@ -332,15 +359,15 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     // context, so this only fires when no editor/terminal is focused.
     cx.bind_keys([
         KeyBinding::new("backspace", DeleteFile, Some("Kyde")),
-        KeyBinding::new("cmd-backspace", DeleteFile, Some("Kyde")),
+        KeyBinding::new("secondary-backspace", DeleteFile, Some("Kyde")),
     ]);
     // File-tree cut/copy/paste (issue #67). Scoped to the "Kyde" root, so the deeper
     // "CodeEditor" copy/cut/paste bindings win whenever an editor is focused — these only
     // fire at the app root (a tree row selected, no editor focused).
     cx.bind_keys([
-        KeyBinding::new("cmd-c", CopyFiles, Some("Kyde")),
-        KeyBinding::new("cmd-x", CutFiles, Some("Kyde")),
-        KeyBinding::new("cmd-v", PasteFiles, Some("Kyde")),
+        KeyBinding::new("secondary-c", CopyFiles, Some("Kyde")),
+        KeyBinding::new("secondary-x", CutFiles, Some("Kyde")),
+        KeyBinding::new("secondary-v", PasteFiles, Some("Kyde")),
     ]);
     // Jump between diff changes (Alt+↓ / Alt+↑). Global so they fire while the diff editor is
     // focused; no-op when no diff is showing.
@@ -349,21 +376,29 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("alt-up", DiffPrevChange, None),
     ]);
     // Standard quit shortcut (not user-configurable).
-    cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
+    cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
     // Close the active editor tab (standard ⌘W; not user-configurable). Global (no context) so
     // it fires no matter what's focused — editor, tree, commit box, terminal.
-    cx.bind_keys([KeyBinding::new("cmd-w", CloseTab, None)]);
+    cx.bind_keys([KeyBinding::new("secondary-w", CloseTab, None)]);
     // Toggle the bottom terminal panel (fixed key, IDE-standard); ⌘T = new tab while the
     // terminal is focused (scoped to its key context so it doesn't shadow elsewhere).
     #[cfg(feature = "terminal")]
+    let term = |key: &str| format!("{TERMINAL_MOD}-{key}");
+    // ⌘K clears the terminal; "Terminal" context (depth) beats the "Kyde"-scoped commit. Linux
+    // leaves Clear unbound: Ctrl+L / Ctrl+U already clear in the shell, and Ctrl+Shift+K stays
+    // Push (the WebStorm preset) even with the terminal focused.
+    #[cfg(all(
+        feature = "terminal",
+        not(any(target_os = "linux", target_os = "freebsd"))
+    ))]
+    cx.bind_keys([KeyBinding::new(&term("k"), ClearTerminal, Some("Terminal"))]);
+    #[cfg(feature = "terminal")]
     cx.bind_keys([
         KeyBinding::new("ctrl-`", ToggleTerminal, None),
-        KeyBinding::new("cmd-t", NewTerminalTab, Some("Terminal")),
+        KeyBinding::new(&term("t"), NewTerminalTab, Some("Terminal")),
         // ⌘W closes the active terminal tab when the terminal is focused (iTerm-style);
         // scoped to "Terminal" so it shadows the editor-tab ⌘W (`CloseTab`).
-        KeyBinding::new("cmd-w", CloseTerminalTab, Some("Terminal")),
-        // ⌘K clears the terminal; "Terminal" context (depth) beats the "Kyde"-scoped commit.
-        KeyBinding::new("cmd-k", ClearTerminal, Some("Terminal")),
+        KeyBinding::new(&term("w"), CloseTerminalTab, Some("Terminal")),
         // Enter / backspace / escape are app shortcuts in "Kyde". gpui
         // dispatches binding ACTIONS *before* on_key_down and an action stops propagation by
         // default, so on_key_down never runs once a binding matches — meaning a no-op here would
@@ -374,29 +409,62 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("backspace", TerminalBackspace, Some("Terminal")),
         // ⌘⌫ is DeleteFile in "Kyde" (issue #61); in the terminal it must act as a plain
         // backspace, not delete the tree-selected file out from under a typing user.
-        KeyBinding::new("cmd-backspace", TerminalBackspace, Some("Terminal")),
+        KeyBinding::new("secondary-backspace", TerminalBackspace, Some("Terminal")),
         KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
         // ⌘C / ⌘V copy and paste in the terminal — the root binds them to the file tree's
         // copy / paste, which would swallow them.
-        KeyBinding::new("cmd-c", TerminalCopy, Some("Terminal")),
-        KeyBinding::new("cmd-v", TerminalPaste, Some("Terminal")),
+        KeyBinding::new(&term("c"), TerminalCopy, Some("Terminal")),
+        KeyBinding::new(&term("v"), TerminalPaste, Some("Terminal")),
     ]);
-    // In-editor find / replace (fixed keys).
+    // In-editor find / replace (fixed keys). ⌘G / ⇧⌘G cycle the matches on macOS; elsewhere
+    // that is F3 / Shift+F3 (both IDE keymaps on Linux), and Ctrl+Shift+G is the VS Code
+    // keymap's Commit view.
+    let (next, prev) = if cfg!(target_os = "macos") {
+        ("cmd-g", "cmd-shift-g")
+    } else {
+        ("f3", "shift-f3")
+    };
     cx.bind_keys([
-        KeyBinding::new("cmd-f", FindInFile, None),
-        KeyBinding::new("cmd-r", ReplaceInFile, None),
-        KeyBinding::new("cmd-g", FindNext, None),
-        KeyBinding::new("cmd-shift-g", FindPrev, None),
+        KeyBinding::new("secondary-f", FindInFile, None),
+        KeyBinding::new("secondary-r", ReplaceInFile, None),
+        KeyBinding::new(next, FindNext, None),
+        KeyBinding::new(prev, FindPrev, None),
         KeyBinding::new("escape", CloseFind, Some("FindBar")),
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
     ]);
+    // Off macOS the app's shortcuts are on Ctrl, and so are the shell's keys (Ctrl+C
+    // interrupts, Ctrl+W rubs out a word, Ctrl+R searches history…). In a terminal, Ctrl+letter
+    // goes to the shell: a `NoAction` in the "Terminal" context masks every app binding on it,
+    // and the terminal's own keys take Shift instead (`TERMINAL_MOD`), like gnome-terminal.
+    // Bound last, since a context-less binding (Ctrl+Q, Ctrl+W) ties on depth and the later
+    // binding wins a tie.
+    #[cfg(feature = "terminal")]
+    if !cfg!(target_os = "macos") {
+        cx.bind_keys(
+            ('a'..='z')
+                .map(|c| KeyBinding::new(&format!("ctrl-{c}"), gpui::NoAction, Some("Terminal"))),
+        );
+    }
 }
+
+/// The modifier of the terminal's own shortcuts (new / close tab, clear, copy, paste): ⌘ on
+/// macOS; Ctrl+Shift elsewhere, where plain Ctrl+letter belongs to the shell.
+#[cfg(feature = "terminal")]
+const TERMINAL_MOD: &str = if cfg!(target_os = "macos") {
+    "cmd"
+} else {
+    "ctrl-shift"
+};
 
 /// Like [`bind_app`], but only while the Agents view has focus (its "Agents" key context).
 fn bind_agents<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
     if let Some(k) = km.key_for(name) {
-        cx.bind_keys([KeyBinding::new(&k, action, Some("Agents"))]);
+        cx.bind_keys([KeyBinding::new(
+            &keymap::platform_key(&k),
+            action,
+            Some("Agents"),
+        )]);
     }
 }
 
@@ -407,7 +475,11 @@ fn bind_app<A: gpui::Action>(cx: &mut App, km: &Keymap, name: &str, action: A) {
         // context-less binding gets *max* depth and would tie with (and sometimes beat) the
         // widget binding (e.g. ⌘K commit shadowing the terminal's Clear). "Kyde" is always in
         // the focus stack (the root carries it), so these still fire everywhere else.
-        cx.bind_keys([KeyBinding::new(&k, action, Some("Kyde"))]);
+        cx.bind_keys([KeyBinding::new(
+            &keymap::platform_key(&k),
+            action,
+            Some("Kyde"),
+        )]);
     }
 }
 
@@ -537,8 +609,12 @@ enum PaletteAction {
 /// chip — `""` when the action has no bindable key and so shows none).
 const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ("Select in File View", PaletteAction::SelectInTree, ""),
-    ("Reveal in Finder", PaletteAction::RevealInFinder, ""),
-    ("Reveal in Terminal", PaletteAction::RevealInTerminal, ""),
+    (views::REVEAL_IN_FILES, PaletteAction::RevealInFinder, ""),
+    (
+        views::REVEAL_IN_TERMINAL,
+        PaletteAction::RevealInTerminal,
+        "",
+    ),
     ("Sort Lines", PaletteAction::SortLines, "sort_lines"),
     ("Sort Object Keys", PaletteAction::SortKeys, "sort_keys"),
     ("Back (previous file)", PaletteAction::NavBack, "nav_back"),
@@ -607,6 +683,8 @@ enum MenuTarget {
     LhPath(PathBuf, bool),
     /// A branch leaf in the branch popup — offers Checkout + Merge into current.
     Branch(String),
+    /// The title strip's menu button (off macOS): the menu bar's items (`app_menus`).
+    AppMenu,
 }
 
 struct ContextMenu {
@@ -628,6 +706,8 @@ struct ContextMenu {
 pub(crate) enum Submenu {
     New,
     Git,
+    /// The Nth submenu of the in-window app menu (Recent Projects; see `chrome`).
+    App(usize),
 }
 
 /// Snapshot of a scroll view's `(pane_w, vp_w, vp_h, max_w, max_h)` used to debounce the
@@ -2259,6 +2339,9 @@ struct Kyde {
     welcome_frame: u32,
     /// Contents of `crash.log` if the previous run crashed — drives the report banner.
     pending_crash: Option<String>,
+    /// A native folder picker is open (Open / New Project / Add space): another press waits
+    /// for it, since off macOS the picker doesn't block Kyde (`Kyde::prompt_folder`).
+    folder_picker_open: bool,
     /// Last failed git operation (commit/push/rollback/branch/checkout/status), surfaced
     /// in a dismissible banner so a silent failure never looks like success. Cleared on
     /// the next successful `refresh`. `None` = no outstanding error.
@@ -2279,6 +2362,9 @@ struct Kyde {
     menu_return_focus: Option<FocusHandle>,
     /// The main window's bounds, refreshed each frame in `impl Render for Kyde`.
     main_window_bounds: Option<gpui::WindowBounds>,
+    /// The main window's title-bar state (client-side decorations off macOS), refreshed each
+    /// frame in `impl Render for Kyde`.
+    chrome: chrome::WindowChrome,
     /// True when the main window is showing the full-screen Show-Diff view (rollback/push diff).
     /// It replaces the normal mode content and reuses the inline `render_diff`, so it inherits
     /// all editor functionality (find, divider drag, scroll). Escape / the Back button exits.
@@ -2352,6 +2438,9 @@ struct Kyde {
     fs_watcher: Option<notify::RecommendedWatcher>,
     /// The project `fs_watcher` is rooted at — a mismatch with `repo_root` re-arms it.
     watch_root: Option<PathBuf>,
+    /// Why the OS refused to watch `watch_root` (Linux: e.g. the inotify watch limit), so
+    /// the status bar can say live refresh is off. `None` while watching normally.
+    watch_off: Option<SharedString>,
 
     // Bottom terminal panel — control state + (feature-gated) PTY tab views, grouped into
     // one sub-struct (see `TermState`).
@@ -2564,10 +2653,19 @@ struct ModalWindow {
     kyde: Entity<Kyde>,
     kind: ModalKind,
     focus: FocusHandle,
+    /// The window's title, for the title strip it draws under client-side decorations.
+    title: SharedString,
+    /// A press on that strip a drag would move the window from (see `chrome::drag_area`).
+    drag_armed: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 impl ModalWindow {
-    fn new(kyde: Entity<Kyde>, kind: ModalKind, cx: &mut Context<Self>) -> Self {
+    fn new(
+        kyde: Entity<Kyde>,
+        kind: ModalKind,
+        title: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.observe(&kyde, |_, _, cx| cx.notify()).detach();
         // A find bar hosted here goes with the window (it would otherwise linger "open"
         // with nowhere to render, eating the main window's Escape).
@@ -2586,6 +2684,8 @@ impl ModalWindow {
             kyde,
             kind,
             focus: cx.focus_handle(),
+            title,
+            drag_armed: std::rc::Rc::default(),
         }
     }
 }
@@ -2631,6 +2731,22 @@ impl Render for ModalWindow {
                 .flex()
                 .flex_col()
                 .child(bar)
+                .child(div().flex_1().min_h_0().child(body))
+                .into_any_element(),
+            None => body,
+        };
+        // Drawing its own decorations (Wayland), the window gets a title strip with a close
+        // button, and resize handles along its edges (see `chrome`).
+        let client = chrome::client_decorations(window);
+        let body = match client {
+            Some(_) => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(chrome::modal_title_strip(
+                    self.title.clone(),
+                    &self.drag_armed,
+                ))
                 .child(div().flex_1().min_h_0().child(body))
                 .into_any_element(),
             None => body,
@@ -2694,6 +2810,9 @@ impl Render for ModalWindow {
                 }),
             )
             .child(body)
+            .when(client.is_some(), |d| {
+                d.relative().children(chrome::resize_handles(client))
+            })
     }
 }
 
@@ -3118,13 +3237,62 @@ fn diff_word_bgs(d: &FileDiff) -> (LineWordBgs, LineWordBgs) {
     (old, new)
 }
 
-/// Turn "cmd-shift-o" into "⌘⇧O" for display.
+/// Turn "cmd-shift-o" into "⌘⇧O" for display ("Ctrl+Shift+O" off macOS).
 fn pretty_key(k: &str) -> String {
-    key_parts(k).concat()
+    key_parts(k).join(if cfg!(target_os = "macos") { "" } else { "+" })
 }
 
-/// "cmd-shift-o" → `["⌘", "⇧", "O"]`: one glyph per key, for key-cap rendering.
+/// "cmd-shift-o" → `["⌘", "⇧", "O"]`: one glyph per key, for key-cap rendering. Off macOS the
+/// modifiers are words, and `cmd` is Ctrl as `keymap::platform_key` binds it:
+/// `["Ctrl", "Shift", "O"]`.
 fn key_parts(k: &str) -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        key_glyphs(k)
+    } else {
+        key_words(k)
+    }
+}
+
+/// [`key_parts`] off macOS: `Ctrl` / `Alt` / `Shift` / `Super` and named keys as words
+/// (arrows stay arrows).
+fn key_words(k: &str) -> Vec<String> {
+    let (mods, key) = match k.strip_suffix("--") {
+        Some(mods) => (mods, "-"),
+        None => k.rsplit_once('-').unwrap_or(("", k)),
+    };
+    let word = |part: &str| match part {
+        "cmd" | "ctrl" | "secondary" => "Ctrl".to_string(),
+        "alt" | "opt" => "Alt".to_string(),
+        "shift" => "Shift".to_string(),
+        "super" | "win" => "Super".to_string(),
+        "left" => "←".to_string(),
+        "right" => "→".to_string(),
+        "up" => "↑".to_string(),
+        "down" => "↓".to_string(),
+        "escape" => "Esc".to_string(),
+        // "f3" → "F3", "enter" → "Enter", "pageup" → "Pageup", "o" → "O".
+        other => {
+            let mut chars = other.chars();
+            chars
+                .next()
+                .map(|c| c.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for m in mods.split('-').filter(|m| !m.is_empty()) {
+        let w = word(m);
+        // `cmd-ctrl-x` is one Ctrl off macOS.
+        if !parts.contains(&w) {
+            parts.push(w);
+        }
+    }
+    parts.push(word(key));
+    parts
+}
+
+/// [`key_parts`] on macOS: the menu-bar glyphs.
+fn key_glyphs(k: &str) -> Vec<String> {
     // The key itself may be `-` (`cmd--`): split it off before the modifiers.
     let (mods, key) = match k.strip_suffix("--") {
         Some(mods) => (mods, "-"),
@@ -3170,6 +3338,14 @@ impl gpui::AssetSource for Assets {
             "icons/eraser.svg" => include_bytes!("../assets/icons/eraser.svg"),
             "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+            // Window chrome off macOS (see `chrome`): the menu button, and minimize / maximize
+            // for a window that draws its own title bar.
+            #[cfg(not(target_os = "macos"))]
+            "icons/menu.svg" => include_bytes!("../assets/icons/menu.svg"),
+            #[cfg(not(target_os = "macos"))]
+            "icons/minus.svg" => include_bytes!("../assets/icons/minus.svg"),
+            #[cfg(not(target_os = "macos"))]
+            "icons/square.svg" => include_bytes!("../assets/icons/square.svg"),
 
             "icons/chevrons-up-down.svg" => include_bytes!("../assets/icons/chevrons-up-down.svg"),
             "icons/chevrons-down-up.svg" => include_bytes!("../assets/icons/chevrons-down-up.svg"),
@@ -3351,6 +3527,11 @@ fn last_project(recents: &[PathBuf]) -> Option<PathBuf> {
         .map(|p| Repo::discover(p).map_or_else(|_| p.clone(), |repo| repo.root().to_path_buf()))
 }
 
+/// The window's app id: Linux's X11 `WM_CLASS` / Wayland `app_id`, which the dock matches
+/// to the `.desktop` entry (`StartupWMClass`, see `scripts/bundle-linux.sh`) to group every
+/// Kyde window under one icon. gpui ignores it on macOS.
+const APP_ID: &str = "kyde";
+
 /// Name the running process "Kyde" so the macOS dock tile / menu-bar app menu read "Kyde"
 /// instead of the lowercase executable name. Must run before `NSApplication` checks in with
 /// `LaunchServices`, so it's called at the very top of `main`. No-op off macOS.
@@ -3387,6 +3568,15 @@ fn set_dock_icon() {
 
 #[cfg(not(target_os = "macos"))]
 fn set_dock_icon() {}
+
+/// Put Kyde's icon on its X11 windows (see `platform::window_icon`) — call after opening a
+/// window. A no-op elsewhere: macOS has the Dock icon, Wayland the `.desktop` entry's.
+fn set_window_icons() {
+    #[cfg(target_os = "linux")]
+    if gpui::guess_compositor() == "X11" {
+        platform::window_icon::apply();
+    }
+}
 
 /// Drive `Kyde` into one named screenshot state. Called only when `KYDE_SHOT` is set
 /// (see the call site in `main`). Each arm assumes the open project is this repo and sets
@@ -3880,6 +4070,10 @@ fn main() {
     reexec_with_proper_name();
     set_app_name();
     install_crash_logger();
+    // X11: no XIM where ibus only carries plain layouts (`platform::input_method`); held back
+    // here, before any thread, and given back once gpui has connected below.
+    #[cfg(target_os = "linux")]
+    let xim = platform::input_method::hold_back_xim();
     // A path arg opens that project directly; no arg → the project you had open last (the
     // Projects landing view only when there's none to reopen). The path may be `.`, a
     // relative dir, or any subdirectory of a repo — resolve it to the repo's top level
@@ -3920,6 +4114,8 @@ fn main() {
     let (km, first_run) = Keymap::load();
 
     let app = Application::new().with_assets(Assets);
+    #[cfg(target_os = "linux")]
+    platform::input_method::restore(xim);
     // Remote markdown-preview images need a real HttpClient (gpui's default bails);
     // only wired when the `remote-images` feature is built in. See remote_img.rs.
     #[cfg(feature = "remote-images")]
@@ -3928,6 +4124,13 @@ fn main() {
         load_fonts(cx);
         set_dock_icon();
         apply_keymap(cx, &km);
+        // Linux: a shortcut written with Shift binds as the active keyboard layout reports it;
+        // learnt now and again on every layout switch.
+        #[cfg(target_os = "linux")]
+        {
+            learn_keyboard_layout(cx);
+            cx.on_keyboard_layout_change(learn_keyboard_layout).detach();
+        }
 
         // Native macOS menu bar: app menu + File (Open / Recent Projects).
         cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
@@ -3950,6 +4153,9 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: Some(gpui::point(px(16.0), px(16.0))),
                     }),
+                    app_id: Some(APP_ID.into()),
+                    // Client-side on Wayland, so GNOME's windows get a title bar at all.
+                    window_decorations: chrome::requested_decorations(),
                     ..Default::default()
                 },
                 {
@@ -3959,6 +4165,7 @@ fn main() {
                 },
             )
             .expect("failed to open main window");
+        set_window_icons();
         // Focus the root so global keybindings (Go to File, etc.) dispatch immediately.
         window
             .update(cx, |view, window, cx| {
@@ -4358,6 +4565,84 @@ mod gpui_smoke_tests {
                 );
             })
             .unwrap();
+    }
+
+    /// A folder picker that couldn't open (Linux without an XDG desktop portal) says so on
+    /// the error banner instead of silently doing nothing; a cancelled pick stays quiet.
+    #[gpui::test]
+    fn a_folder_picker_that_cannot_open_says_so(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.op_error = None;
+                assert_eq!(k.picked_folder(Ok(None), cx), None);
+                assert!(k.op_error.is_none(), "a cancelled pick is not an error");
+                assert_eq!(
+                    k.picked_folder(Ok(Some(vec![dir.clone()])), cx),
+                    Some(dir.clone())
+                );
+                let missing = anyhow::anyhow!(
+                    "Couldn't open file picker due to missing xdg-desktop-portal implementation."
+                );
+                assert_eq!(k.picked_folder(Err(missing), cx), None);
+                let banner = k.op_error.clone().unwrap_or_default();
+                assert!(
+                    banner.starts_with("Opening the folder picker failed")
+                        && banner.contains("xdg-desktop-portal"),
+                    "{banner}"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Linux: when the OS won't watch the project (here a folder Kyde can't read; in the
+    /// wild, usually the inotify watch limit), the status bar says live refresh is off
+    /// instead of silently waiting for a window refocus.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn a_project_the_os_wont_watch_says_live_refresh_is_off(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+        let (handle, dir) = boot(cx);
+        let locked = dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root reads anything, so there the watch still works and there is nothing to say.
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.watch_off.is_none(), "the boot repo is watched");
+                k.watch_root = None; // re-arm on the same project
+                k.sync_fs_watcher(cx);
+                if unreadable {
+                    let why = k.watch_off.clone().unwrap_or_default();
+                    assert!(why.starts_with("Can't watch locked:"), "{why}");
+                    assert!(k.fs_watcher.is_none());
+                }
+            })
+            .unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The update banner's Download with no zip to fetch (every non-macOS build) opens the
+    /// release page through the system's URL handler, not a shelled-out macOS `open`.
+    #[gpui::test]
+    fn update_download_without_a_zip_opens_the_release_page(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        let page = "https://github.com/kyle-ssg/kyde/releases/tag/kyde-v9.9.9";
+        handle
+            .update(cx, |k, _w, cx| {
+                k.update_available = Some(update::Release {
+                    version: "9.9.9".into(),
+                    tag: "kyde-v9.9.9".into(),
+                    zip_url: String::new(),
+                    sha256_url: String::new(),
+                    page_url: page.into(),
+                });
+                k.do_update(cx);
+                assert!(!k.updating, "nothing to download");
+            })
+            .unwrap();
+        assert_eq!(cx.opened_url().as_deref(), Some(page));
     }
 
     /// Pasting raw image data (e.g. a screenshot on the clipboard) writes it as an image
@@ -5286,19 +5571,28 @@ mod gpui_smoke_tests {
             .update(cx, |k, w, cx| {
                 k.choose_preset(Preset::WebStorm, cx);
                 k.start_key_recording("push", w, cx);
-                k.record_keystroke(&gpui::Keystroke::parse("cmd-shift-o").unwrap(), cx);
+                // ⌘⇧O on macOS, Ctrl+Shift+O elsewhere: either way the keymap writes `cmd`.
+                k.record_keystroke(&gpui::Keystroke::parse("secondary-shift-o").unwrap(), cx);
                 assert_eq!(k.keymap.key_for("push").as_deref(), Some("cmd-shift-o"));
                 assert_eq!(k.keymap.key_for("go_to_file"), None);
-                assert_eq!(
-                    k.keymap_editor.note.as_deref(),
-                    Some("⌘⇧O moved from Go to File")
-                );
+                let moved = if cfg!(target_os = "macos") {
+                    "⌘⇧O moved from Go to File"
+                } else {
+                    "Ctrl+Shift+O moved from Go to File"
+                };
+                assert_eq!(k.keymap_editor.note.as_deref(), Some(moved));
                 assert_eq!(k.keymap_editor.recording, None);
 
                 k.start_key_recording("pull", w, cx);
                 k.record_keystroke(&gpui::Keystroke::parse("p").unwrap(), cx);
                 assert_eq!(k.keymap_editor.recording, Some("pull"), "bare key refused");
                 assert_eq!(k.keymap.key_for("pull").as_deref(), Some("cmd-t"));
+                if !cfg!(target_os = "macos") {
+                    // Super belongs to the desktop off macOS: Super+Shift+O is a bare key.
+                    k.record_keystroke(&gpui::Keystroke::parse("super-shift-o").unwrap(), cx);
+                    assert_eq!(k.keymap_editor.recording, Some("pull"), "Super refused");
+                    assert_eq!(k.keymap.key_for("pull").as_deref(), Some("cmd-t"));
+                }
 
                 k.stop_key_recording();
                 k.request_preset_reset(Preset::WebStorm, cx);
@@ -6406,6 +6700,35 @@ mod gpui_smoke_tests {
         // No panic across any screen = pass.
     }
 
+    /// Shortcut labels: the macOS glyphs there ("⌘⇧O"); off macOS words joined with "+"
+    /// ("Ctrl+Shift+O"), `cmd` shown as the Ctrl it binds.
+    #[test]
+    fn shortcut_labels_follow_the_platform() {
+        assert_eq!(key_glyphs("cmd-shift-o"), ["⌘", "⇧", "O"]);
+        assert_eq!(key_glyphs("cmd-alt-left").concat(), "⌘⌥←");
+        assert_eq!(key_glyphs("ctrl-`").concat(), "⌃`");
+        for (key, words) in [
+            ("cmd-shift-o", "Ctrl+Shift+O"),
+            ("cmd-alt-left", "Ctrl+Alt+←"),
+            ("ctrl-`", "Ctrl+`"),
+            ("cmd-,", "Ctrl+,"),
+            ("cmd--", "Ctrl+-"),
+            ("cmd-enter", "Ctrl+Enter"),
+            ("cmd-shift-]", "Ctrl+Shift+]"),
+            ("cmd-ctrl-x", "Ctrl+X"),
+            ("shift-f3", "Shift+F3"),
+            ("f2", "F2"),
+        ] {
+            assert_eq!(key_words(key).join("+"), words, "{key}");
+        }
+        let save = if cfg!(target_os = "macos") {
+            "⌘S"
+        } else {
+            "Ctrl+S"
+        };
+        assert_eq!(pretty_key("cmd-s"), save);
+    }
+
     #[test]
     fn url_encodes_query() {
         assert_eq!(url_encode("a b/c?d"), "a%20b%2Fc%3Fd");
@@ -6687,7 +7010,8 @@ mod gpui_smoke_tests {
     }
 
     /// ⌘C / ⌘V are the file tree's copy / paste at the app root; in a terminal they must be
-    /// the terminal's, or copying text out of an agent does nothing.
+    /// the terminal's, or copying text out of an agent does nothing. Off macOS the terminal's
+    /// are Ctrl+Shift+C / V (Ctrl+C is the shell's interrupt).
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn terminal_copy_paste_beat_the_file_tree_bindings(cx: &mut TestAppContext) {
@@ -6714,7 +7038,12 @@ mod gpui_smoke_tests {
         cx.run_until_parked();
         handle
             .update(cx, |_k, window, cx| {
-                for key in ["cmd-c", "cmd-v"] {
+                let keys = if cfg!(target_os = "macos") {
+                    ["cmd-c", "cmd-v"]
+                } else {
+                    ["ctrl-shift-c", "ctrl-shift-v"]
+                };
+                for key in keys {
                     let stroke = gpui::Keystroke::parse(key).expect("valid keystroke");
                     window.dispatch_keystroke(stroke, cx);
                 }
@@ -6726,6 +7055,212 @@ mod gpui_smoke_tests {
                 && routed.iter().any(|a| a.ends_with("TerminalPaste")),
             "⌘C / ⌘V in the terminal went to {routed:?}"
         );
+    }
+
+    /// Ctrl+letter in a terminal is the shell's on every OS: Ctrl+C interrupts, Ctrl+W rubs out
+    /// a word, Ctrl+R searches history. Off macOS the app's own shortcuts are on Ctrl too
+    /// (Ctrl+S save, Ctrl+K commit, Ctrl+W close tab, Ctrl+Q quit…), and none may take the key
+    /// while a terminal (the panel's, or an agent's) has focus; outside one they still fire.
+    /// Resolved against the real keymap for the focused context stack (a live shell would keep
+    /// the test's keys as input).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_keeps_ctrl_letters_for_the_shell(cx: &mut TestAppContext) {
+        for preset in [Preset::WebStorm, Preset::VSCode] {
+            let mut km = Keymap::default();
+            km.set_preset(preset);
+            cx.update(|cx| {
+                apply_keymap(cx, &km);
+                let stack = |names: &[&str]| -> Vec<gpui::KeyContext> {
+                    names
+                        .iter()
+                        .map(|n| gpui::KeyContext::parse(n).unwrap())
+                        .collect()
+                };
+                let resolve = |key: &str, ctx: &[gpui::KeyContext]| -> Vec<String> {
+                    let ks = gpui::Keystroke::parse(key).unwrap();
+                    let keymap = cx.key_bindings();
+                    let keymap = keymap.borrow();
+                    let (bindings, _) = keymap.bindings_for_input(&[ks], ctx);
+                    bindings
+                        .iter()
+                        .map(|b| b.action().name().to_string())
+                        .collect()
+                };
+                for ctx in [
+                    stack(&["Kyde", "Terminal"]),
+                    stack(&["Kyde", "Agents", "Terminal"]),
+                ] {
+                    for c in 'a'..='z' {
+                        let ran = resolve(&format!("ctrl-{c}"), &ctx);
+                        assert!(ran.is_empty(), "Ctrl+{c} in a terminal ran {ran:?}");
+                    }
+                    let copy = if cfg!(target_os = "macos") {
+                        "cmd-c"
+                    } else {
+                        "ctrl-shift-c"
+                    };
+                    let ran = resolve(copy, &ctx);
+                    assert!(
+                        ran.first().is_some_and(|a| a.ends_with("TerminalCopy")),
+                        "{ran:?}"
+                    );
+                }
+                if !cfg!(target_os = "macos") {
+                    let ran = resolve("ctrl-s", &stack(&["Kyde"]));
+                    assert!(
+                        ran.first().is_some_and(|a| a.ends_with("SaveFile")),
+                        "{ran:?}"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Off macOS every shortcut is on Ctrl (or Alt), never Super, which the desktop owns (GNOME
+    /// and Cinnamon take Super+S, Super+P, Super+V, Super+←/→…), under both presets.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn shortcuts_bind_ctrl_not_super_off_macos(cx: &mut TestAppContext) {
+        for preset in [Preset::WebStorm, Preset::VSCode] {
+            let mut km = Keymap::default();
+            km.set_preset(preset);
+            cx.update(|cx| {
+                apply_keymap(cx, &km);
+                let bindings = cx.key_bindings();
+                let bindings = bindings.borrow();
+                for b in bindings.bindings() {
+                    assert!(
+                        b.keystrokes().iter().all(|k| !k.modifiers().platform),
+                        "{} is on Super",
+                        b.action().name()
+                    );
+                }
+                let bound = |key: &str, action: &dyn gpui::Action| {
+                    let ks = gpui::Keystroke::parse(key).unwrap();
+                    cx.all_bindings_for_input(&[ks])
+                        .iter()
+                        .any(|b| b.action().partial_eq(action))
+                };
+                assert!(bound("ctrl-s", &SaveFile));
+                assert!(bound("ctrl-q", &Quit));
+                assert!(bound("ctrl-w", &CloseTab));
+                assert!(bound("ctrl-,", &OpenKeymap));
+                assert!(bound("ctrl-c", &CopyFiles));
+                assert!(bound("ctrl-shift-f", &FindInFiles));
+                assert!(bound("f3", &FindNext) && bound("shift-f3", &FindPrev));
+                assert!(bound("alt-1", &AgentJump(1)) && !bound("ctrl-1", &AgentJump(1)));
+                // Linux: the keys the desktop keeps (Ctrl+Alt+arrows, Ctrl+Alt+L) and the
+                // layout-dependent Shift+bracket move to keys every desktop and layout leaves free.
+                if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+                    assert!(bound("ctrl-pagedown", &AgentTabNext));
+                    assert!(bound("ctrl-pageup", &AgentTabPrev));
+                    assert!(bound("ctrl-alt-pagedown", &AgentNext));
+                    assert!(bound("ctrl-alt-pageup", &AgentPrev));
+                    assert!(bound("alt-left", &NavBack) && bound("alt-right", &NavForward));
+                    assert!(bound("f9", &SortLines));
+                    assert!(!bound("ctrl-alt-left", &NavBack) && !bound("ctrl-alt-l", &SortLines));
+                }
+                if preset == Preset::WebStorm {
+                    assert!(bound("ctrl-shift-o", &GoToFile) && bound("ctrl-k", &DoCommit));
+                } else {
+                    assert!(bound("ctrl-p", &GoToFile) && bound("ctrl-shift-g", &ModeCommit));
+                    assert!(
+                        !bound("ctrl-shift-g", &FindPrev),
+                        "Commit view keeps its key"
+                    );
+                }
+            });
+        }
+    }
+
+    /// Off macOS the menu bar's items live behind the title strip's menu button (`chrome`):
+    /// File's first and Quit last, Recent Projects as a flyout of the recents, and picking an
+    /// item runs the menu bar's own action — in a project window and on the Projects screen.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn app_menu_holds_the_menu_bar_and_runs_its_actions(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let labels = |entries: &[MenuEntry]| -> Vec<String> {
+            entries
+                .iter()
+                .map(|e| match e {
+                    MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
+                    MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
+                    MenuEntry::Divider => "—".into(),
+                })
+                .collect()
+        };
+        // Open the menu, light `item`, press ⏎ in the given window.
+        let pick = |cx: &mut TestAppContext, handle: gpui::WindowHandle<Kyde>, item: &str| {
+            let item = item.to_string();
+            handle
+                .update(cx, |k, _w, cx| {
+                    k.open_menu(gpui::point(px(6.0), px(36.0)), MenuTarget::AppMenu, cx);
+                    let m = k.context_menu.as_mut().expect("menu open");
+                    let at = labels(&m.entries).iter().position(|l| *l == item);
+                    m.hl = Some(at.expect("item in the menu"));
+                })
+                .unwrap();
+            cx.refresh().unwrap(); // the menu takes focus on its first render
+            cx.run_until_parked();
+            cx.update_window(handle.into(), |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+
+        let (handle, dir) = boot(cx);
+        let fps_was = handle
+            .update(cx, |k, _w, cx| {
+                k.recents.paths = vec![dir.clone()];
+                k.open_menu(gpui::point(px(6.0), px(36.0)), MenuTarget::AppMenu, cx);
+                let m = k.context_menu.as_ref().expect("menu open");
+                assert_eq!(
+                    labels(&m.entries),
+                    [
+                        "Open…",
+                        "—",
+                        "Recent Projects ▸",
+                        "—",
+                        "Settings…",
+                        "Plugins…",
+                        "What's New…",
+                        "Toggle FPS Monitor",
+                        "—",
+                        "Clear Data & Restart…",
+                        "—",
+                        "Quit Kyde"
+                    ]
+                );
+                let MenuEntry::Submenu { items, .. } = &m.entries[2] else {
+                    panic!("Recent Projects is a flyout");
+                };
+                assert_eq!(labels(items), [projects::name_of(&dir)]);
+                k.close_menu(cx);
+                k.fps.show
+            })
+            .unwrap();
+        pick(cx, handle, "Toggle FPS Monitor");
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_ne!(k.fps.show, fps_was, "the menu item ran ToggleFps");
+                assert!(k.context_menu.is_none(), "picking an item closes the menu");
+            })
+            .unwrap();
+        pick(cx, handle, "Toggle FPS Monitor"); // put it back (it's remembered)
+
+        // The Projects screen has no project, and its own handlers for the menu's actions.
+        let km = Keymap::default();
+        let landing = cx.add_window(move |_w, cx| Kyde::new(None, km.clone(), false, cx));
+        cx.run_until_parked();
+        pick(cx, landing, "Settings…");
+        landing
+            .update(cx, |k, _w, _cx| {
+                assert!(k.settings_win.is_some(), "Settings… opened Settings");
+            })
+            .unwrap();
     }
 
     /// Keyboard navigation end to end (issue #81), through the real bindings + key contexts:
@@ -6787,7 +7322,7 @@ mod gpui_smoke_tests {
         cx.refresh().unwrap();
         cx.run_until_parked();
         // Entering lands the caret in the message box; ⌘9 again hops to the tree.
-        press(cx, "cmd-9");
+        press(cx, "secondary-9");
         let new_txt = PathBuf::from("new.txt");
         let was = handle
             .update(cx, |k, _w, _cx| k.commit.checked.contains(&new_txt))

@@ -100,7 +100,7 @@ by lightness instead of hue) — switch in Settings.
 A home for AI coding agents — Claude Code by default (the start command is configurable). **Projects → worktrees → tabs**, each tab an agent.
 
 * **Projects → worktrees → tabs.** Every project's own checkout plus all of its git worktrees, whoever made them. New worktrees check out from a fresh `origin/main` in seconds, and each one runs one or more agent tabs. Drag to reorder, double-click to rename.
-* **Live status.** A dot per agent — working (blue), finished while you were away (green, "done"), **needs input** (red — a permission prompt, a question, a plan to approve). It comes from a small Claude Code hook Kyde installs (and can remove) in `~/.claude/settings.json`. A sound and a Dock bounce when an agent finishes or needs you, `⌘⌥J` to jump to it, and an optional "needs you first" ordering.
+* **Live status.** A dot per agent — working (blue), finished while you were away (green, "done"), **needs input** (red — a permission prompt, a question, a plan to approve). It comes from a small Claude Code hook Kyde installs (and can remove) in `~/.claude/settings.json`. A sound and a Dock bounce (on Linux, a desktop notification) when an agent finishes or needs you, `⌘⌥J` to jump to it, and an optional "needs you first" ordering.
 * **Agents outlive the window.** Each agent runs in its own background host process: quit Kyde and they keep working; reopen it and they're back, scrollback and all. After a reboot, each tab resumes its exact Claude session.
 * **AI titles and context.** Rows are titled by what the agent is doing (Claude Code's own session title), with its task, latest prompt and git state one click away.
 * **GitHub built in** (via `gh`). Issues and Pull Requests tabs per project — filter (Mine / All / Unassigned; Review requested / Mine / All) and search. **Start** an issue: a worktree on a `feat/123-short-slug` branch with an agent already briefed. **Review** a PR: it's checked out in its own worktree with a review agent, and Kyde remembers, offering *Re-review* next time. Issues and PRs render like GitHub — the conversation, reviews with their inline threads (reply in place), commits, checks and files changed — and you can comment, close or reopen.
@@ -181,7 +181,7 @@ herdr still does things Kyde doesn't: it runs anywhere a terminal does (includin
 ### Look & feel
 
 * **Islands layout** — rounded panels, draggable dividers, activity rail, native title bar (double-click to zoom), status bar.
-* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu).
+* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu). Linux has no app menu bar, so there the same items sit behind a ☰ button: at the right end of the toolbar under the window manager's title bar (X11), at the left of Kyde's own title bar on Wayland.
 * **What's New** — the project's GitHub releases mirrored in-app: version list on the left, that release's notes rendered on the right.
 * **In-app updates** — a banner when a newer release exists; **Update & Relaunch** downloads and swaps the running `.app` in place (or opens the release page when not running from a bundle).
 * **Single instance** — a second `ky <path>` hands the project to the running app as another tab and brings it forward instead of starting a second process (`KYDE_SINGLE_INSTANCE=0` opts out).
@@ -200,6 +200,10 @@ Grab the latest build for your platform from the [Releases](../../releases) page
 
 **macOS** — download `kyde-macos.zip` (Apple Silicon) or `kyde-macos-x86_64.zip` (Intel), unzip, and drag **Kyde.app** to `/Applications`.
 
+**Linux** — download `kyde-linux-x86_64.AppImage`, `chmod +x` it, and run it. It needs glibc 2.39+ (Ubuntu 24.04, Linux Mint 22 or newer) and a Vulkan driver; a stock Ubuntu desktop already has the rest. On a minimal install: `sudo apt install libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 libwayland-client0 fuse3` (NVIDIA's driver brings its own Vulkan).
+
+On X11 the window manager draws Kyde's title bar; on a Wayland desktop that leaves that to the app (GNOME), Kyde draws its own — drag it to move, double-click to maximize, minimize / maximize / close at its right. On X11 Kyde follows the desktop's scale (`Xft.dpi`, which GNOME, Cinnamon and KDE set); to override it, start Kyde with `GPUI_X11_SCALE_FACTOR=1.5` (any factor), or `GPUI_X11_SCALE_FACTOR=randr` to use the monitor's physical DPI. Wayland uses each monitor's own scale.
+
 ## Usage
 
 Launch with no arguments for the Projects view, or point it at a repo:
@@ -208,7 +212,7 @@ Launch with no arguments for the Projects view, or point it at a repo:
 cargo run -- /path/to/repo
 ```
 
-First-run setup offers to **install a `ky` shell command** (a symlink into `~/.local/bin` — no shell-rc editing, no `sudo`); leave it ticked and you can open Kyde from any terminal:
+First-run setup offers to **install a `ky` shell command** (a symlink into `~/.local/bin` — no shell-rc editing, no `sudo`; from the AppImage it links the `.AppImage` file, so keep that where it is); leave it ticked and you can open Kyde from any terminal. On Ubuntu, `~/.local/bin` only joins your `PATH` at login if it already existed, so if Kyde had to create it, log out and back in once.
 
 ```sh
 ky                 # Projects view
@@ -233,9 +237,28 @@ Default shortcuts (WebStorm → VSCode):
 * Settings: `⌘,`
 * Agents: next / previous agent `⌘⌥↓` / `⌘⌥↑`, the one that needs you `⌘⌥J`, the Nth `⌃1`–`⌃9`, next / previous tab `⌘⇧]` / `⌘⇧[`, new worktree `⌘⌥N`, rename tab `F2`, scrollback in an editor `⌘⌥E`, hide the sidebar `⌘⌥B`
 
+On Linux (and Windows) `⌘` is **Ctrl** and `⌥` is **Alt**: Save is `Ctrl+S`, Go to File `Ctrl+Shift+O`, Settings `Ctrl+,`, ⌘-click is Ctrl+click, and Settings → Keymap shows every key that way. A few keys differ there:
+
+* Find next / previous: `F3` / `Shift+F3`
+* Editor: `Ctrl+←` / `Ctrl+→` move by word and `Ctrl+Backspace` deletes one (Home / End go to the line ends)
+* The Nth agent: `Alt+1`–`Alt+9`
+* Terminal: Ctrl + a letter goes to the shell (`Ctrl+C` interrupts, `Ctrl+W` deletes a word), so the terminal's own keys take Shift: copy / paste `Ctrl+Shift+C` / `Ctrl+Shift+V`, new / close tab `Ctrl+Shift+T` / `Ctrl+Shift+W` (the shell's own `Ctrl+L` / `Ctrl+U` clear)
+
+* Keys the desktop keeps (Cinnamon and GNOME switch workspaces on `Ctrl+Alt+←/→/↑/↓`, Cinnamon locks the screen on `Ctrl+Alt+L`) and keys that need a US layout move: Back / Forward `Alt+←` / `Alt+→`, next / previous agent `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp`, next / previous agent tab `Ctrl+PageDown` / `Ctrl+PageUp`, Sort Lines `F9`
+
+A shortcut written with Shift and a symbol binds to what that key types on your keyboard layout, read from the active layout and again whenever you switch.
+
 ## Build
 
 Needs Rust 1.96+ and (on macOS) Apple's Metal Toolchain, which gpui uses to compile its shaders — if a clean machine errors with "missing Metal Toolchain", run `xcodebuild -downloadComponent MetalToolchain`.
+
+On Linux, gpui needs its backend's dev libraries first (Ubuntu/Debian — the same list CI installs):
+
+```sh
+sudo apt install pkg-config libssl-dev libzstd-dev libwayland-dev libxkbcommon-dev \
+  libxkbcommon-x11-dev libfontconfig-dev libfreetype-dev libx11-dev libxcb1-dev \
+  libvulkan-dev clang cmake
+```
 
 ```sh
 cargo build --release             # full — every language grammar baked in (default)
@@ -251,6 +274,8 @@ Each language pack is a Cargo feature, so unused grammars can be dropped from th
 cargo build --release --no-default-features --features rust,json,toml
 ```
 
+`./scripts/bundle-linux.sh` wraps the release build in an AppImage (`dist/Kyde-x86_64.AppImage`), the same way `./scripts/bundle-macos.sh` makes `dist/Kyde.app`.
+
 ## Performance
 
 Large files stay smooth via **viewport virtualization** (only on-screen rows are shaped each frame) and **async highlighting** (big files open instantly as plain text, then highlight off-thread). A 37k-line `package-lock.json` scrolls at ~120fps.
@@ -263,7 +288,7 @@ Guarded by `perf_*` time-budget tests, headless-gpui smoke tests (render every s
 
 ## Known limitations / next
 
-* **Prebuilt releases are macOS-only.** I develop on macOS and wouldn't actively test Linux/Windows, so I only ship a signed + notarized macOS build rather than binaries I can't stand behind. The code itself is cross-platform — gpui runs on all three, and Linux/Windows packaging already exists in `scripts/` (just unwired from the release). Re-enabling them is a **good first issue** for a contributor who runs those platforms. Until then, Linux/Windows users can `cargo build --release`.
+* **Prebuilt releases are macOS + Linux.** I develop on macOS, so the signed + notarized macOS build is the one I test myself; the Linux AppImage (x86_64) was revived and tested by a contributor on Ubuntu — Linux bug reports are welcome. It doesn't self-update: the update banner's **Download** opens the release page. Windows packaging still isn't wired into the release — re-enabling it is a **good first issue** for a contributor who runs Windows. Until then, Windows users can `cargo build --release`.
 * No soft-wrap in the file editor (long lines scroll horizontally; the commit box does wrap). The editor holds a flat `String` and undo is whole-buffer snapshots — a rope-based buffer comes later for very large edits.
 * No scrollback search in the terminal (open it in an editor with `⌘⌥E` and `⌘F` there).
 * Agents' needs-input / done states come from a Claude Code hook; other agent CLIs get a simpler dot based on their output.

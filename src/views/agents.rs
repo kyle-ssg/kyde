@@ -688,21 +688,7 @@ impl Kyde {
 
     /// "Add space" — pick a starting folder with the native folder picker.
     pub(crate) fn agents_add_space_prompt(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add Project".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(p) = paths.into_iter().next() {
-                    this.update(cx, |this, cx| this.agents_add_space(p, cx))
-                        .ok();
-                }
-            }
-        })
-        .detach();
+        self.prompt_folder("Add Project", cx, Self::agents_add_space);
     }
 
     /// Add `path` as a space (no-op if it already is one) and open it — its own folder is
@@ -2322,8 +2308,8 @@ impl Kyde {
         self.agents_refresh_states(cx);
     }
 
-    /// An agent finished or needs you: a sound (one per burst), and a Dock bounce while Kyde
-    /// is in the background — each per its setting.
+    /// An agent finished or needs you: a sound (one per burst), and a Dock bounce (Linux: a
+    /// desktop notification) while Kyde is in the background — each per its setting.
     fn agents_alert(&mut self, sound: alert::Sound) {
         let quiet = self
             .agents
@@ -2334,7 +2320,7 @@ impl Kyde {
             alert::play(sound);
         }
         if self.agents.cfg.dock_alerts && !self.agents.window_active {
-            alert::dock_bounce();
+            alert::request_attention(sound);
         }
     }
 
@@ -5350,7 +5336,10 @@ impl Kyde {
         strip = strip
             .child(
                 ui::icon_btn("agents-tab-new", 24.0)
-                    .tooltip(ui::tip(format!("New tab running `{cmd}`  (⌘T)")))
+                    .tooltip(ui::tip(format!(
+                        "New tab running `{cmd}`  ({})",
+                        pretty_key(&format!("{TERMINAL_MOD}-t"))
+                    )))
                     .child("+")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -5597,11 +5586,10 @@ impl Kyde {
                         }),
                     ),
             )
-            .child(
-                div()
-                    .text_color(t.line_number)
-                    .child("Change these any time in Settings → Agents (⌘,)."),
-            )
+            .child(div().text_color(t.line_number).child(format!(
+                "Change these any time in Settings → Agents ({}).",
+                pretty_key("cmd-,")
+            )))
             .child(
                 ui::modal_footer().child(
                     btn_primary("agents-setup-continue", "Continue")

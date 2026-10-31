@@ -54,9 +54,62 @@ fn windows_shell_from_comspec(comspec: Option<String>) -> String {
         .unwrap_or_else(|| "cmd.exe".to_string())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 pub(crate) fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn default_shell() -> String {
+    shell_from(std::env::var("SHELL").ok(), passwd_shell)
+}
+
+/// Off macOS: `$SHELL`, else the login shell in the user database, else `/bin/sh`. A launch
+/// from a desktop entry can arrive without `SHELL`, and zsh isn't installed on most Linux
+/// systems (Ubuntu ships bash), so `/bin/zsh` would leave a dead tab. Pure; `passwd` is the
+/// user-database lookup.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn shell_from(env: Option<String>, passwd: impl FnOnce() -> Option<String>) -> String {
+    env.filter(|s| !s.trim().is_empty())
+        .or_else(passwd)
+        .unwrap_or_else(|| "/bin/sh".to_string())
+}
+
+/// The current user's login shell from the user database (`/etc/passwd`, LDAP, …).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn passwd_shell() -> Option<String> {
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buf: Vec<libc::c_char> = vec![0; 4096];
+    let mut found: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: `entry`, `buf` and `found` are live, writable and passed with `buf`'s real
+    // length; getpwuid_r fills `entry` (its strings point into `buf`) and sets `found` to
+    // `entry` on success, or leaves it null when there is no entry or on error.
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            entry.as_mut_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+            &raw mut found,
+        )
+    };
+    if rc != 0 || found.is_null() {
+        return None;
+    }
+    // SAFETY: `found` is non-null, so `entry` was filled; `pw_shell` is null or a
+    // NUL-terminated string inside `buf`, which outlives this read.
+    let shell = unsafe {
+        let p = (*found).pw_shell;
+        if p.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(p)
+            .to_str()
+            .ok()?
+            .trim()
+            .to_string()
+    };
+    (!shell.is_empty()).then_some(shell)
 }
 
 /// Forwards alacritty IO-thread events to the gpui foreground over an unbounded channel.
@@ -535,9 +588,37 @@ impl TerminalView {
 
     /// Paste clipboard text, honouring bracketed-paste mode when the program enabled it.
     fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) else {
-            return;
-        };
+        if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
+            self.paste_text(text, cx);
+        }
+    }
+
+    /// Linux: a middle click pastes the PRIMARY selection (the last text selected with the
+    /// mouse, here or in any other app), as every Linux terminal does.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn paste_primary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        if let Some(text) = cx.read_from_primary().and_then(|i| i.text()) {
+            self.paste_text(text, cx);
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn paste_primary(&mut self, _: &mut Window, _: &mut Context<Self>) {}
+
+    /// Linux: a finished mouse selection also becomes the PRIMARY selection.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn selection_to_primary(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.term.lock().selection_to_string() {
+            if !text.is_empty() {
+                cx.write_to_primary(gpui::ClipboardItem::new_string(text));
+            }
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn selection_to_primary(&self, _: &mut Context<Self>) {}
+
+    /// Send pasted `text` to the shell, honouring bracketed-paste mode.
+    fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
@@ -782,9 +863,9 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus);
-                    // Cmd-click opens a URL under the cursor; a plain click starts a
-                    // selection (double = word, triple = line).
-                    if e.modifiers.platform {
+                    // Cmd-click (Ctrl-click off macOS) opens a URL under the cursor; a
+                    // plain click starts a selection (double = word, triple = line).
+                    if e.modifiers.secondary() {
                         this.open_url_at(e.position);
                         return;
                     }
@@ -803,9 +884,16 @@ impl Render for TerminalView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _e: &MouseUpEvent, _w, _cx| {
+                cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
+                    if this.selecting {
+                        this.selection_to_primary(cx);
+                    }
                     this.selecting = false;
                 }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, _e: &MouseDownEvent, window, cx| this.paste_primary(window, cx)),
             )
             // Right-click → context menu (Paste / Clear / Close) at the cursor.
             .on_mouse_down(
@@ -843,7 +931,7 @@ impl TerminalView {
             .selection_to_string()
             .is_some_and(|s| !s.is_empty());
         // A row: its label, the shortcut (muted) on the right; greyed out when `enabled` is off.
-        let item = |label: &'static str, key: &'static str, enabled: bool| {
+        let item = |label: &'static str, key: String, enabled: bool| {
             div()
                 .id(label)
                 .flex()
@@ -865,6 +953,13 @@ impl TerminalView {
             this.menu_at = None;
             cx.notify();
         };
+        // The terminal's own keys: ⌘C / ⌘V on macOS, Ctrl+Shift+C / V elsewhere.
+        let term_key = |key: &str| crate::pretty_key(&format!("{}-{key}", crate::TERMINAL_MOD));
+        let scrollback_key = if cfg!(target_os = "macos") {
+            "⌥⌘E".to_string()
+        } else {
+            crate::pretty_key("cmd-alt-e")
+        };
         let panel = div()
             .flex()
             .flex_col()
@@ -876,17 +971,19 @@ impl TerminalView {
             .rounded_md()
             .shadow_md()
             .font_family(theme::font::UI_FAMILY)
-            .child(item("Copy", "⌘C", has_selection).when(has_selection, |d| {
-                d.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| {
-                        cx.stop_propagation();
-                        close(this, cx);
-                        this.copy_selection(cx);
-                    }),
-                )
-            }))
-            .child(item("Paste", "⌘V", true).on_mouse_down(
+            .child(
+                item("Copy", term_key("c"), has_selection).when(has_selection, |d| {
+                    d.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            cx.stop_propagation();
+                            close(this, cx);
+                            this.copy_selection(cx);
+                        }),
+                    )
+                }),
+            )
+            .child(item("Paste", term_key("v"), true).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _e, _w, cx| {
                     cx.stop_propagation();
@@ -895,7 +992,7 @@ impl TerminalView {
                 }),
             ))
             .child(
-                item("Open Scrollback in Editor", "⌥⌘E", true).on_mouse_down(
+                item("Open Scrollback in Editor", scrollback_key, true).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _e, _w, cx| {
                         cx.stop_propagation();
@@ -904,7 +1001,7 @@ impl TerminalView {
                     }),
                 ),
             )
-            .child(item("Clear Screen", "", true).on_mouse_down(
+            .child(item("Clear Screen", String::new(), true).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _e, _w, cx| {
                     cx.stop_propagation();
@@ -912,7 +1009,7 @@ impl TerminalView {
                     this.clear_screen(cx);
                 }),
             ))
-            .child(item("Close", "", true).on_mouse_down(
+            .child(item("Close", String::new(), true).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _e, _w, cx| {
                     cx.stop_propagation();
@@ -1426,6 +1523,21 @@ mod tests {
             windows_shell_from_comspec(Some("  ".to_string())),
             "cmd.exe"
         );
+    }
+
+    /// Off macOS a missing `SHELL` falls back to the login shell, then `/bin/sh` — never to
+    /// a `/bin/zsh` that most Linux systems don't have.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn shell_falls_back_to_the_login_shell_then_sh() {
+        let none = || -> Option<String> { None };
+        let fish = || Some("/usr/bin/fish".to_string());
+        assert_eq!(shell_from(Some("/bin/bash".into()), fish), "/bin/bash");
+        assert_eq!(shell_from(None, fish), "/usr/bin/fish");
+        assert_eq!(shell_from(Some(" ".into()), fish), "/usr/bin/fish");
+        assert_eq!(shell_from(None, none), "/bin/sh");
+        // The real lookup: this user's entry, when the system has one, is an absolute path.
+        assert!(passwd_shell().is_none_or(|s| s.starts_with('/')));
     }
 
     #[test]

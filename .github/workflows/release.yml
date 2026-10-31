@@ -3,11 +3,11 @@ name: release
 # release-please owns the whole release: it watches Conventional Commits on main,
 # maintains a "release PR" that bumps Cargo.toml + Cargo.lock + CHANGELOG.md, and
 # on merge cuts the vX.Y.Z tag + GitHub Release. The build job then signs + notarizes the
-# macOS .app and attaches it to that release.
+# macOS .app, packages the Linux AppImage, and attaches both to that release.
 #
-# macOS-only for now (see README "Known limitations"). The Linux/Windows packaging worked
-# but isn't maintained, so it's parked — commented out below (matrix entries + their package
-# steps), not deleted. Uncomment a platform's matrix entry AND its package step to revive it.
+# Windows packaging worked but isn't maintained, so it's parked — commented out below
+# (matrix entry + its package step), not deleted. Uncomment its matrix entry AND its package
+# step to revive it.
 #
 # Why build runs HERE and not via a tag trigger: tags/releases created with the
 # default GITHUB_TOKEN do NOT trigger other workflows. Keeping build in the same
@@ -65,11 +65,17 @@ jobs:
             os: macos-15
             target: x86_64-apple-darwin
             asset: kyde-macos-x86_64.zip
-          # Parked (macOS-only releases for now). These worked; to revive a platform,
-          # uncomment its matrix entry here AND its package step further down.
-          # - name: linux
-          #   os: ubuntu-latest
-          #   bin: kyde
+          # Linux ships an AppImage. Pinned to an Ubuntu release (not ubuntu-latest): the glibc
+          # it builds against is the oldest one the AppImage runs on, so it must not jump when
+          # -latest moves (a 26.04 build needs glibc 2.43 and won't start on 24.04; a 24.04
+          # build needs 2.39 for Rust std's pidfd_spawnp/pidfd_getpid, so 22.04 refuses it too).
+          # The name ends in .AppImage, not .zip, so no macOS updater — the old first-zip one
+          # or the arch-aware one — can ever pick it.
+          - name: linux
+            os: ubuntu-24.04
+            asset: kyde-linux-x86_64.AppImage
+          # Parked. This worked; to revive it, uncomment its matrix entry here AND its package
+          # step further down.
           # - name: windows
           #   os: windows-latest
           #   bin: kyde.exe
@@ -86,17 +92,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Parked with the Linux matrix entry above.
-      # - name: Install Linux deps
-      #   if: matrix.name == 'linux'
-      #   run: |
-      #     sudo apt-get update
-      #     sudo apt-get install -y \
-      #       pkg-config libssl-dev libzstd-dev \
-      #       libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-      #       libfontconfig-dev libfreetype-dev \
-      #       libx11-dev libxcb1-dev libvulkan-dev \
-      #       clang cmake
+      # gpui's Linux backend (blade/Vulkan + wayland/x11/xkb + fontconfig) — same list as build.yml.
+      - name: Install Linux deps
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config libssl-dev libzstd-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libfontconfig-dev libfreetype-dev \
+            libx11-dev libxcb1-dev libvulkan-dev \
+            clang cmake
 
       # Build the matrix arch and wrap it in Kyde.app. bundle-macos.sh ad-hoc-signs it as a
       # baseline so an unsigned bundle never ships; the next step upgrades that to Developer
@@ -165,12 +171,19 @@ jobs:
         if: startsWith(matrix.name, 'macos')
         run: shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
 
-      # Parked with the Linux matrix entry above.
-      # - name: Package AppImage (linux)
-      #   if: matrix.name == 'linux'
-      #   run: |
-      #     ./scripts/bundle-linux.sh
-      #     mv dist/Kyde-x86_64.AppImage kyde-linux.AppImage
+      # Build + wrap the binary in an AppImage (icon + .desktop); see scripts/bundle-linux.sh.
+      - name: Package AppImage (linux)
+        if: matrix.name == 'linux'
+        run: |
+          ./scripts/bundle-linux.sh
+          mv dist/Kyde-x86_64.AppImage "${{ matrix.asset }}"
+
+      # Same `.sha256` sibling as the macOS zips, so a download can be checked by hand
+      # (`sha256sum -c`). The in-app updater never installs a Linux build (it only swaps .app
+      # bundles), so this one is for people.
+      - name: Checksum (linux)
+        if: matrix.name == 'linux'
+        run: sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
 
       # Parked with the Windows matrix entry above.
       # - name: Package zip (windows)

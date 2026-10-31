@@ -3,6 +3,20 @@
 
 use crate::*;
 
+/// The "show it in the file manager" menu label: Finder on macOS.
+pub(crate) const REVEAL_IN_FILES: &str = if cfg!(target_os = "macos") {
+    "Reveal in Finder"
+} else {
+    "Reveal in File Manager"
+};
+
+/// The "open a terminal in its folder" menu label: Terminal.app on macOS.
+pub(crate) const REVEAL_IN_TERMINAL: &str = if cfg!(target_os = "macos") {
+    "Reveal in Terminal"
+} else {
+    "Open in Terminal"
+};
+
 /// If `p` is `old` or lives under it, return `p` with the `old` prefix replaced by `new`
 /// (so renaming a folder repoints every path beneath it); `None` when `p` is unrelated.
 pub(crate) fn remap_under(
@@ -484,8 +498,40 @@ impl Kyde {
             self.finish_paste(dest_dir, last, cx);
             return;
         }
-        // 2) Files copied in Finder (absolute source paths).
-        let files = os_clipboard::file_paths();
+        // 2) Files copied in Finder / a Linux file manager, then 3) image data. On Linux the
+        // file list comes from the X server (on a Wayland desktop Xwayland, which may first
+        // have to start) and the clipboard's owner can take a moment to answer, so it is read
+        // off the UI thread.
+        #[cfg(target_os = "linux")]
+        {
+            let root = self.repo_root.clone();
+            let read = cx
+                .background_executor()
+                .spawn(async { os_clipboard::file_paths() });
+            cx.spawn(async move |this, cx| {
+                let files = read.await;
+                this.update(cx, |this, cx| {
+                    // The project changed while the clipboard was read: drop the paste.
+                    if this.repo_root == root {
+                        this.paste_os_clipboard(dest_dir, files, cx);
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        }
+        #[cfg(not(target_os = "linux"))]
+        self.paste_os_clipboard(dest_dir, os_clipboard::file_paths(), cx);
+    }
+
+    /// Steps 2 and 3 of [`Self::paste_into`]: `files` (absolute paths copied in Finder or a
+    /// file manager) into `dest_dir`, else the clipboard's image data as a new file there.
+    fn paste_os_clipboard(
+        &mut self,
+        dest_dir: PathBuf,
+        files: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
         if !files.is_empty() {
             let mut last = None;
             for src_abs in &files {
@@ -701,22 +747,27 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Reveal a repo-relative path in the OS file manager (macOS Finder via `open -R`).
+    /// Reveal a repo-relative path in the OS file manager: macOS Finder via `open -R`;
+    /// elsewhere gpui's `reveal_path` (Linux: the desktop portal's Open Directory, which opens
+    /// its folder in the file manager, else `xdg-open` on that folder).
     pub(crate) fn reveal_in_os(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(root) = &self.repo_root {
             let full = root.join(rel);
+            #[cfg(target_os = "macos")]
             std::process::Command::new("open")
                 .arg("-R")
                 .arg(&full)
                 .spawn()
                 .ok();
+            #[cfg(not(target_os = "macos"))]
+            cx.reveal_path(&full);
         }
         self.close_menu(cx);
     }
 
     /// Open the system terminal in the folder containing a repo-relative path
-    /// (macOS: `open -a Terminal <dir>`). Files open their parent dir; dirs open
-    /// themselves.
+    /// (macOS: `open -a Terminal <dir>`; Linux: the user's own terminal app, see
+    /// `platform::terminal_app`). Files open their parent dir; dirs open themselves.
     pub(crate) fn reveal_in_terminal(&mut self, rel: &std::path::Path, cx: &mut Context<Self>) {
         if let Some(root) = &self.repo_root {
             let full = root.join(rel);
@@ -726,12 +777,31 @@ impl Kyde {
                 full.parent()
                     .map_or_else(|| root.clone(), std::path::Path::to_path_buf)
             };
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
             std::process::Command::new("open")
                 .arg("-a")
                 .arg("Terminal")
                 .arg(&dir)
                 .spawn()
                 .ok();
+            // Off the UI thread: choosing the terminal reads the desktop's setting through
+            // `gsettings`, a process that waits on D-Bus.
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let open = cx
+                    .background_executor()
+                    .spawn(async move { crate::platform::terminal_app::open_in(&dir) });
+                cx.spawn(async move |this, cx| {
+                    if let Err(e) = open.await {
+                        this.update(cx, |this, cx| {
+                            this.fail(REVEAL_IN_TERMINAL, e);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                })
+                .detach();
+            }
         }
         self.close_menu(cx);
     }

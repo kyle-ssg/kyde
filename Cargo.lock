@@ -3010,6 +3010,7 @@ dependencies = [
  "futures",
  "fuzzy-matcher",
  "gpui",
+ "image",
  "kyde-color",
  "kyde-config",
  "kyde-diff",
@@ -3032,6 +3033,9 @@ dependencies = [
  "unicode-segmentation",
  "ureq",
  "winresource",
+ "x11-clipboard",
+ "x11rb",
+ "xkbcommon",
 ]
 
 [[package]]

@@ -47,7 +47,13 @@ impl Kyde {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .w(px(300.0))
+                // Off macOS the keys are words ("Ctrl+Alt+J"), wider than the glyphs: the
+                // card widens so its longest row keeps its key inside the border.
+                .w(px(if cfg!(target_os = "macos") {
+                    300.0
+                } else {
+                    340.0
+                }))
                 .p_3()
                 .rounded_lg()
                 // Selection = thick accent border + a cool same-family gradient.
@@ -103,11 +109,15 @@ impl Kyde {
             .child(
                 div()
                     .text_color(theme::get().line_number)
-                    .child(if self.onboarding.forced {
-                        "Pick a keymap and theme to get started. You can change these any time in Kyde → Settings (⌘,)."
-                    } else {
-                        "Change your keymap, theme and more any time in Kyde → Settings (⌘,)."
-                    }),
+                    .child(format!(
+                        "{} ({}).",
+                        if self.onboarding.forced {
+                            "Pick a keymap and theme to get started. You can change these any time in Kyde → Settings"
+                        } else {
+                            "Change your keymap, theme and more any time in Kyde → Settings"
+                        },
+                        pretty_key("cmd-,")
+                    )),
             )
             .child(
                 div()

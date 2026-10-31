@@ -208,6 +208,18 @@ impl Kyde {
                     .items_center()
                     .flex_none()
                     .gap_2()
+                    // The OS wouldn't watch this project: outside changes wait for a refocus.
+                    .when_some(self.watch_off.clone(), |d, why| {
+                        d.child(
+                            div()
+                                .id("live-refresh-off")
+                                .flex_none()
+                                .px_2()
+                                .text_color(bar_text)
+                                .tooltip(ui::tip(why))
+                                .child("Live refresh off"),
+                        )
+                    })
                     // Only show Pull when we know we're behind (or one's in flight).
                     .when(
                         self.sync.behind.unwrap_or(0) > 0 || self.sync.pulling,

@@ -187,7 +187,11 @@ impl Kyde {
                             cx,
                         );
                         let links = check(
-                            "⌘-click imports",
+                            if cfg!(target_os = "macos") {
+                                "⌘-click imports"
+                            } else {
+                                "Ctrl+click imports"
+                            },
                             self.plugins.links_on(id),
                             Kyde::toggle_pack_links,
                             cx,
@@ -498,6 +502,12 @@ impl Kyde {
                             .ok()
                     })
                     .flatten();
+                // Drawing its own decorations (Wayland), the window also holds a title strip.
+                let decorations = chrome::requested_decorations();
+                let h = match decorations {
+                    Some(gpui::WindowDecorations::Client) => h + chrome::MODAL_STRIP_H,
+                    _ => h,
+                };
                 let window_bounds = main_bounds.unwrap_or_else(|| {
                     WindowBounds::Windowed(Bounds::centered(display, gpui::size(px(w), px(h)), cx))
                 });
@@ -509,15 +519,21 @@ impl Kyde {
                             appears_transparent: false,
                             ..Default::default()
                         }),
+                        app_id: Some(APP_ID.into()),
+                        window_decorations: decorations,
                         ..Default::default()
                     },
                     {
                         let kyde = kyde.clone();
-                        move |_, cx| cx.new(|cx| ModalWindow::new(kyde.clone(), kind, cx))
+                        let title = title.clone();
+                        move |_, cx| {
+                            cx.new(|cx| ModalWindow::new(kyde.clone(), kind, title.clone(), cx))
+                        }
                     },
                 )
             });
             if let Ok(Ok(handle)) = opened {
+                crate::set_window_icons();
                 let _ = handle.update(cx, |view, window, cx| {
                     // New Branch: focus the name field so you can type immediately. Others:
                     // focus the root so Escape (on_key_down) dispatches.

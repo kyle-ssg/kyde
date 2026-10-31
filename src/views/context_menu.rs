@@ -28,8 +28,8 @@ pub(crate) enum MenuEntry {
     /// A "<label> ▸" row with its own flyout of entries. `icon_label` picks the icon.
     Submenu {
         kind: Submenu,
-        label: &'static str,
-        icon_label: &'static str,
+        label: SharedString,
+        icon_label: SharedString,
         items: Vec<MenuEntry>,
     },
 }
@@ -386,8 +386,8 @@ impl Kyde {
                 let (nd_file, nd_dir) = (dir.clone(), dir.clone());
                 out.push(MenuEntry::Submenu {
                     kind: Submenu::New,
-                    label: "New",
-                    icon_label: "New File…",
+                    label: "New".into(),
+                    icon_label: "New File…".into(),
                     items: vec![
                         MenuEntry::item("File", move |this, window, cx| {
                             this.start_new_file(nd_file.clone(), window, cx);
@@ -478,18 +478,21 @@ impl Kyde {
                     }
                     out.push(MenuEntry::Submenu {
                         kind: Submenu::Git,
-                        label: "Git",
-                        icon_label: "Commit",
+                        label: "Git".into(),
+                        icon_label: "Commit".into(),
                         items: git,
                     });
                 }
 
-                // Reveal in Finder — its own trailing group.
+                // Reveal in Finder (the file manager) — its own trailing group.
                 let pv = p.clone();
                 out.push(MenuEntry::Divider);
-                out.push(MenuEntry::item("Reveal in Finder", move |this, _w, cx| {
-                    this.reveal_in_os(&pv, cx);
-                }));
+                out.push(MenuEntry::item(
+                    super::REVEAL_IN_FILES,
+                    move |this, _w, cx| {
+                        this.reveal_in_os(&pv, cx);
+                    },
+                ));
             }
             MenuTarget::Tab(idx) => {
                 let idx = *idx;
@@ -526,9 +529,12 @@ impl Kyde {
                             this.open_local_history(tl.clone(), cx);
                         }));
                     }
-                    out.push(MenuEntry::item("Reveal in Finder", move |this, _w, cx| {
-                        this.reveal_in_os(&tab, cx);
-                    }));
+                    out.push(MenuEntry::item(
+                        super::REVEAL_IN_FILES,
+                        move |this, _w, cx| {
+                            this.reveal_in_os(&tab, cx);
+                        },
+                    ));
                 }
             }
             MenuTarget::CommitPath(path, _is_dir) => {
@@ -598,6 +604,8 @@ impl Kyde {
                     }));
                 }
             }
+            // The menu bar's items, from the title strip's menu button (off macOS).
+            MenuTarget::AppMenu => out = chrome::app_menu_entries(crate::app_menus(&self.recents)),
             // A branch row in the branch popup: merge it into the current branch, or check it
             // out. Checked out in another worktree → Checkout jumps there (say so); hidden
             // inside a linked worktree with no jump target (the worktree is pinned to its
@@ -665,7 +673,7 @@ impl Kyde {
                             SharedString::from(format!("menu-sub-{label}")),
                             lit || open,
                             icon_slot(menu_icon(icon_label)),
-                            SharedString::from(*label),
+                            label.clone(),
                             t.text,
                         )
                         .child(
@@ -818,11 +826,9 @@ impl Kyde {
                 .into_any_element(),
             MenuEntry::Divider => ui::menu_divider().into_any_element(),
             // Nested submenus don't occur; a header renders as its label.
-            MenuEntry::Submenu { label, .. } => div()
-                .px_3()
-                .py_1()
-                .child(SharedString::from(*label))
-                .into_any_element(),
+            MenuEntry::Submenu { label, .. } => {
+                div().px_3().py_1().child(label.clone()).into_any_element()
+            }
         }
     }
 }

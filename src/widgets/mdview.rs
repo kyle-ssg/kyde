@@ -26,8 +26,8 @@ actions!(mdview, [Copy, SelectAll]);
 /// Bind ⌘C / ⌘A for the markdown preview. Called once at startup.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("secondary-c", Copy, Some(CONTEXT)),
+        KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)),
     ]);
 }
 

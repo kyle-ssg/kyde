@@ -54,6 +54,12 @@ actions!(
         Indent,
         Outdent,
         DeleteToHome,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        DeleteWordLeft,
+        DeleteWordRight,
     ]
 );
 
@@ -83,27 +89,43 @@ pub fn bind_keys(cx: &mut App) {
             KeyBinding::new("backspace", Backspace, Some(ctx)),
             // Holding shift while pressing backspace must still delete.
             KeyBinding::new("shift-backspace", Backspace, Some(ctx)),
-            // macOS: cmd-backspace deletes from the caret to the start of the line.
-            KeyBinding::new("cmd-backspace", DeleteToHome, Some(ctx)),
             KeyBinding::new("delete", Delete, Some(ctx)),
             KeyBinding::new("left", Left, Some(ctx)),
             KeyBinding::new("right", Right, Some(ctx)),
             KeyBinding::new("home", Home, Some(ctx)),
             KeyBinding::new("end", End, Some(ctx)),
-            // macOS line nav: Cmd+←/→ jump to line start/end.
-            KeyBinding::new("cmd-left", Home, Some(ctx)),
-            KeyBinding::new("cmd-right", End, Some(ctx)),
             KeyBinding::new("shift-left", SelectLeft, Some(ctx)),
             KeyBinding::new("shift-right", SelectRight, Some(ctx)),
-            KeyBinding::new("cmd-a", SelectAll, Some(ctx)),
-            KeyBinding::new("cmd-v", Paste, Some(ctx)),
-            KeyBinding::new("cmd-c", Copy, Some(ctx)),
-            KeyBinding::new("cmd-x", Cut, Some(ctx)),
-            KeyBinding::new("cmd-z", Undo, Some(ctx)),
-            KeyBinding::new("cmd-shift-z", Redo, Some(ctx)),
+            // `secondary` is ⌘ on macOS and Ctrl elsewhere.
+            KeyBinding::new("secondary-a", SelectAll, Some(ctx)),
+            KeyBinding::new("secondary-v", Paste, Some(ctx)),
+            KeyBinding::new("secondary-c", Copy, Some(ctx)),
+            KeyBinding::new("secondary-x", Cut, Some(ctx)),
+            KeyBinding::new("secondary-z", Undo, Some(ctx)),
+            KeyBinding::new("secondary-shift-z", Redo, Some(ctx)),
             KeyBinding::new("tab", Indent, Some(ctx)),
             KeyBinding::new("shift-tab", Outdent, Some(ctx)),
         ]);
+        if cfg!(target_os = "macos") {
+            cx.bind_keys([
+                // macOS: cmd-backspace deletes from the caret to the start of the line.
+                KeyBinding::new("cmd-backspace", DeleteToHome, Some(ctx)),
+                // macOS line nav: Cmd+←/→ jump to line start/end.
+                KeyBinding::new("cmd-left", Home, Some(ctx)),
+                KeyBinding::new("cmd-right", End, Some(ctx)),
+            ]);
+        } else {
+            // Linux / Windows: Ctrl moves, selects and deletes by word (Home / End are the
+            // line ends).
+            cx.bind_keys([
+                KeyBinding::new("ctrl-left", WordLeft, Some(ctx)),
+                KeyBinding::new("ctrl-right", WordRight, Some(ctx)),
+                KeyBinding::new("ctrl-shift-left", SelectWordLeft, Some(ctx)),
+                KeyBinding::new("ctrl-shift-right", SelectWordRight, Some(ctx)),
+                KeyBinding::new("ctrl-backspace", DeleteWordLeft, Some(ctx)),
+                KeyBinding::new("ctrl-delete", DeleteWordRight, Some(ctx)),
+            ]);
+        }
     }
     // Multi-line only.
     cx.bind_keys([
@@ -212,6 +234,60 @@ fn next_grapheme(s: &str, off: usize) -> usize {
         .ok()
         .flatten()
         .unwrap_or(s.len())
+}
+
+/// What a word-motion stop separates: whitespace, word characters (letters, digits, `_`) and
+/// the other symbols.
+fn char_kind(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// Where Ctrl+← lands from `off`: back over whitespace, then to the start of the run of word
+/// characters (or of symbols) before it. Walks only the text it crosses.
+fn prev_word(s: &str, off: usize) -> usize {
+    let off = s.floor_char_boundary(off.min(s.len()));
+    let mut chars = s[..off]
+        .char_indices()
+        .rev()
+        .skip_while(|&(_, c)| c.is_whitespace());
+    let Some((mut at, c)) = chars.next() else {
+        return 0;
+    };
+    let kind = char_kind(c);
+    for (i, c) in chars {
+        if char_kind(c) != kind {
+            break;
+        }
+        at = i;
+    }
+    at
+}
+
+/// Where Ctrl+→ lands from `off`: over whitespace, then to the end of the run of word
+/// characters (or of symbols) after it — see [`prev_word`].
+fn next_word(s: &str, off: usize) -> usize {
+    let off = s.floor_char_boundary(off.min(s.len()));
+    let mut chars = s[off..]
+        .char_indices()
+        .skip_while(|&(_, c)| c.is_whitespace());
+    let Some((i, c)) = chars.next() else {
+        return s.len();
+    };
+    let kind = char_kind(c);
+    let mut end = off + i + c.len_utf8();
+    for (i, c) in chars {
+        if char_kind(c) != kind {
+            break;
+        }
+        end = off + i + c.len_utf8();
+    }
+    end
 }
 
 pub struct CodeEditor {
@@ -1036,6 +1112,18 @@ impl CodeEditor {
     fn select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
         self.select_to(self.next_boundary(self.cursor()), cx);
     }
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(prev_word(&self.content, self.cursor()), cx);
+    }
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(next_word(&self.content, self.cursor()), cx);
+    }
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(prev_word(&self.content, self.cursor()), cx);
+    }
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word(&self.content, self.cursor()), cx);
+    }
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx);
@@ -1110,6 +1198,30 @@ impl CodeEditor {
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             self.select_to(self.next_boundary(self.cursor()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+    /// Ctrl+Backspace: delete back to the previous word stop (or just the selection).
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(prev_word(&self.content, self.cursor()), cx);
+        }
+        self.replace_text_in_range(None, "", window, cx);
+    }
+    /// Ctrl+Delete: delete forward to the next word stop (or just the selection).
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(next_word(&self.content, self.cursor()), cx);
         }
         self.replace_text_in_range(None, "", window, cx);
     }
@@ -1221,7 +1333,8 @@ impl CodeEditor {
         // ⌘-click navigation (issue #26): an import specifier opens its file, a
         // locally-defined symbol jumps to its definition here, and a use of an
         // imported symbol jumps through the import to the definition over there.
-        if ev.modifiers.platform && self.links_on {
+        // `secondary` = ⌘ on macOS, Ctrl elsewhere (Ctrl+click is go-to-definition there).
+        if ev.modifiers.secondary() && self.links_on {
             let off = self.offset_for_position(ev.position);
             match self.symbol_at(off) {
                 Some((_, SymbolTarget::Link(link))) => {
@@ -1348,8 +1461,8 @@ impl CodeEditor {
         // event only reaches us via the focus path, which is unreliable when the
         // pointer roams unfocused panes; the move event always knows.
         self.last_mouse = Some(ev.position);
-        if self.cmd_held != ev.modifiers.platform {
-            self.cmd_held = ev.modifiers.platform;
+        if self.cmd_held != ev.modifiers.secondary() {
+            self.cmd_held = ev.modifiers.secondary();
             cx.notify();
         }
         self.refresh_link_hover(cx);
@@ -1368,10 +1481,44 @@ impl CodeEditor {
             }
         }
     }
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.is_selecting {
+            self.selection_to_primary(cx);
+        }
         self.is_selecting = false;
         self.drag_pos = None; // ends the auto-scroll loop on its next tick
     }
+
+    /// Linux: a selection made with the mouse also becomes the PRIMARY selection, which a
+    /// middle click pastes — here or in any other app.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn selection_to_primary(&self, cx: &mut Context<Self>) {
+        if !self.selected_range.is_empty() {
+            cx.write_to_primary(gpui::ClipboardItem::new_string(
+                self.content[self.selected_range.clone()].to_string(),
+            ));
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn selection_to_primary(&self, _: &mut Context<Self>) {}
+
+    /// Linux: a middle click pastes the PRIMARY selection where it lands.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn on_middle_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let Some(text) = cx.read_from_primary().and_then(|i| i.text()) else {
+            return;
+        };
+        self.focus_handle.focus(window);
+        let off = self.offset_for_position(ev.position);
+        self.move_to(off, cx);
+        self.replace_text_in_range(None, &text, window, cx);
+        cx.stop_propagation();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    fn on_middle_down(&mut self, _: &MouseDownEvent, _: &mut Window, _: &mut Context<Self>) {}
 
     /// How far (px) the view should scroll this tick given the pointer position during a
     /// drag-select: nonzero on each axis only when the pointer is within `MARGIN` of (or
@@ -1820,6 +1967,12 @@ impl Render for CodeEditor {
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::delete_to_home))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))
@@ -1840,13 +1993,14 @@ impl Render for CodeEditor {
                     .on_key_up(cx.listener(Self::on_key_up_nav))
             })
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_middle_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             // Track ⌘ so the import-link affordance appears/disappears live.
             .on_modifiers_changed(
                 cx.listener(|this, e: &gpui::ModifiersChangedEvent, _w, cx| {
-                    let held = e.modifiers.platform;
+                    let held = e.modifiers.secondary();
                     if this.cmd_held != held {
                         this.cmd_held = held;
                         // Pressing ⌘ over a link (pointer stationary) lights it
@@ -2551,6 +2705,49 @@ mod tests {
         });
     }
 
+    /// Linux: a mouse selection becomes the PRIMARY selection, and a middle click pastes it
+    /// where it lands — driven through real mouse events on a painted editor. A read-only
+    /// editor (the diff base pane) takes no middle-click paste.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    #[gpui::test]
+    fn mouse_selection_is_primary_and_middle_click_pastes_it(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+        let (editor, cx) =
+            cx.add_window_view(|_w, cx| CodeEditor::new(cx, "hello".into(), Lang::PlainText, ""));
+        cx.run_until_parked();
+        let bounds = editor.read_with(cx, |ed, _| ed.bounds).unwrap();
+        // On the first line, right of its text.
+        let at = point(
+            bounds.left() + bounds.size.width / 2.0,
+            bounds.top() + px(4.0),
+        );
+        // Double-click selects the word; releasing the button makes it PRIMARY.
+        cx.simulate_event(MouseDownEvent {
+            position: at,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+        let primary = cx.update(|_, cx| cx.read_from_primary().and_then(|i| i.text()));
+        assert_eq!(primary.as_deref(), Some("hello"));
+        // A middle click pastes it there: the end of the line.
+        cx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::default());
+        editor.read_with(cx, |ed, _| assert_eq!(ed.text(), "hellohello"));
+
+        let (frozen, cx) = cx
+            .add_window_view(|_w, cx| CodeEditor::read_only(cx, "frozen".into(), Lang::PlainText));
+        cx.run_until_parked();
+        let b = frozen.read_with(cx, |ed, _| ed.bounds).unwrap();
+        cx.simulate_mouse_down(
+            point(b.left() + b.size.width / 2.0, b.top() + px(4.0)),
+            MouseButton::Middle,
+            Modifiers::default(),
+        );
+        frozen.read_with(cx, |ed, _| assert_eq!(ed.text(), "frozen"));
+    }
+
     /// A read-only editor (the diff base pane) rejects edits and stays clean.
     #[gpui::test]
     fn read_only_rejects_edits(cx: &mut gpui::TestAppContext) {
@@ -2605,5 +2802,106 @@ mod tests {
             assert_eq!(ed.text(), "a\nb");
         })
         .unwrap();
+    }
+
+    /// ⌘-click / ⌘-hover is Ctrl off macOS: holding the platform's secondary modifier arms the
+    /// link affordance; Super (⌘'s key on a Linux keyboard) doesn't.
+    #[gpui::test]
+    fn link_modifier_is_secondary(cx: &mut gpui::TestAppContext) {
+        let win = cx.add_window(|_w, cx| CodeEditor::new(cx, "a".into(), Lang::PlainText, ""));
+        let mv = |modifiers: gpui::Modifiers| MouseMoveEvent {
+            position: point(px(1.0), px(1.0)),
+            pressed_button: None,
+            modifiers,
+        };
+        win.update(cx, |ed, window, cx| {
+            ed.on_mouse_move(&mv(gpui::Modifiers::secondary_key()), window, cx);
+            assert!(ed.cmd_held);
+            ed.on_mouse_move(&mv(gpui::Modifiers::none()), window, cx);
+            assert!(!ed.cmd_held);
+            let super_key = gpui::Modifiers {
+                platform: true,
+                ..Default::default()
+            };
+            ed.on_mouse_move(&mv(super_key), window, cx);
+            assert_eq!(ed.cmd_held, cfg!(target_os = "macos"));
+        })
+        .unwrap();
+    }
+
+    /// Word stops: whitespace is skipped, then one run of word characters or of symbols.
+    #[test]
+    fn word_motion_stops() {
+        let s = "let foo_bar = baz.qux();\n  héllo";
+        let mut at = s.len();
+        let mut back = Vec::new();
+        while at > 0 {
+            at = prev_word(s, at);
+            back.push(&s[at..]);
+        }
+        let words: Vec<&str> = back
+            .iter()
+            .map(|t| t.split(|c: char| c.is_whitespace()).next().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "héllo",
+                "();",
+                "qux();",
+                ".qux();",
+                "baz.qux();",
+                "=",
+                "foo_bar",
+                "let"
+            ]
+        );
+        let mut at = 0;
+        let mut ends = Vec::new();
+        while at < s.len() {
+            at = next_word(s, at);
+            ends.push(at);
+        }
+        let firsts: Vec<&str> = ends.iter().map(|&e| &s[..e]).collect();
+        assert!(firsts[0].ends_with("let") && firsts[1].ends_with("foo_bar"));
+        assert!(firsts[2].ends_with(" =") && firsts[3].ends_with("baz"));
+        assert_eq!(firsts.last().copied(), Some(s), "ends at the end");
+        assert_eq!(prev_word("   ", 3), 0);
+        assert_eq!(next_word("ab  ", 2), 4);
+    }
+
+    /// Off macOS Ctrl+←/→ move by word and Ctrl+Backspace deletes one, through the real
+    /// bindings (on macOS ⌘←/→ stay the line ends).
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn ctrl_arrows_move_by_word_off_macos(cx: &mut gpui::TestAppContext) {
+        cx.update(bind_keys);
+        let win =
+            cx.add_window(|_w, cx| CodeEditor::new(cx, "foo bar baz".into(), Lang::PlainText, ""));
+        win.update(cx, |ed, window, _cx| {
+            ed.selected_range = 11..11;
+            window.focus(&ed.focus_handle);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        let press = |cx: &mut gpui::TestAppContext, key: &str| {
+            cx.update_window(win.into(), |_, window, cx| {
+                window.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+            })
+            .unwrap();
+        };
+        press(cx, "ctrl-left");
+        win.update(cx, |ed, _w, _cx| assert_eq!(ed.selected_range, 8..8))
+            .unwrap();
+        press(cx, "ctrl-shift-left");
+        win.update(cx, |ed, _w, _cx| assert_eq!(ed.selected_range, 4..8))
+            .unwrap();
+        press(cx, "ctrl-right");
+        press(cx, "ctrl-right");
+        win.update(cx, |ed, _w, _cx| assert_eq!(ed.selected_range, 11..11))
+            .unwrap();
+        press(cx, "ctrl-backspace");
+        win.update(cx, |ed, _w, _cx| assert_eq!(ed.text(), "foo bar "))
+            .unwrap();
     }
 }

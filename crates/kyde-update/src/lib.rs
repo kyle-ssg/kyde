@@ -176,7 +176,18 @@ pub fn running_bundle() -> Option<PathBuf> {
 /// `Ok(None)` = already up to date; `Err` = network/parse failure (callers stay quiet).
 pub fn check() -> Result<Option<Release>> {
     let body = curl_text(&feed_url())?;
-    Ok(parse_feed(&body, &current_version()))
+    Ok(parse_feed(&body, &current_version()).map(|r| for_os(r, std::env::consts::OS)))
+}
+
+/// Release zips are macOS `.app` bundles, so only macOS keeps one. Anywhere else the release
+/// carries no zip, and the update banner's Download opens the release page — where that
+/// platform's own build (the Linux `AppImage`) lives — instead of fetching a Mac zip.
+fn for_os(mut rel: Release, os: &str) -> Release {
+    if os != "macos" {
+        rel.zip_url.clear();
+        rel.sha256_url.clear();
+    }
+    rel
 }
 
 /// Pure feed → `Option<Release>` so it's unit-testable without the network.
@@ -667,6 +678,20 @@ mod tests {
             Some("https://x/kyde-macos.zip")
         );
         assert_eq!(pick_asset_url(&shipping, "x86_64").as_deref(), Some(intel));
+
+        // The Linux AppImage (+ checksums) beside them, listed FIRST, is never picked: only a
+        // `.zip` is a candidate, so neither Mac slice can be handed the Linux build.
+        let linux = "https://x/kyde-linux-x86_64.AppImage";
+        let linux_sha = "https://x/kyde-linux-x86_64.AppImage.sha256";
+        let with_linux = [linux, linux_sha, "https://x/kyde-macos.zip", intel];
+        assert_eq!(
+            pick_asset_url(&with_linux, "aarch64").as_deref(),
+            Some("https://x/kyde-macos.zip")
+        );
+        assert_eq!(
+            pick_asset_url(&with_linux, "x86_64").as_deref(),
+            Some(intel)
+        );
     }
 
     /// The changelog feed (issue #71): drafts dropped, newest version first, CRLF cleaned,
@@ -708,6 +733,28 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].version, "1.2.3");
         assert_eq!(one[0].date, "", "no timestamp → empty date, not a panic");
+    }
+
+    /// The zips are Mac app bundles: a Linux (or any non-macOS) build must never be offered
+    /// one, while macOS keeps exactly what the feed picked.
+    #[test]
+    fn only_macos_keeps_the_zip() {
+        let rel = Release {
+            version: "9.9.9".into(),
+            tag: "v9.9.9".into(),
+            zip_url: "https://x/kyde-macos-x86_64.zip".into(),
+            sha256_url: "https://x/kyde-macos-x86_64.zip.sha256".into(),
+            page_url: "https://x/releases/v9.9.9".into(),
+        };
+        assert_eq!(for_os(rel.clone(), "macos"), rel);
+        for os in ["linux", "windows", "freebsd"] {
+            let r = for_os(rel.clone(), os);
+            assert!(r.zip_url.is_empty() && r.sha256_url.is_empty(), "{os}");
+            assert_eq!(
+                r.page_url, rel.page_url,
+                "{os} still links the release page"
+            );
+        }
     }
 
     #[test]
