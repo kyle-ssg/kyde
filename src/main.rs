@@ -294,6 +294,14 @@ fn learn_keyboard_layout(cx: &mut App) {
     .detach();
 }
 
+/// The keys that step a find bar to the next / previous match, as its tooltips show them —
+/// the in-editor find binds them below, and the terminal's find shares them.
+pub(crate) const FIND_STEP_KEYS: (&str, &str) = if cfg!(target_os = "macos") {
+    ("↩ / ⌘G", "⇧↩ / ⇧⌘G")
+} else {
+    ("Enter / F3", "Shift+Enter / Shift+F3")
+};
+
 /// Clear and (re)apply all key bindings from a keymap config.
 fn apply_keymap(cx: &mut App, km: &Keymap) {
     cx.clear_key_bindings();
@@ -1263,8 +1271,10 @@ struct AgentsView {
     gh_pr_tab: PrTab,
     /// The selected issue / PR's conversation, ready to render.
     gh_cards: Vec<GhCard>,
-    /// The comment box under it, and the inline-thread reply box (with the thread it's for).
+    /// The comment box under it (scrolled by `gh_comment_scroll` once it outgrows the box),
+    /// and the inline-thread reply box (with the thread it's for).
     gh_comment: Entity<CodeEditor>,
+    gh_comment_scroll: ScrollHandle,
     gh_reply: Entity<CodeEditor>,
     gh_reply_to: Option<u64>,
     /// A comment / reply / close is being sent.
@@ -1588,6 +1598,7 @@ impl AgentsView {
                 e
             })
         };
+        let gh_comment_scroll = ScrollHandle::new();
         let issue_prompt_input =
             prompt_editor(&cfg.issue_prompt, kyde_config::agents::ISSUE_PROMPT, cx);
         let review_prompt_input =
@@ -1678,9 +1689,10 @@ impl AgentsView {
             gh_comment: cx.new(|cx| {
                 let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Leave a comment");
                 e.soft_wrap = true;
-                e.fill_height = true;
+                e.set_scroll_handle(gh_comment_scroll.clone());
                 e
             }),
+            gh_comment_scroll,
             gh_reply: cx.new(|cx| CodeEditor::single_line(cx, "Reply…")),
             gh_reply_to: None,
             gh_posting: false,
@@ -1911,8 +1923,9 @@ struct CommitView {
     /// of the commit (partial commit). Absent/empty = the whole file commits. Cleared per
     /// file on re-diff (indices shift with edits) and wholesale after a commit.
     excluded_hunks: std::collections::HashMap<PathBuf, std::collections::HashSet<usize>>,
-    /// The commit-message editor.
+    /// The commit-message editor, and its box's scroll (a long message scrolls in the box).
     editor: Entity<CodeEditor>,
+    msg_scroll: ScrollHandle,
     /// Set by `enter_commit`; `render_commit` consumes it to focus the commit-message input
     /// on the next frame (deferred so the editor element is in the tree first), so opening
     /// the Commit view drops the caret straight into the message box.
@@ -1938,10 +1951,11 @@ impl CommitView {
     /// Build the commit-message editor + the changed-files search box (with its live-filter
     /// subscription).
     fn new(cx: &mut Context<Kyde>) -> Self {
+        let msg_scroll = ScrollHandle::new();
         let editor = cx.new(|cx| {
             let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Commit message…");
-            e.fill_height = true; // fill the box so the whole area is clickable
             e.soft_wrap = true; // wrap long commit messages instead of running off the box
+            e.set_scroll_handle(msg_scroll.clone());
             e
         });
         let search = cx.new(|cx| CodeEditor::single_line(cx, "Search files…"));
@@ -1958,6 +1972,7 @@ impl CommitView {
             checked: std::collections::HashSet::new(),
             excluded_hunks: std::collections::HashMap::new(),
             editor,
+            msg_scroll,
             focus_msg: false,
             search,
             collapsed: false,
@@ -2755,20 +2770,8 @@ impl Render for ModalWindow {
             ModalKind::Cleanup => k.render_cleanup_body(kcx),
             ModalKind::Scrollback => k.render_scrollback_body(kcx),
         });
+        // ⌘F over a pane here: the body floats the find bar over its panes (`find_bar`).
         let host = FindHost::Modal(kind);
-        let find_bar = kyde.update(cx, |k, kcx| k.find_bar(host, theme::font::UI_FAMILY, kcx));
-        let body = match find_bar {
-            // The find bar (⌘F over a pane in this window) sits atop the body, which fills
-            // the rest.
-            Some(bar) => div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .child(bar)
-                .child(div().flex_1().min_h_0().child(body))
-                .into_any_element(),
-            None => body,
-        };
         // Drawing its own decorations (Wayland), the window gets a title strip with a close
         // button, and resize handles along its edges (see `chrome`).
         let client = chrome::client_decorations(window);

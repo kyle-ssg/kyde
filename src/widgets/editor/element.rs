@@ -75,7 +75,10 @@ impl Element for EditorElement {
         } else {
             ed.visible_line_indices().len()
         };
-        let lines = (visible + filler).max(1);
+        // Soft-wrapped lines take more rows than the buffer has lines; the wrap is only known
+        // once shaped, so take the last frame's row count (`paint` lays out again if it moved).
+        let wrapped = if ed.soft_wrap { ed.display_rows } else { 0 };
+        let lines = (visible + filler).max(wrapped).max(1);
         let mut style = Style::default();
         style.size.height = (window.line_height() * lines as f32).into();
         // Fill the parent (scroll viewport) when the file is shorter/narrower than it: the
@@ -854,7 +857,13 @@ impl Element for EditorElement {
         let visible = std::mem::take(&mut pre.visible_lines);
         let gutter_w = pre.gutter_w;
         let display_rows = pre.display_rows;
-        self.editor.update(cx, |ed, _| {
+        let rewrapped = self.editor.update(cx, |ed, _| {
+            let rewrapped = ed.soft_wrap && ed.display_rows != display_rows;
+            // A caret reveal this frame ran on the old height: run it again on the new one
+            // (typing onto a fresh wrapped row keeps that row in view).
+            if rewrapped && reveal {
+                ed.reveal_pending = true;
+            }
             ed.line_layouts = lines;
             ed.display_rows = display_rows;
             ed.line_starts = starts;
@@ -864,6 +873,12 @@ impl Element for EditorElement {
             ed.bounds = Some(bounds);
             ed.line_height = lh;
             ed.viewport = Some(clip);
+            rewrapped
         });
+        // The wrap changed the row count: lay out again at the new height.
+        if rewrapped {
+            let editor = self.editor.clone();
+            window.on_next_frame(move |_, cx| editor.update(cx, |_, cx| cx.notify()));
+        }
     }
 }

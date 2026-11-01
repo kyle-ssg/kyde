@@ -9,6 +9,9 @@ mod checkbox;
 mod color;
 /// Side-by-side diff building blocks (gutter column / rows / glyphs, editor panes).
 pub mod diff;
+/// The shared find bar (terminal, editor, diff panes). Call sites use the explicit
+/// `ui::find::…`.
+pub mod find;
 mod footer;
 mod menu;
 /// Keyboard navigation for lists, trees and popups: the shared actions + key contexts.

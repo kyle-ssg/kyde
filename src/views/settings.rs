@@ -509,9 +509,9 @@ impl Kyde {
                                 ),
                         ),
                 )
+                // Grows to fit the whole (wrapped) prompt.
                 .child(
                     div()
-                        .h(px(104.0))
                         .px_2()
                         .py_1()
                         .rounded_md()

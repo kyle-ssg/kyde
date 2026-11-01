@@ -1950,6 +1950,9 @@ impl Render for CodeEditor {
             })
             .when(!fill, |d| d.w_full().min_h(relative(1.0)))
             .when(fill, gpui::Styled::size_full)
+            // A single line sits centred in its box, not at the top of it — the input boxes
+            // are taller than one line.
+            .when(self.single_line, |d| d.flex().items_center())
             // Transparent: the editor adopts its container's background (the rounded editor
             // island, the commit box, the finder) so it never paints square corners over a
             // rounded parent (gpui clips to a rectangle, not the rounded shape).
@@ -2746,6 +2749,105 @@ mod tests {
             Modifiers::default(),
         );
         frozen.read_with(cx, |ed, _| assert_eq!(ed.text(), "frozen"));
+    }
+
+    /// A single-line input in a box taller than its line (the find / search boxes) sits
+    /// centred in it, not at the top.
+    #[gpui::test]
+    fn single_line_input_centres_its_line(cx: &mut gpui::TestAppContext) {
+        struct Box40(Entity<CodeEditor>);
+        impl Render for Box40 {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().h(px(40.0)).w(px(200.0)).child(self.0.clone())
+            }
+        }
+        let (host, cx) =
+            cx.add_window_view(|_w, cx| Box40(cx.new(|cx| CodeEditor::single_line(cx, "Find"))));
+        cx.run_until_parked();
+        let ed = host.read_with(cx, |h, _| h.0.clone());
+        let line = ed.read_with(cx, |ed, _| ed.bounds).unwrap();
+        let above = f32::from(line.top());
+        let below = 40.0 - f32::from(line.bottom());
+        assert!(
+            above > 1.0 && (above - below).abs() <= 1.0,
+            "line at {above}px from the top, {below}px from the bottom"
+        );
+    }
+
+    /// A soft-wrapped editor in a box that fits its content (the Settings prompts) is as tall
+    /// as its wrapped rows, so a long line doesn't paint past the box.
+    #[gpui::test]
+    fn soft_wrapped_editor_is_as_tall_as_its_rows(cx: &mut gpui::TestAppContext) {
+        struct Narrow(Entity<CodeEditor>);
+        impl Render for Narrow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(120.0)).child(self.0.clone())
+            }
+        }
+        let (host, cx) = cx.add_window_view(|_w, cx| {
+            Narrow(cx.new(|cx| {
+                let mut e = CodeEditor::new(cx, "word ".repeat(40), Lang::PlainText, "");
+                e.soft_wrap = true;
+                e.fill_height = true;
+                e
+            }))
+        });
+        cx.run_until_parked();
+        let ed = host.read_with(cx, |h, _| h.0.clone());
+        // The frame after the wrap is known (the test platform runs no frame callbacks).
+        ed.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let (rows, lh, b) = ed.read_with(cx, |ed, _| (ed.display_rows, ed.line_height, ed.bounds));
+        assert!(rows > 1, "the line wraps");
+        assert_eq!(b.unwrap().size.height, lh * rows as f32);
+    }
+
+    /// A long message pasted into a small scrolling box (the commit / comment boxes) scrolls
+    /// to keep the caret at its end in view, though the wrap is only known a frame later.
+    #[gpui::test]
+    fn caret_stays_in_view_as_the_text_wraps(cx: &mut gpui::TestAppContext) {
+        struct SmallBox(Entity<CodeEditor>, ScrollHandle);
+        impl Render for SmallBox {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(120.0)).h(px(40.0)).child(
+                    div()
+                        .id("box")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.1)
+                        .child(self.0.clone()),
+                )
+            }
+        }
+        let (host, cx) = cx.add_window_view(|_w, cx| {
+            let scroll = ScrollHandle::new();
+            let ed = cx.new(|cx| {
+                let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "");
+                e.soft_wrap = true;
+                e.set_scroll_handle(scroll.clone());
+                e
+            });
+            SmallBox(ed, scroll)
+        });
+        cx.run_until_parked();
+        let (ed, scroll) = host.read_with(cx, |h, _| (h.0.clone(), h.1.clone()));
+        ed.update(cx, |e, cx| {
+            let text = "word ".repeat(40);
+            let end = text.len();
+            e.set_content(text, Lang::PlainText, cx);
+            e.select_range(end..end, cx);
+        });
+        cx.run_until_parked();
+        // The frame after the wrap is known (the test platform runs no frame callbacks).
+        ed.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        let max = scroll.max_offset().height;
+        assert!(max > px(0.0), "the text outgrows the box");
+        assert_eq!(
+            scroll.offset().y,
+            -max,
+            "scrolled to the caret on the last row"
+        );
     }
 
     /// A read-only editor (the diff base pane) rejects edits and stays clean.
