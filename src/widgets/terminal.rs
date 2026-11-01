@@ -215,9 +215,11 @@ pub struct TerminalView {
     pid: Arc<std::sync::atomic::AtomicU32>,
     /// When you last typed or pasted into it.
     pub last_input: Option<std::time::Instant>,
-    /// Claude Code runs in it (agent tabs): its prompt suggestion acts as typed text — the
-    /// cursor is drawn at its end, and typing there accepts it first (`accept_suggestion`).
-    pub claude_input: bool,
+    /// Claude Code in it has finished its turn (Kyde's hook says so; see `set_claude_done`) —
+    /// the only time it shows a prompt suggestion, which then acts as typed text: the cursor
+    /// is drawn at its end, and typing there accepts it first (`accept_suggestion`). Its
+    /// other greyed hints in the box come while it starts up or works.
+    claude_done: bool,
     /// The suggestion last accepted for you. Claude greys an accepted one back in when the
     /// box is emptied; that time it's left alone, so emptying the box still starts afresh.
     taken_suggestion: Option<String>,
@@ -464,7 +466,7 @@ impl TerminalView {
             anchor_bottom: false,
             pid,
             last_input: None,
-            claude_input: false,
+            claude_done: false,
             taken_suggestion: None,
             held: None,
             scroll_px: 0.0,
@@ -636,9 +638,21 @@ impl TerminalView {
         self.backend.write(text.as_bytes().to_vec().into());
     }
 
+    /// Whether Claude Code in it has finished its turn, from Kyde's hook. A new turn forgets
+    /// the suggestion accepted in the last one (however its prompt was sent).
+    pub fn set_claude_done(&mut self, done: bool, cx: &mut Context<Self>) {
+        if !done {
+            self.taken_suggestion = None;
+        }
+        if self.claude_done != done {
+            self.claude_done = done;
+            cx.notify();
+        }
+    }
+
     /// Claude's prompt suggestion on screen, unless it's the one already accepted for you.
     fn open_suggestion(&self, term: &Term<EventProxy>) -> Option<(String, GridPoint)> {
-        if !self.claude_input {
+        if !self.claude_done {
             return None;
         }
         prompt_suggestion(term).filter(|(text, _)| self.taken_suggestion.as_ref() != Some(text))
@@ -2104,8 +2118,9 @@ fn default_indexed(i: u8) -> Rgb {
 /// Claude Code's prompt suggestion, when its input box shows one: a predicted next prompt
 /// greyed (SGR dim) into the empty box, the cursor parked at its start just after the `❯ `
 /// marker — it looks typed, but typing replaces it. Its text and the point just past its end
-/// (on the box's indented rows below, when it wraps). A fresh session's `Try "…"`
-/// placeholder is drawn the same way but isn't one.
+/// (on the box's indented rows below, when it wraps). Its hints (a fresh session's `Try "…"`,
+/// queued-message help) are drawn the same way, so this alone can't tell them apart — they
+/// only show while it isn't done, which `claude_done` gates on.
 fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
     let grid = term.grid();
     let at = grid.cursor.point;
@@ -2140,8 +2155,7 @@ fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
         }
         line = Line(line.0 + 1);
     }
-    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!text.starts_with("Try \"")).then_some((text, end))
+    Some((text.split_whitespace().collect::<Vec<_>>().join(" "), end))
 }
 
 /// Whether a key's bytes edit the input at the cursor: typed text, ← or Backspace.
@@ -2434,8 +2448,7 @@ mod tests {
     }
 
     /// Claude's input box, drawn the way a real session draws it: a greyed suggestion with the
-    /// cursor parked before it is one, ending after its text; the same words typed, or the
-    /// fresh-session placeholder, are not.
+    /// cursor parked before it is one, ending after its text; the same words typed are not.
     #[test]
     fn claude_prompt_suggestion_is_the_dim_text_under_the_cursor() {
         use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
@@ -2454,6 +2467,5 @@ mod tests {
             Some(("yes commit it".into(), GridPoint::new(Line(1), Column(15))))
         );
         assert_eq!(box_with("yes commit it"), None);
-        assert_eq!(box_with("\x1b[2mTry \"fix lint errors\"\x1b[22m"), None);
     }
 }

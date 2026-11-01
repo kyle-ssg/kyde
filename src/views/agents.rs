@@ -2011,10 +2011,7 @@ impl Kyde {
     ) {
         let spawned_at = std::time::SystemTime::now();
         // The agent's input box sits at the bottom of the pane, herdr-style.
-        view.update(cx, |v, _| {
-            v.anchor_bottom = true;
-            v.claude_input = agent;
-        });
+        view.update(cx, |v, _| v.anchor_bottom = true);
         // Looked up per event: the tab moves when its agent moves to another worktree.
         cx.subscribe(&view, move |this, v, ev, cx| {
             let Some(key) = this.agents_wt_of(&v) else {
@@ -2369,6 +2366,8 @@ impl Kyde {
                 .duration_since(mtime)
                 .unwrap_or_default();
             let at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+            let done = r.hook == Hook::Done;
+            t.view.update(cx, |v, cx| v.set_claude_done(done, cx));
             t.hook = Some((r.hook, at));
         }
         if let Some(s) = sound {
