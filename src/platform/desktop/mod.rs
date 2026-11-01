@@ -9,7 +9,8 @@
 //! desktop or terminal Kyde doesn't know, a missing tool (`gsettings`, `xfconf-query`,
 //! `fc-list`), an unreadable file, or a font gpui can't draw leaves just that piece on Kyde's
 //! own default. Nothing here fails or panics; both reads run on a background thread. How the
-//! desktop draws text ([`text`]) is read once at start, before gpui draws any.
+//! desktop draws text ([`text`]) is read once at start, before gpui draws any, on a thread of
+//! its own that start-up waits on for a moment only.
 //!
 //! Pure + unit-tested apart from [`Probe::here`], which reads the environment.
 

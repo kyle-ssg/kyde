@@ -14,10 +14,13 @@
 //! gpui keeps every glyph it draws for the whole run and has no way to drop them, so the
 //! rendering is chosen once, before the first glyph ([`choose_at_start`]), through Kyde's
 //! cosmic-text patch (`vendor/README.md`). A change in Settings takes effect on the next start.
+//! Start-up waits at most [`START_READ_LIMIT`] for the read; a slower one leaves that run on
+//! Kyde's own text.
 
 use super::{Desktop, Probe};
 use cosmic_text::{GlyphHinting, GlyphRendering};
-use std::sync::OnceLock;
+use std::sync::{mpsc, OnceLock};
+use std::time::Duration;
 
 /// Where Kyde read the desktop's text rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,19 +140,47 @@ pub(crate) fn read_here(p: &Probe, _gpui_family: &dyn Fn(&str) -> Option<String>
 /// What [`choose_at_start`] chose for this run: `None` for Kyde's own text.
 static AT_START: OnceLock<Option<DesktopText>> = OnceLock::new();
 
+/// How long start-up waits for the desktop's text rendering. On X11 the X resources answer in a
+/// few milliseconds; elsewhere `gsettings` and `fc-match` run, and `fc-match` can take seconds on
+/// a cold font cache.
+const START_READ_LIMIT: Duration = Duration::from_millis(300);
+
 /// Call before gpui draws any text: with Text set to Your desktop's (`on`), read the desktop and
-/// draw every glyph of this run its way. Only the first call counts.
+/// draw every glyph of this run its way. The read runs on a thread of its own and gets
+/// [`START_READ_LIMIT`]: past that, or if it can't start, this run keeps Kyde's own text. Only
+/// the first call counts.
 pub(crate) fn choose_at_start(on: bool) {
     AT_START.get_or_init(|| {
-        let text = on.then(|| {
-            let p = Probe::here_without_terminal();
-            read(&p, xresources_here(&p).as_deref())
-        });
+        let text = on
+            .then(|| {
+                within(START_READ_LIMIT, || {
+                    let p = Probe::here_without_terminal();
+                    read(&p, xresources_here(&p).as_deref())
+                })
+            })
+            .flatten();
         if let Some(text) = text {
             cosmic_text::set_glyph_rendering(text.rendering);
         }
         text
     });
+}
+
+/// `read` run on a thread of its own: what it returns within `limit`, else `None` (also when the
+/// thread can't start or `read` panics). A read still running at `limit` finishes unheard.
+fn within<T: Send + 'static>(
+    limit: Duration,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("desktop-text".into())
+        .spawn(move || {
+            // The receiver is gone once `limit` has passed: nothing is listening.
+            let _ = tx.send(read());
+        })
+        .ok()?;
+    rx.recv_timeout(limit).ok()
 }
 
 /// The desktop text this run draws with: `None` for Kyde's own.
@@ -493,6 +524,25 @@ mod tests {
             );
         }
         assert_eq!(GlyphRendering::default().flags(), CacheKeyFlags::empty());
+    }
+
+    /// Start-up takes the read only within its limit: a slow one (`fc-match` on a cold font
+    /// cache) leaves the run on Kyde's own text instead of holding the window back.
+    #[test]
+    fn a_slow_read_is_not_waited_for() {
+        let crisp = text(false, GlyphHinting::Full, Source::XResources);
+        assert_eq!(within(Duration::from_secs(10), move || crisp), Some(crisp));
+
+        // Held until the test lets it go, long after the limit.
+        let (release, held) = mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let slow = within(Duration::from_millis(20), move || {
+            let _ = held.recv();
+            crisp
+        });
+        assert_eq!(slow, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        drop(release);
     }
 
     #[test]
