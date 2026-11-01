@@ -1573,15 +1573,19 @@ type DesktopRead<T> = fn(&crate::platform::desktop::Probe, &dyn Fn(&str) -> Opti
 
 #[cfg(target_os = "linux")]
 impl Kyde {
-    /// Turn Match desktop on (read the desktop, then draw with it, and set the terminal to Your
-    /// terminal) or off (back to the saved palette and the bundled fonts at once; the terminal
-    /// keeps its own choice). Persisted in `ui.json`.
+    /// Turn Match desktop on (read the desktop, then draw with it; turning it on from off also
+    /// sets the terminal to Your terminal, while re-picking it when already on leaves the
+    /// Terminal choice alone) or off (back to the saved palette and the bundled fonts at once;
+    /// the terminal keeps its own choice). Persisted in `ui.json`.
     pub(crate) fn set_match_desktop(&mut self, on: bool, cx: &mut Context<Self>) {
+        let was = self.desktop_look.match_desktop;
         self.desktop_look.match_desktop = on;
         crate::save_ui_bool("match_desktop", on);
         if on {
             self.read_desktop_look(cx);
-            self.set_own_terminal(true, cx);
+            if !was {
+                self.set_own_terminal(true, cx);
+            }
         } else {
             theme::set_overlay(theme::Overlay::default());
             cx.refresh_windows();
