@@ -46,7 +46,8 @@ choosing once; the flags and `rendered_image` could go to cosmic-text as they ar
 
 Like Kyde's own crates it has no `source` in `Cargo.lock`, so release-please's lockfile entry in
 `release-please-config.json` leaves it out by name: it keeps version 0.14.2 when Kyde's version
-is bumped. A crate added here needs the same.
+is bumped. A crate added here needs the same. Match on `@.name.value`, not `@.name`:
+release-please's TOML parser wraps every value in an object, so `@.name != '…'` is always true.
 
 To see every change: `diff -r <cargo registry>/cosmic-text-0.14.2 vendor/cosmic-text`.
 

@@ -16,7 +16,7 @@
         {
           "type": "toml",
           "path": "Cargo.lock",
-          "jsonpath": "$.package[?(!@.source && @.name != 'cosmic-text')].version"
+          "jsonpath": "$.package[?(!@.source && @.name.value != 'cosmic-text')].version"
         }
       ]
     }
