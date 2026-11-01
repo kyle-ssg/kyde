@@ -3567,25 +3567,21 @@ impl Kyde {
     fn agents_gh_tree(&self, tab: SideTab, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut any_loading = false;
+        let mut failed: Vec<String> = Vec::new();
         for (si, space) in self.agents.cfg.spaces.iter().enumerate() {
             if !self.agents.git_spaces.contains(&space.path) {
                 continue;
             }
-            let (ready, loading) = match tab {
-                SideTab::Issues => match self.agents.issues.get(&space.path) {
-                    Some(GhList::Ready(v)) => (v.len(), false),
-                    Some(GhList::Loading) | None => (0, true),
-                    Some(GhList::Failed(_)) => (0, false),
-                },
-                _ => match self.agents.prs.get(&space.path) {
-                    Some(GhList::Ready(v)) => (v.len(), false),
-                    Some(GhList::Loading) | None => (0, true),
-                    Some(GhList::Failed(_)) => (0, false),
-                },
+            let (ready, loading, why) = match tab {
+                SideTab::Issues => gh_status(self.agents.issues.get(&space.path)),
+                _ => gh_status(self.agents.prs.get(&space.path)),
             };
             // Only projects with something to show (no empty / issues-disabled headers).
             if ready == 0 {
                 any_loading |= loading;
+                if let Some(why) = why {
+                    failed.push(format!("{} — {why}", leaf_name(&space.path)));
+                }
                 continue;
             }
             rows.push(self.agents_space_row(si, space, Some(ready), cx));
@@ -3605,6 +3601,10 @@ impl Kyde {
             } else {
                 "No open pull requests match."
             }));
+            // Why the hidden projects came back empty-handed (gh missing, not logged in…).
+            if !any_loading && !self.agents.git_refreshing {
+                rows.extend(failed.into_iter().map(gh_note));
+            }
         }
         rows
     }
@@ -6020,6 +6020,15 @@ fn scroll_list(id: &'static str, rows: Vec<gpui::AnyElement>) -> gpui::AnyElemen
         // Rows keep their height; the list scrolls.
         .children(rows.into_iter().map(|r| div().flex_none().child(r)))
         .into_any_element()
+}
+
+/// A project's GitHub list as (items, still loading, why it failed).
+fn gh_status<T>(list: Option<&GhList<T>>) -> (usize, bool, Option<&str>) {
+    match list {
+        Some(GhList::Ready(v)) => (v.len(), false, None),
+        Some(GhList::Loading) | None => (0, true, None),
+        Some(GhList::Failed(why)) => (0, false, Some(why)),
+    }
 }
 
 /// A muted one-liner in the Issues / Pull Requests list (loading, empty, gh's error).
