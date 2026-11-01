@@ -161,6 +161,7 @@ A home for AI coding agents — Claude Code by default (the start command is con
 * **Main stays fresh.** Each project's own checkout fast-forwards to `origin/main` in the background (only on its default branch, only when clean), and agents resuming there start from it.
 * **Scriptable.** `ky agent list | read | prompt | send | keys | wait | new | kill` — see and drive agents from the command line, with or without the window open, so agents can watch and drive each other (`ky agent help`).
 * **Agents-only mode** hides the IDE around it, for when Kyde is just your agent cockpit. Keyboard shortcuts for all of it (below), scrollback in an editor window (`⌘⌥E`), and per-row display options.
+* **Your prompts stand out.** Each message you sent Claude is tinted in the accent colour, `⌘↑` / `⌘↓` jump back and forth between them, and once your last one has scrolled away a pill at the top shows it — click to go back to it.
 
 <p align="center">
   <img src="assets/screenshots/agents.png" alt="Agents view — a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's agent running in its tab" width="900">
@@ -247,14 +248,14 @@ Default shortcuts (WebStorm → VSCode):
 * New Scratch: `⌘⇧N`
 * Toggle terminal: ``⌃` ``
 * Settings: `⌘,`
-* Agents: next / previous agent `⌘⌥↓` / `⌘⌥↑`, the one that needs you `⌘⌥J`, the Nth `⌃1`–`⌃9`, next / previous tab `⌘⇧]` / `⌘⇧[`, new worktree `⌘⌥N`, rename tab `F2`, scrollback in an editor `⌘⌥E`, hide the sidebar `⌘⌥B`
+* Agents: next / previous agent `⌘⌥↓` / `⌘⌥↑`, the one that needs you `⌘⌥J`, the Nth `⌃1`–`⌃9`, next / previous tab `⌘⇧]` / `⌘⇧[`, new worktree `⌘⌥N`, rename tab `F2`, scrollback in an editor `⌘⌥E`, jump between your prompts `⌘↑` / `⌘↓`, hide the sidebar `⌘⌥B`
 
 On Linux (and Windows) `⌘` is **Ctrl** and `⌥` is **Alt**: Save is `Ctrl+S`, Go to File `Ctrl+Shift+O`, Settings `Ctrl+,`, ⌘-click is Ctrl+click, and Settings → Keymap shows every key that way. A few keys differ there:
 
 * Find next / previous: `F3` / `Shift+F3`
 * Editor: `Ctrl+←` / `Ctrl+→` move by word and `Ctrl+Backspace` deletes one (Home / End go to the line ends)
 * The Nth agent: `Alt+1`–`Alt+9`
-* Terminal: Ctrl + a letter goes to the shell (`Ctrl+C` interrupts, `Ctrl+W` deletes a word), so the terminal's own keys take Shift: copy / paste `Ctrl+Shift+C` / `Ctrl+Shift+V`, new / close tab `Ctrl+Shift+T` / `Ctrl+Shift+W` (the shell's own `Ctrl+L` / `Ctrl+U` clear)
+* Terminal: Ctrl + a letter goes to the shell (`Ctrl+C` interrupts, `Ctrl+W` deletes a word), so the terminal's own keys take Shift: copy / paste `Ctrl+Shift+C` / `Ctrl+Shift+V`, new / close tab `Ctrl+Shift+T` / `Ctrl+Shift+W`, jump between your prompts `Ctrl+Shift+↑` / `Ctrl+Shift+↓` (the shell's own `Ctrl+L` / `Ctrl+U` clear)
 
 * Keys the desktop keeps (Cinnamon and GNOME switch workspaces on `Ctrl+Alt+←/→/↑/↓`, Cinnamon locks the screen on `Ctrl+Alt+L`) and keys that need a US layout move: Back / Forward `Alt+←` / `Alt+→`, next / previous agent `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp`, next / previous agent tab `Ctrl+PageDown` / `Ctrl+PageUp`, Sort Lines `F9`
 

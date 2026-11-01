@@ -122,6 +122,8 @@ actions!(
         TerminalCopy,
         TerminalPaste,
         TerminalFind,
+        TerminalPrevPrompt,
+        TerminalNextPrompt,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -416,6 +418,9 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         // copy / paste, which would swallow them.
         KeyBinding::new(&term("c"), TerminalCopy, Some("Terminal")),
         KeyBinding::new(&term("v"), TerminalPaste, Some("Terminal")),
+        // ⌘↑ / ⌘↓ jump between the prompts you sent an agent (Terminal.app's mark keys).
+        KeyBinding::new(&term("up"), TerminalPrevPrompt, Some("Terminal")),
+        KeyBinding::new(&term("down"), TerminalNextPrompt, Some("Terminal")),
     ]);
     // In-editor find / replace (fixed keys). ⌘G / ⇧⌘G cycle the matches on macOS; elsewhere
     // that is F3 / Shift+F3 (both IDE keymaps on Linux), and Ctrl+Shift+G is the VS Code
