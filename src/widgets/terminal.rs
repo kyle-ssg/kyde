@@ -53,6 +53,9 @@ const SB_END: f32 = 8.0;
 /// How often an open find re-counts while output streams in.
 const FIND_RESCAN: Duration = Duration::from_millis(500);
 
+/// Opacity of SGR-dim (faint) text, e.g. Claude's greyed prompt suggestion.
+const DIM_ALPHA: f32 = 0.5;
+
 #[cfg(target_os = "windows")]
 fn default_shell() -> String {
     windows_shell_from_comspec(std::env::var("COMSPEC").ok())
@@ -2039,6 +2042,10 @@ impl Element for TerminalElement {
                 let f = fg;
                 fg = bg.unwrap_or(default_bg);
                 bg = Some(f);
+            }
+            // SGR dim (faint) — how Claude greys its prompt suggestion apart from typed text.
+            if cell.flags.contains(Flags::DIM) {
+                fg = fg.opacity(DIM_ALPHA);
             }
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg.unwrap_or(default_bg);
