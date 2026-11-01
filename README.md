@@ -62,6 +62,10 @@ colours. Anything Kyde can't read or draw stays its own.
 **Settings → Appearance → Terminal → Your terminal** (Linux) gives the terminal and agent tabs your
 terminal app's colours and font under any theme, say a black terminal in Kyde Dark; **Kyde** keeps
 Kyde's own.
+**Settings → Appearance → Text → Your desktop's** (Linux) draws text the way your desktop does,
+antialiased or crisp and with its hinting, from the next start; **Kyde** keeps Kyde's own smooth
+text. For it, Kyde carries a small patch to cosmic-text, gpui's Linux text renderer, in
+[`vendor/`](vendor/README.md).
 
 <p align="center">
   <img src="assets/screenshots/light.png" alt="Kyde Light theme — the same side-by-side diff rendered in the built-in light palette" width="900">

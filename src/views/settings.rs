@@ -144,7 +144,7 @@ impl Kyde {
     }
 
     /// Appearance section: theme + the three px size controls (live-applied), and on Linux
-    /// the terminal's look and where the menus live.
+    /// how text is drawn, the terminal's look and where the menus live.
     fn settings_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         // A size Match desktop took from the desktop isn't Kyde's to step.
@@ -196,9 +196,75 @@ impl Kyde {
             ));
         #[cfg(target_os = "linux")]
         let section = section
+            .child(self.text_choice(cx))
             .child(self.terminal_choice(cx))
             .child(self.menu_bar_choice(cx));
         section.into_any_element()
+    }
+
+    /// How glyphs are drawn (Linux): Kyde's own smooth text, or as the desktop draws text
+    /// (antialiasing and hinting). Persists to `ui.json` and takes effect when Kyde next starts:
+    /// gpui keeps the glyphs it has drawn for the whole run.
+    #[cfg(target_os = "linux")]
+    fn text_choice(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let desktop = self.desktop_look.desktop_text;
+        let running = crate::platform::desktop::text::at_start();
+        let pill = |id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>| {
+            crate::tab_pill(id, label, 0, desktop == on).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    this.set_desktop_text(on, cx);
+                    cx.notify();
+                }),
+            )
+        };
+        let found = if desktop {
+            running.or(self.desktop_look.text_read)
+        } else {
+            None
+        };
+        let restart = (desktop != running.is_some()).then_some("Takes effect when Kyde restarts.");
+        let note = match (
+            found.map(crate::platform::desktop::text::DesktopText::describe),
+            restart,
+        ) {
+            (Some(found), Some(restart)) => Some(format!("{found} {restart}")),
+            (found, restart) => found.or(restart.map(str::to_string)),
+        };
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(140.0))
+                    .pt_1()
+                    .flex_none()
+                    .text_color(t.secondary_text)
+                    .child("Text"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(pill("text-kyde", "Kyde", false, cx))
+                            .child(pill("text-desktop", "Your desktop's", true, cx)),
+                    )
+                    .when_some(note, |d, note| {
+                        d.child(div().text_color(t.line_number).child(note))
+                    }),
+            )
+            .into_any_element()
     }
 
     /// How the terminal and agent tabs look (Linux): Kyde's own terminal, or the user's own
@@ -1574,9 +1640,10 @@ type DesktopRead<T> = fn(&crate::platform::desktop::Probe, &dyn Fn(&str) -> Opti
 #[cfg(target_os = "linux")]
 impl Kyde {
     /// Turn Match desktop on (read the desktop, then draw with it; turning it on from off also
-    /// sets the terminal to Your terminal, while re-picking it when already on leaves the
-    /// Terminal choice alone) or off (back to the saved palette and the bundled fonts at once;
-    /// the terminal keeps its own choice). Persisted in `ui.json`.
+    /// sets the terminal to Your terminal and the text to Your desktop's, while re-picking it
+    /// when already on leaves those choices alone) or off (back to the saved palette and the
+    /// bundled fonts at once; the terminal and text keep their own choices). Persisted in
+    /// `ui.json`.
     pub(crate) fn set_match_desktop(&mut self, on: bool, cx: &mut Context<Self>) {
         let was = self.desktop_look.match_desktop;
         self.desktop_look.match_desktop = on;
@@ -1585,6 +1652,7 @@ impl Kyde {
             self.read_desktop_look(cx);
             if !was {
                 self.set_own_terminal(true, cx);
+                self.set_desktop_text(true, cx);
             }
         } else {
             theme::set_overlay(theme::Overlay::default());
@@ -1603,6 +1671,23 @@ impl Kyde {
             theme::set_terminal_look(theme::TerminalLook::default());
             self.desktop_look.terminal_app = None;
             cx.refresh_windows();
+        }
+    }
+
+    /// Text → Your desktop's on or off, persisted in `ui.json` for the next start. Turning it on
+    /// reads the desktop off the UI thread, to say under the choice what it will draw with.
+    pub(crate) fn set_desktop_text(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.desktop_look.desktop_text = on;
+        crate::save_ui_bool("desktop_text", on);
+        if on {
+            self.read_desktop(
+                cx,
+                crate::platform::desktop::text::read_here,
+                |this, found, cx| {
+                    this.desktop_look.text_read = Some(found);
+                    cx.notify();
+                },
+            );
         }
     }
 

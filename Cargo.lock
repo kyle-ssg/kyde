@@ -3006,6 +3006,7 @@ version = "2.9.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "cosmic-text",
  "futures",
  "fuzzy-matcher",
  "gpui",

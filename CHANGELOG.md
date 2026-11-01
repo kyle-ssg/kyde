@@ -17,6 +17,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * **linux:** a File / View / Help menu bar where the window manager draws the title bar, in one row with the project switcher; F10 opens it, Alt + the underlined letter opens a menu, and Settings → Appearance → Menu bar picks the menu bar or the ☰ button
 * **linux:** Match desktop (Settings → Appearance → Theme): the terminal takes your terminal app's font, the editor and UI your desktop's fonts, and the colours your desktop's dark preference, accent and GTK theme or KDE colour scheme; whatever Kyde can't read or draw stays its own
 * **linux:** Settings → Appearance → Terminal → Your terminal: the terminal and agent tabs take your terminal app's background, text, 16 ANSI colours, bold and cursor colours and font, under any theme (GNOME Terminal, MATE Terminal, Xfce Terminal, Konsole, kitty, Alacritty, Ptyxis palettes of your own); Match desktop turns it on, and Kyde (the default) keeps Kyde's terminal
+* **linux:** Settings → Appearance → Text → Your desktop's: text drawn as your desktop draws it, antialiased or crisp and with its hinting (from the X resources your desktop publishes, else its gsettings, else fontconfig), from the next start; Match desktop turns it on, and Kyde (the default) keeps Kyde's text exactly as before. Kyde now carries a small patch to cosmic-text, gpui's Linux text renderer, in `vendor/`
 
 ### Bug Fixes
 

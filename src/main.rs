@@ -1319,7 +1319,7 @@ impl TermState {
 }
 
 /// Linux's own-look choices in Settings → Appearance, grouped out of the `Kyde` god-struct.
-/// Both are kept in `ui.json`, next to the other display prefs, and read again at start.
+/// They're kept in `ui.json`, next to the other display prefs, and read again at start.
 #[cfg(target_os = "linux")]
 struct DesktopLook {
     /// Theme → Match desktop: draw with the desktop's fonts and colours (a `theme::Overlay`).
@@ -1329,18 +1329,27 @@ struct DesktopLook {
     own_terminal: bool,
     /// The terminal app Your terminal last read (its name, for the note under the choice).
     terminal_app: Option<&'static str>,
+    /// Text → Your desktop's: glyphs drawn as the desktop draws text (antialiasing, hinting);
+    /// off is Kyde's own smooth text. Takes effect at start (`platform::desktop::text`).
+    desktop_text: bool,
+    /// What the desktop's text rendering read as when Your desktop's was picked in Settings,
+    /// for the note under the choice until a restart applies it.
+    text_read: Option<platform::desktop::text::DesktopText>,
 }
 
 #[cfg(target_os = "linux")]
 impl DesktopLook {
-    /// The saved choices. A `ui.json` from before the Terminal choice existed gives Your
-    /// terminal exactly when Match desktop is on, as turning Match desktop on now does.
+    /// The saved choices. A `ui.json` from before the Terminal or Text choice existed gives Your
+    /// terminal and Your desktop's text exactly when Match desktop is on, as turning Match
+    /// desktop on now does.
     fn load() -> Self {
         let match_desktop = load_ui_bool("match_desktop", false);
         Self {
             match_desktop,
             own_terminal: load_ui_bool("own_terminal_look", match_desktop),
             terminal_app: None,
+            desktop_text: load_ui_bool("desktop_text", match_desktop),
+            text_read: None,
         }
     }
 }
@@ -4268,6 +4277,11 @@ fn main() {
     });
 
     let (km, first_run) = Keymap::load();
+
+    // Linux: Text → Your desktop's draws every glyph as the desktop draws text. gpui keeps the
+    // glyphs it draws for the whole run, so the rendering is chosen once, before the first one.
+    #[cfg(target_os = "linux")]
+    platform::desktop::text::choose_at_start(DesktopLook::load().desktop_text);
 
     let app = Application::new().with_assets(Assets);
     #[cfg(target_os = "linux")]

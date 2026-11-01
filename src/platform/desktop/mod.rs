@@ -1,5 +1,6 @@
-//! "Match desktop" and "Your terminal" (Settings → Appearance): read the Linux desktop's fonts
-//! and colours, and the user's own terminal app's, so Kyde can draw with them.
+//! "Match desktop", "Your terminal" and "Your desktop's" text (Settings → Appearance): read the
+//! Linux desktop's fonts, colours and text rendering, and the user's own terminal app's, so Kyde
+//! can draw with them.
 //!
 //! Match desktop ([`read`]): the code font (the desktop's monospace font), the UI font, and a
 //! palette from the desktop's dark preference, accent and GTK theme or KDE colour scheme. Your
@@ -7,13 +8,15 @@
 //! and font of the terminal Open in Terminal starts. Every read falls back on its own: a
 //! desktop or terminal Kyde doesn't know, a missing tool (`gsettings`, `xfconf-query`,
 //! `fc-list`), an unreadable file, or a font gpui can't draw leaves just that piece on Kyde's
-//! own default. Nothing here fails or panics; both reads run on a background thread.
+//! own default. Nothing here fails or panics; both reads run on a background thread. How the
+//! desktop draws text ([`text`]) is read once at start, before gpui draws any.
 //!
 //! Pure + unit-tested apart from [`Probe::here`], which reads the environment.
 
 mod colors;
 mod fonts;
 mod term_colors;
+pub(crate) mod text;
 
 use super::terminal_app::{find_on, gsettings_string, names_desktop, resolve_here};
 use crate::theme;
@@ -46,6 +49,15 @@ pub(crate) struct Probe {
 impl Probe {
     /// The probe for this session, from the environment.
     pub(crate) fn here() -> Self {
+        Self {
+            terminal: resolve_here(),
+            ..Self::here_without_terminal()
+        }
+    }
+
+    /// [`Probe::here`] without looking up the terminal app (that runs `gsettings`), for reads
+    /// that don't need it.
+    pub(crate) fn here_without_terminal() -> Self {
         let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
         let home = var("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
         let dirs = |k: &str, default: &str| -> Vec<PathBuf> {
@@ -58,7 +70,7 @@ impl Probe {
             run: Box::new(move |tool, args| run_tool(&tools, tool, args)),
             path,
             desktop: Desktop::named(&desktops),
-            terminal: resolve_here(),
+            terminal: None,
             desktops: desktops.to_lowercase(),
             config_home: var("XDG_CONFIG_HOME").map_or_else(|| home.join(".config"), PathBuf::from),
             config_dirs: dirs("XDG_CONFIG_DIRS", "/etc/xdg"),

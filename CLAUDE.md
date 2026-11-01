@@ -106,7 +106,7 @@ clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
 terminal_app.rs (Open in Terminal off macOS)  window_icon.rs (X11 window icon)
 keyboard_layout.rs (Shift + symbol keys on the active Linux layout)  input_method.rs (no XIM for
 plain layouts on X11)  desktop/ (Linux "Match desktop" + "Your terminal": the desktop's and the
-terminal app's fonts + colours)
+terminal app's fonts + colours; text.rs: "Your desktop's" text rendering, chosen at start)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
@@ -233,6 +233,11 @@ so plain rustc warnings fail every step, not just clippy. Rules:
   `[workspace.package].version`.
 - **gpui is pinned exactly** (`gpui = "=0.2.2"` in `[workspace.dependencies]`) and **`Cargo.lock`
   is committed** — reproducible builds. Don't loosen to `"0.2"`. `cargo build --locked` must pass.
+- **`vendor/` holds patched crates.io crates**, swapped in by `[patch.crates-io]` and excluded from
+  the workspace: `cosmic-text` 0.14.2 (gpui's Linux text renderer; Linux "Text → Your desktop's").
+  `vendor/README.md` says what changed and how to drop it. Each one is named in
+  release-please's `Cargo.lock` entry so a release doesn't bump its version. Keep the patch
+  marked (`Kyde patch`) and small.
 - **`[profile.dev.package."*"] opt-level = 3`** optimizes *dependencies* in debug while our
   crates stay at `opt-level = 1` (fast incremental rebuilds). Keep both.
 - **Features stay independent down to the empty set**: `cargo build --workspace
