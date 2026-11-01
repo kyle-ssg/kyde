@@ -23,6 +23,9 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Marks the binary as a shipped release: it gets the upright logo. Every other build —
+  # local debug or `--release` — shows it upside down (`LOGO_PNG` in src/main.rs).
+  KYDE_RELEASE_BUILD: "1"
 
 jobs:
   release-please:

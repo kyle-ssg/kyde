@@ -51,10 +51,7 @@ fn apply_now() -> anyhow::Result<()> {
                 continue;
             }
             if icon.is_none() {
-                icon = Some(net_wm_icon(
-                    include_bytes!("../../assets/logo.png"),
-                    &SIZES,
-                )?);
+                icon = Some(net_wm_icon(crate::LOGO_PNG, &SIZES)?);
             }
             if let Some(data) = &icon {
                 // Checked: waits for the server to apply it (or refuse it) before going on —
