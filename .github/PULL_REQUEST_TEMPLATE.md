@@ -17,8 +17,8 @@ PR gets the same quick gut-check. Tick what applies:
 - [ ] No new work added to a **hot path** (per-keystroke highlight, per-frame render,
       per-file-select diff) — or if there is, it's justified and has a `perf_*` guard test.
 - [ ] No new **always-on dependency** that bloats the binary / resident RAM. If a heavy,
-      optional thing was added, it's behind a **Cargo feature** (see README → Trimming the
-      build) so builds can drop it.
+      optional thing was added, it's behind a **Cargo feature** (see README → Build) so
+      builds can drop it.
 - [ ] Startup still feels instant (the app should open before you finish letting go of the
       mouse).
 - [ ] N/A — docs / chore / pure refactor with no runtime impact.
@@ -27,5 +27,6 @@ PR gets the same quick gut-check. Tick what applies:
 - [ ] `cargo build` is clean (no new warnings).
 - [ ] `cargo test` is green (`cargo test perf` if you touched a hot path).
 - [ ] No vendor code or assets copied from Zed or any GPL source (patterns only — see
-      README → Reference material).
-- [ ] Updated `README.md` / `CLAUDE.md` if behavior or architecture changed.
+      CLAUDE.md → Reference).
+- [ ] Updated `CLAUDE.md` if architecture or conventions changed. The README lists headline
+      features only: settings, shortcuts and per-platform details stay out of it.
