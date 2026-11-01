@@ -2366,6 +2366,8 @@ impl Kyde {
                 .duration_since(mtime)
                 .unwrap_or_default();
             let at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
+            let done = r.hook == Hook::Done;
+            t.view.update(cx, |v, cx| v.set_claude_done(done, cx));
             t.hook = Some((r.hook, at));
         }
         if let Some(s) = sound {
