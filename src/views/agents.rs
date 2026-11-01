@@ -2508,10 +2508,6 @@ impl Kyde {
             }
         }
         if probes.is_empty() {
-            if manual {
-                self.agents.note = Some("No tabs open".into());
-                cx.notify();
-            }
             return;
         }
         // Merged-PR heads per space, re-fetched at most every 10 minutes (one `gh` call each).
@@ -2590,7 +2586,8 @@ impl Kyde {
     }
 
     /// Decide with what the probe found: mark each tab's `verdict`, and — in Auto mode, not
-    /// from the Clean Up window — close the finished ones. Returns how many it closed.
+    /// from the Clean Up window — close the finished ones; from the Clean Up window, tick the
+    /// ones this pass found finished. Returns how many it closed.
     pub(crate) fn agents_apply_sweep(
         &mut self,
         found: crate::agents::SweepFound,
@@ -2632,6 +2629,7 @@ impl Kyde {
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let (rules, hours) = (self.agents.cfg.cleanup, self.agents.cfg.idle_hours);
         let mut finished: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        let mut newly: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for (wt, g) in &mut self.agents.tabs {
             for (i, t) in g.tabs.iter_mut().enumerate() {
                 let facts = crate::agents::TabFacts {
@@ -2647,11 +2645,19 @@ impl Kyde {
                     clean: found.clean.get(wt).copied().unwrap_or(false),
                     ai_done: t.ai.as_ref().and_then(|a| a.done.clone()),
                 };
+                let was = t.verdict.is_some();
                 t.verdict = crate::agents::closable(&facts, rules, hours);
                 if t.verdict.is_some() {
                     finished.push((wt.clone(), t.spawned_at));
+                    if !was {
+                        newly.push((wt.clone(), t.spawned_at));
+                    }
                 }
             }
+        }
+        // Ones already finished when the window opened were ticked then — an untick stands.
+        if manual {
+            self.agents.cleanup_tabs.extend(newly);
         }
         let mut closed = 0;
         if !manual && self.agents.cfg.cleanup_mode == CleanupMode::Auto {
@@ -2736,9 +2742,48 @@ impl Kyde {
         }
     }
 
-    /// Remove the worktrees ticked in the Clean Up window — one after another (git locks the
-    /// repo's worktree list), closing their tabs; branches are kept.
-    fn agents_remove_checked(&mut self, cx: &mut Context<Self>) {
+    /// The Clean Up window's ticked finished tabs that closing would act on: still open, still
+    /// finished, and not in a worktree it's removing anyway (those close with it).
+    fn agents_cleanup_tabs_to_close(&self) -> Vec<(PathBuf, std::time::SystemTime)> {
+        self.agents
+            .cleanup_tabs
+            .iter()
+            .filter(|(wt, spawned)| {
+                !self.agents.cleanup_checked.contains(wt)
+                    && self.agents.tabs.get(wt).is_some_and(|g| {
+                        g.tabs
+                            .iter()
+                            .any(|t| t.spawned_at == *spawned && t.verdict.is_some())
+                    })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Act on the Clean Up window: close the ticked finished tabs, then remove the ticked
+    /// worktrees — one after another (git locks the repo's worktree list), closing their tabs;
+    /// branches are kept.
+    pub(crate) fn agents_clean_up_checked(&mut self, cx: &mut Context<Self>) {
+        let tabs = self.agents_cleanup_tabs_to_close();
+        self.agents.cleanup_tabs.clear();
+        let mut closed = 0;
+        for (wt, spawned) in tabs {
+            if let Some(i) = self
+                .agents
+                .tabs
+                .get(&wt)
+                .and_then(|g| g.tabs.iter().position(|t| t.spawned_at == spawned))
+            {
+                self.agents_close_tab(&wt, i, cx);
+                closed += 1;
+            }
+        }
+        if closed > 0 {
+            self.agents.note = Some(format!(
+                "Closed {closed} finished tab{}",
+                if closed == 1 { "" } else { "s" }
+            ));
+        }
         let list: Vec<(PathBuf, PathBuf)> = self
             .agents
             .cleanup_checked
@@ -2752,12 +2797,85 @@ impl Kyde {
         self.agents_remove_in_background(list, cx);
     }
 
-    /// Body of the Clean Up window: every linked worktree, grouped by project, with what
-    /// removing it costs. Finished ones (nothing uncommitted, nothing unpushed) come ticked.
+    /// Body of the Clean Up window: the tabs the cleanup found finished (the main checkout's
+    /// too), then every linked worktree, grouped by project, with what removing it costs.
+    /// Finished ones (nothing uncommitted, nothing unpushed) come ticked.
     pub(crate) fn render_cleanup_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         let fs = t.ui_font_size;
+        let section = |label: &'static str| {
+            div()
+                .pt_2()
+                .px_2()
+                .text_color(t.secondary_text)
+                .child(label)
+                .into_any_element()
+        };
+        let mut tab_rows: Vec<gpui::AnyElement> = Vec::new();
+        for space in &self.agents.cfg.spaces {
+            for wt in space.rows() {
+                let Some(g) = self.agents.tabs.get(&wt) else {
+                    continue;
+                };
+                let removing = self.agents.cleanup_checked.contains(&wt);
+                for tab in &g.tabs {
+                    let Some(why) = &tab.verdict else {
+                        continue;
+                    };
+                    let key = (wt.clone(), tab.spawned_at);
+                    let mut line = format!("Finished: {why}");
+                    if removing {
+                        line.push_str(" · closes with its worktree");
+                    }
+                    let row = cleanup_row(
+                        format!("cleanup-tab-{}", tab.id).into(),
+                        removing || self.agents.cleanup_tabs.contains(&key),
+                        tab.name.clone().unwrap_or_else(|| tab_auto_title(tab, cx)),
+                        worktree_title(Some(&space.path), &wt),
+                        line,
+                        false,
+                    );
+                    tab_rows.push(if removing {
+                        row.into_any_element()
+                    } else {
+                        row.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                if !this.agents.cleanup_tabs.remove(&key) {
+                                    this.agents.cleanup_tabs.insert(key.clone());
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    });
+                }
+            }
+        }
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if !tab_rows.is_empty() || self.agents.sweeping {
+            rows.push(section("Finished tabs"));
+        }
+        if tab_rows.is_empty() && self.agents.sweeping {
+            rows.push(
+                div()
+                    .px_2()
+                    .text_size(px(fs - 1.0))
+                    .text_color(t.line_number)
+                    .child("Checking which tabs are finished…")
+                    .into_any_element(),
+            );
+        }
+        rows.append(&mut tab_rows);
+        if self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .any(|s| !s.worktrees.is_empty())
+        {
+            rows.push(section("Worktrees"));
+        }
         for space in &self.agents.cfg.spaces {
             if space.worktrees.is_empty() {
                 continue;
@@ -2792,59 +2910,24 @@ impl Kyde {
                 }
                 let key = wt.clone();
                 rows.push(
-                    div()
-                        .id(SharedString::from(format!("cleanup-{}", wt.display())))
-                        .flex()
-                        .flex_row()
-                        .items_start()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|d| d.bg(t.bg_mid))
-                        .child(div().pt(px(2.0)).child(crate::checkbox_box(checked)))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .gap_2()
-                                        .child(div().min_w_0().truncate().child(title))
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .text_size(px(fs - 1.0))
-                                                .text_color(t.line_number)
-                                                .child(SharedString::from(branch)),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(fs - 1.0))
-                                        .text_color(if danger {
-                                            t.status_conflict
-                                        } else {
-                                            t.secondary_text
-                                        })
-                                        .child(SharedString::from(line)),
-                                ),
-                        )
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| {
-                                if !this.agents.cleanup_checked.remove(&key) {
-                                    this.agents.cleanup_checked.insert(key.clone());
-                                }
-                                cx.notify();
-                            }),
-                        )
-                        .into_any_element(),
+                    cleanup_row(
+                        format!("cleanup-{}", wt.display()).into(),
+                        checked,
+                        title,
+                        branch,
+                        line,
+                        danger,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            if !this.agents.cleanup_checked.remove(&key) {
+                                this.agents.cleanup_checked.insert(key.clone());
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
                 );
             }
         }
@@ -2860,24 +2943,35 @@ impl Kyde {
                     .is_some_and(|s| self.agents_wt_cleanup(&s.path, wt).2)
             })
             .count();
+        let closing = self.agents_cleanup_tabs_to_close().len();
         let cancel = btn_secondary("cleanup-cancel", "Cancel").on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| {
                 this.agents.cleanup_checked.clear();
+                this.agents.cleanup_tabs.clear();
                 this.close_modal_window(ModalKind::Cleanup, cx);
             }),
         );
-        let label = if lossy > 0 {
-            format!("Remove {n} (discarding changes in {lossy})")
-        } else {
-            format!("Remove {n} worktree{}", if n == 1 { "" } else { "s" })
-        };
-        let remove = if n == 0 {
-            btn_primary_state("cleanup-remove", label, true)
+        let plural = |k: usize| if k == 1 { "" } else { "s" };
+        let mut parts = Vec::new();
+        if closing > 0 {
+            parts.push(format!("close {closing} tab{}", plural(closing)));
+        }
+        if lossy > 0 {
+            parts.push(format!("remove {n} (discarding changes in {lossy})"));
+        } else if n > 0 {
+            parts.push(format!("remove {n} worktree{}", plural(n)));
+        }
+        let mut label = parts.join(", ");
+        if let Some(first) = label.get(..1).map(str::to_uppercase) {
+            label.replace_range(..1, &first);
+        }
+        let remove = if parts.is_empty() {
+            btn_primary_state("cleanup-remove", "Clean up", true)
         } else {
             btn_primary("cleanup-remove", label).on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.agents_remove_checked(cx)),
+                cx.listener(|this, _e, _w, cx| this.agents_clean_up_checked(cx)),
             )
         };
         div()
@@ -2890,8 +2984,9 @@ impl Kyde {
             .text_size(px(fs))
             .text_color(t.text)
             .child(div().text_color(t.line_number).child(
-                "Ticked worktrees are finished — nothing uncommitted, nothing unpushed — so \
-                 removing them loses no work. Their tabs close; their branches are kept.",
+                "Ticked tabs are finished; closing one ends its agent. Ticked worktrees are \
+                 finished — nothing uncommitted, nothing unpushed — so removing them loses no \
+                 work. Their tabs close; their branches are kept.",
             ))
             .child(
                 div()
@@ -2906,7 +3001,7 @@ impl Kyde {
                         d.child(
                             div()
                                 .text_color(t.line_number)
-                                .child("No worktrees to clean up."),
+                                .child("Nothing to clean up."),
                         )
                     })
                     .children(rows),
@@ -3201,7 +3296,7 @@ impl Kyde {
                 icon(
                     "agents-cleanup",
                     "icons/eraser.svg",
-                    "Clean up — remove finished worktrees".into(),
+                    "Clean up — close finished tabs, remove finished worktrees".into(),
                 )
                 .on_mouse_down(
                     MouseButton::Left,
@@ -5779,12 +5874,14 @@ impl Kyde {
         div().into_any_element()
     }
 
-    /// The eraser button: the Clean Up window — remove finished worktrees.
+    /// The eraser button: the Clean Up window — close finished tabs, remove finished
+    /// worktrees.
     fn agents_cleanup_now(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
         {
             // Tick every finished worktree (nothing uncommitted, nothing unpushed, no agent
-            // busy); re-read git so the statuses are current.
+            // busy) and every tab already found finished; re-read git so the statuses are
+            // current, and re-run the cleanup's checks (it ticks tabs it newly finds finished).
             self.agents.cleanup_checked = self
                 .agents
                 .cfg
@@ -5794,8 +5891,20 @@ impl Kyde {
                 .filter(|(space, wt)| self.agents_wt_cleanup(space, wt).1)
                 .map(|(_, wt)| wt)
                 .collect();
-            self.open_modal_window(ModalKind::Cleanup, "Clean Up Worktrees", 600.0, 540.0, cx);
+            self.agents.cleanup_tabs = self
+                .agents
+                .tabs
+                .iter()
+                .flat_map(|(wt, g)| {
+                    g.tabs
+                        .iter()
+                        .filter(|t| t.verdict.is_some())
+                        .map(move |t| (wt.clone(), t.spawned_at))
+                })
+                .collect();
+            self.open_modal_window(ModalKind::Cleanup, "Clean Up", 600.0, 540.0, cx);
             self.agents_refresh_branches(cx);
+            self.agents_sweep(true, cx);
         }
         #[cfg(not(feature = "terminal"))]
         let _ = cx;
@@ -6453,6 +6562,64 @@ fn status_dot(state: AgentState) -> gpui::Div {
 }
 
 /// A path's last component, for labels.
+/// One line of the Clean Up window: a checkbox, the title with something quieter beside it,
+/// and a status line under it (red when acting on it loses work). The caller adds the click.
+#[cfg(feature = "terminal")]
+fn cleanup_row(
+    id: SharedString,
+    checked: bool,
+    title: String,
+    aside: String,
+    line: String,
+    danger: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let t = theme::get();
+    let fs = t.ui_font_size;
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|d| d.bg(t.bg_mid))
+        .child(div().pt(px(2.0)).child(crate::checkbox_box(checked)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(div().min_w_0().truncate().child(title))
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(fs - 1.0))
+                                .text_color(t.line_number)
+                                .child(aside),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(fs - 1.0))
+                        .text_color(if danger {
+                            t.status_conflict
+                        } else {
+                            t.secondary_text
+                        })
+                        .child(line),
+                ),
+        )
+}
+
 fn leaf_name(p: &Path) -> String {
     p.file_name().map_or_else(
         || p.display().to_string(),

@@ -1324,6 +1324,9 @@ struct AgentsView {
     /// The Clean Up window's ticked worktrees.
     #[cfg(feature = "terminal")]
     cleanup_checked: std::collections::HashSet<PathBuf>,
+    /// The Clean Up window's ticked finished tabs, as (worktree, spawn time).
+    #[cfg(feature = "terminal")]
+    cleanup_tabs: std::collections::HashSet<(PathBuf, std::time::SystemTime)>,
     /// A main sync is in flight / when the last one finished (throttle).
     main_syncing: bool,
     main_synced_at: Option<std::time::Instant>,
@@ -1713,6 +1716,8 @@ impl AgentsView {
             sweeping: false,
             #[cfg(feature = "terminal")]
             cleanup_checked: std::collections::HashSet::new(),
+            #[cfg(feature = "terminal")]
+            cleanup_tabs: std::collections::HashSet::new(),
             main_syncing: false,
             main_synced_at: None,
             sidebar_w: 330.0,
@@ -6991,6 +6996,56 @@ mod gpui_smoke_tests {
                 }
                 // Auto mode (the default): the off-screen one closes, the visible one is spared.
                 assert_eq!(k.agents_apply_sweep(found, false, cx), 1);
+                let g = &k.agents.tabs[&dir];
+                assert_eq!(g.tabs.len(), 1);
+                assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
+    /// The Clean Up window's pass ticks a tab it finds finished — in the main checkout too,
+    /// which has no worktree to remove — without closing it; confirming the window closes it.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_window_closes_finished_tabs(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), false, None, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let hour_ago = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                let mut found = agents::SweepFound::default();
+                for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                    t.unseen = false;
+                    t.last_active = hour_ago;
+                    found.at_prompt.push(((dir.clone(), t.spawned_at), true));
+                }
+                assert_eq!(
+                    k.agents_apply_sweep(found, true, cx),
+                    0,
+                    "the window never auto-closes"
+                );
+                let quit = k.agents.tabs[&dir].tabs[0].spawned_at;
+                assert_eq!(
+                    k.agents.cleanup_tabs,
+                    std::collections::HashSet::from([(dir.clone(), quit)]),
+                    "only the off-screen tab is ticked"
+                );
+                k.agents_clean_up_checked(cx);
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
