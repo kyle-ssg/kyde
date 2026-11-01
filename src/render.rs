@@ -9,7 +9,7 @@ impl Render for Kyde {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Agent alerts sound / bounce for the tab on screen too while Kyde is in the back.
         self.agents.window_active = window.is_window_active();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let fs = px(theme::get().ui_font_size);
         // Track the MAIN window's bounds (this `impl Render` runs only for the main window; the
         // modals are `ModalWindow`). The Diff modal opens at these bounds so it's as big as the
@@ -128,7 +128,8 @@ impl Render for Kyde {
         // lights sit at its left (titlebar is transparent), so we inset past them. Off macOS
         // the strip is a title bar only while the window draws its own decorations (see
         // `chrome`); the menu button sits at its left then, and at its right end under a window
-        // manager's title bar (`app_menu_at_right`).
+        // manager's title bar (`app_menu_at_right`). On Linux the menus can be a menu bar
+        // instead, at the strip's left with the project title beside it (`menu_bar`).
         let client = self.chrome.client.is_some();
         let menu = self.render_app_menu_button(40.0, cx);
         let (menu_left, menu_right) = if self.app_menu_at_right() {
@@ -145,6 +146,7 @@ impl Render for Kyde {
             .gap_2()
             .bg(theme::get().titlebar_bg)
             .children(menu_left)
+            .children(self.render_menu_bar(cx))
             // With ≤1 project open there's no tab strip, so show the project title (chip +
             // name + chevron) right of the traffic lights.
             .when(self.open_projects.len() <= 1 && !only, |d| {
@@ -394,6 +396,10 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::replace_one))
             .on_action(cx.listener(Self::replace_all));
+        #[cfg(target_os = "linux")]
+        {
+            root = self.with_menu_bar_keys(root, cx);
+        }
         #[cfg(feature = "terminal")]
         {
             root = root
@@ -525,7 +531,7 @@ impl Render for Kyde {
                     .border_1()
                     .border_color(t.divider)
                     .text_color(t.text)
-                    .font_family(theme::font::FAMILY)
+                    .font_family(theme::font::family())
                     .text_size(px(11.0))
                     .child(SharedString::from(format!("{:.0} fps", self.fps.shown))),
             );

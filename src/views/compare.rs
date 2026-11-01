@@ -158,7 +158,7 @@ impl Kyde {
     /// difference count) over the two aligned panes and the center apply gutter.
     pub(crate) fn render_compare_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let fs = px(t.editor_font_size);
         let row_h = px(editor::line_height_px());
         let Some(d) = self.compare.diff.as_ref() else {

@@ -108,7 +108,7 @@ impl Kyde {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .font_family(theme::font::FAMILY)
+                                .font_family(theme::font::family())
                                 .child(snippet),
                         )
                         .child(

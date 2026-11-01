@@ -149,7 +149,7 @@ impl Kyde {
 
     /// Close the menu and, if it still holds focus (the picked action didn't move it, e.g.
     /// into a rename box), hand focus back to wherever it came from.
-    fn close_menu_restoring(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_menu_restoring(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.context_menu = None;
         if self.menu_focus.is_focused(window) {
             if let Some(f) = self.menu_return_focus.take() {
@@ -228,8 +228,22 @@ impl Kyde {
         cx.notify();
     }
 
-    /// → — open the highlighted submenu and step into it.
+    /// → — open the highlighted submenu and step into it; in a menu of the menu bar (Linux)
+    /// with no submenu to step into, on to the next menu.
     pub(crate) fn menu_right(&mut self, _: &MenuRight, _w: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        {
+            let into_flyout = self.context_menu.as_ref().is_some_and(|m| {
+                m.sub_hl.is_none()
+                    && matches!(
+                        m.hl.and_then(|i| m.entries.get(i)),
+                        Some(MenuEntry::Submenu { .. })
+                    )
+            });
+            if !into_flyout && self.step_bar_menu(true, cx) {
+                return;
+            }
+        }
         let Some(m) = self.context_menu.as_mut() else {
             return;
         };
@@ -243,8 +257,18 @@ impl Kyde {
         }
     }
 
-    /// ← — back out of a submenu to its header.
+    /// ← — back out of a submenu to its header; in a menu of the menu bar (Linux) outside a
+    /// submenu, on to the previous menu.
     pub(crate) fn menu_left(&mut self, _: &MenuLeft, _w: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|m| m.sub_hl.is_none())
+            && self.step_bar_menu(false, cx)
+        {
+            return;
+        }
         if let Some(m) = self.context_menu.as_mut() {
             if m.sub_hl.take().is_some() {
                 m.submenu = None;
@@ -606,6 +630,13 @@ impl Kyde {
             }
             // The menu bar's items, from the title strip's menu button (off macOS).
             MenuTarget::AppMenu => out = chrome::app_menu_entries(crate::app_menus(&self.recents)),
+            // One menu of the menu bar (Linux).
+            #[cfg(target_os = "linux")]
+            MenuTarget::MenuBar(i) => {
+                if let Some(menu) = crate::menu_bar_menus(&self.recents).into_iter().nth(*i) {
+                    out = chrome::menu_entries(menu);
+                }
+            }
             // A branch row in the branch popup: merge it into the current branch, or check it
             // out. Checked out in another worktree → Checkout jumps there (say so); hidden
             // inside a linked worktree with no jump target (the worktree is pinned to its
@@ -733,23 +764,32 @@ impl Kyde {
             .on_action(cx.listener(Self::menu_dismiss))
             .cursor(gpui::CursorStyle::Arrow)
             .min_w(px(160.0))
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size))
             .children(rows);
 
         // Backdrop: any click (incl. right elsewhere) dismisses the menu. `occlude()` makes it
         // absorb ALL mouse events (incl. hover/move), so hovering the menu — or anywhere over
-        // the backdrop — doesn't bleed through to the rows painted behind it.
-        div()
-            .absolute()
-            .top_0()
-            .left_0()
-            .size_full()
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, w, cx| this.close_menu_restoring(w, cx)),
-            )
+        // the backdrop — doesn't bleed through to the rows painted behind it. Over the menu
+        // bar's titles (Linux) a press or the pointer passing switches to that title's menu.
+        let backdrop = div().absolute().top_0().left_0().size_full().occlude();
+        #[cfg(not(target_os = "linux"))]
+        let press = cx.listener(|this, _e: &gpui::MouseDownEvent, w, cx| {
+            this.close_menu_restoring(w, cx);
+        });
+        #[cfg(target_os = "linux")]
+        let press = cx.listener(|this, e: &gpui::MouseDownEvent, w, cx| {
+            if !this.track_bar_menu(e.position, cx) {
+                this.close_menu_restoring(w, cx);
+            }
+        });
+        #[cfg(target_os = "linux")]
+        let backdrop =
+            backdrop.on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _w, cx| {
+                this.track_bar_menu(e.position, cx);
+            }));
+        backdrop
+            .on_mouse_down(MouseButton::Left, press)
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _e, w, cx| this.close_menu_restoring(w, cx)),

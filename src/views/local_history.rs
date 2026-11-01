@@ -988,7 +988,7 @@ impl Kyde {
     /// current panes + gutter.
     pub(crate) fn render_local_history_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let fs = px(t.editor_font_size);
         let ui_fs = px(t.ui_font_size);
         let row_h = px(editor::line_height_px());

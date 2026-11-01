@@ -1181,8 +1181,6 @@ dependencies = [
 [[package]]
 name = "cosmic-text"
 version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da46a9d5a8905cc538a4a5bceb6a4510de7a51049c5588c0114efce102bcbbe8"
 dependencies = [
  "bitflags 2.13.0",
  "fontdb 0.16.2",
@@ -1191,6 +1189,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "rustybuzz 0.14.1",
  "self_cell",
+ "skrifa",
  "smol_str",
  "swash",
  "sys-locale",
@@ -3007,6 +3006,7 @@ version = "2.9.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "cosmic-text",
  "futures",
  "fuzzy-matcher",
  "gpui",

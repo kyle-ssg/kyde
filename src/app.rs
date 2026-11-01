@@ -243,6 +243,8 @@ impl Kyde {
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme: ui::SelectState::new(cx),
+            #[cfg(target_os = "linux")]
+            desktop_look: crate::DesktopLook::load(),
             keymap_editor: KeymapEditor::new(cx),
             font_preview: None,
             welcome_frame: 0,
@@ -257,7 +259,7 @@ impl Kyde {
             menu_focus_pending: false,
             menu_return_focus: None,
             main_window_bounds: None,
-            chrome: chrome::WindowChrome::default(),
+            chrome: chrome::WindowChrome::new(),
             diff_view_open: false,
             rollback_win: None,
             new_branch_win: None,
@@ -300,6 +302,15 @@ impl Kyde {
         // An Agents-only window opens straight into the Agents view (no project needed).
         if me.agents.cfg.agents_only {
             me.enter_agents(cx);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if me.desktop_look.match_desktop {
+                me.read_desktop_look(cx);
+            }
+            if me.desktop_look.own_terminal {
+                me.read_terminal_look(cx);
+            }
         }
         // Background: ask GitHub if there's a newer release, then surface the update banner.
         // Network I/O off the UI thread; failures stay silent.

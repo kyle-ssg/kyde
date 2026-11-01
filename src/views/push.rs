@@ -106,7 +106,7 @@ impl Kyde {
     /// Push confirmation window body (own native window; titlebar shows "Push"): the files
     /// the push would send, Cancel / Push.
     pub(crate) fn render_push_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let t = theme::get();
         let n = self.sync.push_files.len();
         // Same folder tree as the Push tab; right-click a file → "View Diff". No checkboxes —

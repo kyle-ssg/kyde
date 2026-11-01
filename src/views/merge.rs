@@ -952,7 +952,7 @@ impl Kyde {
     /// Stage 1 — the conflicts list: every conflicted file with what each side did,
     /// plus Accept Yours / Accept Theirs / Merge… for the selected row.
     fn render_conflicts_list(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let t = theme::get();
         let src = self.merge_source_label();
         let dst = self.current_branch.clone().unwrap_or_else(|| "HEAD".into());
@@ -1241,7 +1241,7 @@ impl Kyde {
     /// Stage 2 — the resolve view for one file: toolbar (back, Compare Contents,
     /// apply-non-conflicting, whitespace mode), the panes, and the footer.
     fn render_merge_resolve(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let t = theme::get();
         let fname = self
             .merge
@@ -1481,7 +1481,7 @@ impl Kyde {
     /// The three aligned panes + two control gutters for the selected file.
     fn render_merge_panes(&mut self, fs: gpui::Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let Some(m) = self.merge.model.as_ref() else {
             return div().into_any_element();
         };
@@ -1707,7 +1707,7 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let Some((_, _, ll, rl)) = self.compare_pair() else {
             return div().into_any_element();
         };

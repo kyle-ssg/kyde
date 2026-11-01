@@ -4,7 +4,9 @@
 //!
 //! - **The menus** — everything in the menu bar (`app_menus`: Open…, Recent Projects,
 //!   Settings…, Plugins…, What's New…, Toggle FPS Monitor, Clear Data & Restart…, Quit) sit
-//!   behind a menu button at the left of the title strip, where the traffic lights would be.
+//!   behind a menu button in the title strip. On Linux, where the window manager draws the
+//!   title bar, they are a menu bar at the strip's left instead (`menu_bar`; Settings →
+//!   Appearance → Menu bar picks either).
 //! - **The title bar** — on X11, and on a Wayland compositor that decorates windows itself,
 //!   the window manager draws it, so Kyde's strip is a plain toolbar row under it. On Wayland
 //!   Kyde asks for client-side decorations (GNOME draws none for Wayland apps); with them the
@@ -42,9 +44,28 @@ pub(crate) struct WindowChrome {
     /// `drag_area`). Shared with the strip's handlers, so it survives the re-render a press
     /// triggers.
     pub drag_armed: Rc<Cell<bool>>,
+    /// Where the menus live: a menu bar or the menu button (Settings → Appearance).
+    #[cfg(target_os = "linux")]
+    pub cfg: kyde_config::window::WindowCfg,
+    /// Where the menu bar's titles were laid out (window coordinates), so a menu opens under
+    /// its title and the pointer crossing a title switches to its menu.
+    #[cfg(target_os = "linux")]
+    pub menu_titles: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
+    /// Alt is held in the active window: the menu bar underlines its titles' access keys.
+    #[cfg(target_os = "linux")]
+    pub mnemonics: bool,
 }
 
 impl WindowChrome {
+    /// The chrome of a new main window, with the saved menu bar choice (Linux).
+    pub(crate) fn new() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            cfg: kyde_config::window::WindowCfg::load(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn update(&mut self, window: &Window) {
         // macOS draws its own title bar: nothing to track (and no per-frame AppKit calls).
         if cfg!(target_os = "macos") {
@@ -53,6 +74,10 @@ impl WindowChrome {
         self.client = client_decorations(window);
         self.maximized = window.is_maximized();
         self.controls = window.window_controls();
+        #[cfg(target_os = "linux")]
+        {
+            self.mnemonics = window.is_window_active() && window.modifiers().alt;
+        }
     }
 }
 
@@ -305,6 +330,12 @@ pub(crate) fn app_menu_entries(menus: Vec<Menu>) -> Vec<MenuEntry> {
     out
 }
 
+/// One menu of the menu bar on Linux (`menu_bar`) as an in-window menu, built the same way.
+#[cfg(target_os = "linux")]
+pub(crate) fn menu_entries(menu: Menu) -> Vec<MenuEntry> {
+    app_menu_entries(vec![menu])
+}
+
 /// Append `items` as menu entries (no leading or doubled hairlines); `flyouts` numbers the
 /// submenus so each opens on its own.
 fn push_items(out: &mut Vec<MenuEntry>, items: Vec<MenuItem>, flyouts: &mut usize) {
@@ -354,6 +385,29 @@ impl Kyde {
         !cfg!(target_os = "macos") && self.chrome.client.is_none()
     }
 
+    /// Whether the menus show as a menu bar on Linux (`menu_bar`), not behind the menu button:
+    /// the Settings choice, which by default follows whether the window manager draws the
+    /// title bar.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn menu_bar_shown(&self) -> bool {
+        self.chrome
+            .cfg
+            .menu_bar
+            .shows_bar(self.chrome.client.is_none())
+    }
+
+    /// The menu bar, where it shows (Linux only).
+    #[cfg(target_os = "linux")]
+    pub(crate) fn render_menu_bar(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        self.menu_bar_shown().then(|| self.menu_bar(cx))
+    }
+
+    /// The menu bar, where it shows (Linux only).
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn render_menu_bar(&self, _cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        None
+    }
+
     /// The menu button of a title strip `strip_h` tall, off macOS (where the menu bar holds
     /// these): opens the menu bar's items as an in-window menu just below it.
     pub(crate) fn render_app_menu_button(
@@ -362,6 +416,10 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if cfg!(target_os = "macos") {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        if self.menu_bar_shown() {
             return None;
         }
         Some(
@@ -420,6 +478,7 @@ impl Kyde {
         strip
             .pl(px(TITLE_INSET))
             .children(left)
+            .children(self.render_menu_bar(cx))
             .child(drag_area(client.is_some(), &self.chrome.drag_armed))
             .when(right.is_some(), |d| d.pr(px(TITLE_INSET)))
             .children(right)
@@ -428,10 +487,11 @@ impl Kyde {
             })
     }
 
-    /// What a Projects-view root needs for its title strip, off macOS: the menu button's menu
-    /// when open, the window's resize handles under client-side decorations, and handlers for
-    /// the menu's actions — this view has none of its own, and the in-window menu is the only
-    /// way to reach them (macOS greys them out in its menu bar here instead).
+    /// What a Projects-view root needs for its title strip, off macOS: the menu button's (or
+    /// the menu bar's) menu when open, the window's resize handles under client-side
+    /// decorations, and handlers for the menu's actions — this view has none of its own, and
+    /// the in-window menu is the only way to reach them (macOS greys them out in its menu bar
+    /// here instead).
     pub(crate) fn with_title_strip_extras(
         &self,
         root: gpui::Div,
@@ -440,6 +500,8 @@ impl Kyde {
         if cfg!(target_os = "macos") {
             return root;
         }
+        #[cfg(target_os = "linux")]
+        let root = self.with_menu_bar_keys(root, cx);
         root.on_action(cx.listener(Self::act_open_project))
             .on_action(cx.listener(Self::open_recent_project))
             .on_action(cx.listener(Self::open_keymap))

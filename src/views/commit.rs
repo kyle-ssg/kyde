@@ -105,7 +105,7 @@ impl Kyde {
     /// each with a count badge when non-empty.
     fn render_git_tabs(&self, active: GitTab, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let mut row = div()
             .flex()
             .flex_row()

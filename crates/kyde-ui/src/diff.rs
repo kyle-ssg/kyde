@@ -111,7 +111,7 @@ pub fn editor_pane(
         .min_w_0()
         .h_full()
         .bg(t.main_bg)
-        .font_family(theme::font::FAMILY)
+        .font_family(theme::font::family())
         .text_size(font_size)
         .text_color(t.text)
         .child(pane_scroller(id, content_w, editor, scroll))

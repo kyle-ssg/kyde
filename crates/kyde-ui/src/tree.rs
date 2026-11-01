@@ -29,7 +29,7 @@ impl gpui::Render for DragPreview {
             .border_color(t.divider)
             .text_color(t.text)
             .text_size(px(theme::get().ui_font_size + 1.0))
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .child(self.name.clone())
     }
 }

@@ -1957,7 +1957,7 @@ impl Render for CodeEditor {
             // island, the commit box, the finder) so it never paints square corners over a
             // rounded parent (gpui clips to a rectangle, not the rounded shape).
             .text_color(theme::get().text)
-            .font_family(theme::font::FAMILY)
+            .font_family(theme::font::family())
             .text_size(px(theme::get().editor_font_size))
             .line_height(px(line_height_px()))
             .on_action(cx.listener(Self::left))

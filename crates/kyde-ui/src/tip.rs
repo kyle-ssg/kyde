@@ -18,7 +18,7 @@ impl gpui::Render for Tip {
             .border_1()
             .border_color(t.divider)
             .text_color(t.text)
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size))
             .shadow_lg()
             .child(self.0.clone())

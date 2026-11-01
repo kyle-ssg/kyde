@@ -19,13 +19,18 @@ workspace = true
 # boundaries, they get real test targets, and touching one doesn't recompile the others.
 [workspace]
 members = ["crates/*"]
+# vendor/ holds patched copies of crates.io crates, wired in by [patch.crates-io] at the end of
+# this file. They build as dependencies, never as members (not linted or tested as Kyde's own).
+exclude = ["vendor"]
 
 # Shared package metadata — every member inherits via `version.workspace = true`, etc., so the
 # version/edition/MSRV/license live in exactly one place. release-please keeps this `version`
 # in lockstep with the root `[package].version` via the `extra-files` updater in
 # release-please-config.json (it can't bump an inherited `version.workspace` directly).
 # A second `extra-files` entry bumps every path crate's `Cargo.lock` entry (the ones with no
-# `source`): the rust strategy can't expand the `crates/*` glob, so it only bumps `kyde`'s.
+# `source`): the rust strategy can't expand the `crates/*` glob, so it only bumps `kyde`'s. The
+# vendored crates (vendor/) have no `source` either and keep their own version: that entry
+# names each one to leave out.
 [workspace.package]
 version = "2.9.1"
 edition = "2021"
@@ -180,11 +185,14 @@ objc2-app-kit = { workspace = true, features = [
 #   on a Wayland desktop).
 # - xkbcommon: what Shift + a symbol key types on the active keyboard layout, so shortcuts
 #   written with Shift bind on every layout (`platform::keyboard_layout`).
+# - cosmic-text: gpui's Linux text renderer (Kyde's patched copy, see [patch.crates-io]); Text →
+#   Your desktop's chooses how it draws glyphs (`platform::desktop::text`).
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
 image = { version = "0.25", default-features = false, features = ["png"] }
 x11-clipboard = "0.9.3"
 xkbcommon = { version = "0.8", default-features = false }
+cosmic-text = "0.14.2"
 
 # Embeds the app icon + version into kyde.exe at build time (see build.rs).
 # Windows-only; nothing to compile on macOS/Linux.
@@ -243,3 +251,10 @@ opt-level = 1   # keep edit-rebuild snappy but not molasses
 # recompile). Big win for debug-build interaction latency.
 [profile.dev.package."*"]
 opt-level = 3
+
+# A patched copy of a crates.io crate, used in its place everywhere in the tree. See
+# vendor/README.md for what changed and why, and how to drop it.
+[patch.crates-io]
+# Linux only in practice: gpui 0.2.2 draws text through cosmic-text on Linux alone, so macOS and
+# Windows never compile it.
+cosmic-text = { path = "vendor/cosmic-text" }

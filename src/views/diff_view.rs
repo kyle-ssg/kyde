@@ -125,7 +125,7 @@ impl Kyde {
                 .bg(t.main_bg)
                 .rounded(px(theme::ISLAND_RADIUS))
                 .overflow_hidden()
-                .font_family(theme::font::FAMILY)
+                .font_family(theme::font::family())
                 .text_size(fs)
                 .text_color(t.text)
         };
@@ -351,7 +351,7 @@ impl Kyde {
         }
         let nav = n >= 2;
         let t = theme::get();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let label = if n == 1 {
             "1 change".to_string()
         } else {

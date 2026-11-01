@@ -95,8 +95,8 @@ divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
 agents  branch  browse  changelog  chrome  commit  compare  diff_view  file_ops  find  finder
-history  local_history  merge  modals  notifications  onboarding  projects_view  push  rollback
-settings  tabs  terminal_panel  worktree
+history  local_history  menu_bar (Linux)  merge  modals  notifications  onboarding  projects_view
+push  rollback  settings  tabs  terminal_panel  worktree
 
 # ── widgets/ — gpui-coupled widgets (own Entities/Elements) ──
 editor/  mdview.rs  terminal.rs  remote_img.rs
@@ -105,7 +105,8 @@ editor/  mdview.rs  terminal.rs  remote_img.rs
 clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
 terminal_app.rs (Open in Terminal off macOS)  window_icon.rs (X11 window icon)
 keyboard_layout.rs (Shift + symbol keys on the active Linux layout)  input_method.rs (no XIM for
-plain layouts on X11)
+plain layouts on X11)  desktop/ (Linux "Match desktop" + "Your terminal": the desktop's and the
+terminal app's fonts + colours; text.rs: "Your desktop's" text rendering, chosen at start)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
@@ -117,7 +118,8 @@ kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap, plus the changelog feed
               (`release_notes`/`parse_releases`). (thiserror: UpdateError, serde_json)
-kyde-config   keymap + plugins + projects + history + agents cfg: persistence (JSON, XDG). (serde)
+kyde-config   keymap + plugins + projects + history + agents + window (Linux) cfg: persistence
+              (JSON, XDG). (serde)
 kyde-local-history  per-project snapshot store: content-addressed blobs + append-only
               events.jsonl journal, prune/GC. (sha2)
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`
@@ -162,11 +164,14 @@ the rounded island panels, while `main_bg`/`panel_bg` are the island surfaces �
 as floating. `ISLAND_RADIUS` / `FRAME_GAP` are non-themeable consts. Adding a palette key means
 adding it to the CVD variants too.
 
-Fonts stay compile-const in `theme::font` (**not** themeable): `UI_FAMILY` = **Inter** (all
-chrome), `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor). Both OFL, bundled
-in `assets/fonts/`, registered at startup via `main::load_fonts`. Chrome render fns thread a
-`ui` family arg; `render_diff` takes none and hard-codes `FAMILY`. (SF Mono was rejected —
-Apple license, not shippable.)
+Fonts are not in `theme.json`. The bundled `theme::font::UI_FAMILY` = **Inter** (all chrome)
+and `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor, and the terminal) are both
+OFL, in `assets/fonts/`, registered at startup via `main::load_fonts`. Draw with the accessors
+`font::ui_family()` / `family()` / `terminal_family()` (+ `terminal_size()`), never the consts:
+they give the bundled family unless a `theme::Overlay` (Linux "Match desktop", never persisted)
+supplies another; the terminal's font and colours come from a `theme::TerminalLook` (Linux
+"Your terminal", never persisted), else the code font and the theme. Chrome render fns thread a
+`ui` family arg. (SF Mono was rejected — Apple license, not shippable.)
 
 ## Build / run
 Rust 1.96 + Metal Toolchain are installed. gpui needs Apple's Metal Toolchain to compile
@@ -228,6 +233,11 @@ so plain rustc warnings fail every step, not just clippy. Rules:
   `[workspace.package].version`.
 - **gpui is pinned exactly** (`gpui = "=0.2.2"` in `[workspace.dependencies]`) and **`Cargo.lock`
   is committed** — reproducible builds. Don't loosen to `"0.2"`. `cargo build --locked` must pass.
+- **`vendor/` holds patched crates.io crates**, swapped in by `[patch.crates-io]` and excluded from
+  the workspace: `cosmic-text` 0.14.2 (gpui's Linux text renderer; Linux "Text → Your desktop's").
+  `vendor/README.md` says what changed and how to drop it. Each one is named in
+  release-please's `Cargo.lock` entry so a release doesn't bump its version. Keep the patch
+  marked (`Kyde patch`) and small.
 - **`[profile.dev.package."*"] opt-level = 3`** optimizes *dependencies* in debug while our
   crates stay at `opt-level = 1` (fast incremental rebuilds). Keep both.
 - **Features stay independent down to the empty set**: `cargo build --workspace

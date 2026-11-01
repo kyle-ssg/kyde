@@ -2989,7 +2989,7 @@ impl Kyde {
             .flex_col()
             .p_4()
             .gap_2()
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(fs))
             .text_color(t.text)
             .child(div().text_color(t.line_number).child(
@@ -4547,7 +4547,7 @@ impl Kyde {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .font_family(theme::font::FAMILY)
+                                .font_family(theme::font::family())
                                 .text_color(t.secondary_text)
                                 .child(SharedString::from(headline.clone())),
                         )
@@ -4714,7 +4714,7 @@ impl Kyde {
             };
             div()
                 .px_3()
-                .font_family(theme::font::FAMILY)
+                .font_family(theme::font::family())
                 .text_size(px(fs - 1.0))
                 .when_some(bg, gpui::Styled::bg)
                 .child(
@@ -4832,7 +4832,7 @@ impl Kyde {
                     .bg(t.bg_mid)
                     .border_b_1()
                     .border_color(t.divider)
-                    .font_family(theme::font::FAMILY)
+                    .font_family(theme::font::family())
                     .text_size(px(fs - 1.0))
                     .child(SharedString::from(th.path.clone())),
             )
@@ -4891,7 +4891,7 @@ impl Kyde {
                         .items_center()
                         .px_3()
                         .text_size(px(fs))
-                        .font_family(theme::font::FAMILY);
+                        .font_family(theme::font::family());
                     let text = |s: &str| SharedString::from(s.replace('\t', "    "));
                     match &rows[i] {
                         DiffRow::File {
@@ -4901,7 +4901,7 @@ impl Kyde {
                         } => row
                             .gap_2()
                             .bg(t.bg_mid)
-                            .font_family(theme::font::UI_FAMILY)
+                            .font_family(theme::font::ui_family())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .child(
                                 div()
@@ -5700,7 +5700,7 @@ impl Kyde {
                 .child(
                     div()
                         .text_size(px(t.ui_font_size - 1.0))
-                        .font_family(theme::font::FAMILY)
+                        .font_family(theme::font::family())
                         .child(SharedString::from(format!("runs `{cmd}` here"))),
                 )
                 .into_any_element()
@@ -5821,7 +5821,7 @@ impl Kyde {
                             .border_1()
                             .border_color(t.divider)
                             .bg(t.main_bg)
-                            .font_family(theme::font::FAMILY)
+                            .font_family(theme::font::family())
                             .child(self.agents.default_cmd_input.clone()),
                     ),
             )
@@ -6474,7 +6474,7 @@ impl Kyde {
             .size_full()
             .p_2()
             .bg(t.main_bg)
-            .font_family(theme::font::FAMILY)
+            .font_family(theme::font::family())
             .child(self.agents.scrollback.clone())
             .into_any_element()
     }

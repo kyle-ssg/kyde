@@ -36,7 +36,7 @@ impl Kyde {
             .gap_0p5()
             .flex_none()
             .pr_2()
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .child(
                 tool_btn(
                     "tb-fetch",

@@ -63,6 +63,6 @@ yourself too: bump both `version` fields in `Cargo.toml` (and `Cargo.lock`), upd
 `CHANGELOG.md`, push a `vX.Y.Z` tag and create the GitHub Release yourself, then build
 the artifacts locally (`TARGET=aarch64-apple-darwin ./scripts/bundle-macos.sh`, then
 again for `x86_64-apple-darwin`, zipping each `dist/Kyde.app` as `kyde-macos.zip` /
-`kyde-macos-x86_64.zip`; on Ubuntu 24.04, `./scripts/bundle-linux.sh` renamed to
+`kyde-macos-x86_64.zip`; on Ubuntu 22.04, `./scripts/bundle-linux.sh` renamed to
 `kyde-linux-x86_64.AppImage`) and `gh release upload` each one with a `.sha256`. Locally
 built apps are ad-hoc-signed, not notarized. The automated path is strongly preferred.

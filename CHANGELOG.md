@@ -13,6 +13,11 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * **linux:** ship a Linux AppImage (`kyde-linux-x86_64.AppImage`) with every release again
 * **linux:** the menu bar's items (Open, Recent Projects, Settings, Plugins, What's New, FPS monitor, Clear Data & Restart, Quit) behind a ☰ button in the title strip
 * **linux:** agent alerts play their chime, and show a desktop notification while Kyde is in the background
+* **terminal:** drop files on a terminal or agent tab to type in their paths, quoted for the shell (Claude Code takes a dropped image as pasted)
+* **linux:** a File / View / Help menu bar where the window manager draws the title bar, in one row with the project switcher; F10 opens it, Alt + the underlined letter opens a menu, and Settings → Appearance → Menu bar picks the menu bar or the ☰ button
+* **linux:** Match desktop (Settings → Appearance → Theme): the terminal takes your terminal app's font, the editor and UI your desktop's fonts, and the colours your desktop's dark preference, accent and GTK theme or KDE colour scheme; whatever Kyde can't read or draw stays its own
+* **linux:** Settings → Appearance → Terminal → Your terminal: the terminal and agent tabs take your terminal app's background, text, 16 ANSI colours, bold and cursor colours and font, under any theme (GNOME Terminal, MATE Terminal, Xfce Terminal, Konsole, kitty, Alacritty, Ptyxis palettes of your own); Match desktop turns it on, and Kyde (the default) keeps Kyde's terminal
+* **linux:** Settings → Appearance → Text → Your desktop's: text drawn as your desktop draws it, antialiased or crisp and with its hinting (from the X resources your desktop publishes, else its gsettings, else fontconfig), from the next start; Match desktop turns it on, and Kyde (the default) keeps Kyde's text exactly as before. Kyde now carries a small patch to cosmic-text, gpui's Linux text renderer, in `vendor/`
 
 ### Bug Fixes
 
@@ -38,6 +43,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * relay Enter to the embedded terminal instead of consuming it as an app confirmation shortcut
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
+* **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
 ## [2.9.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.0...kyde-v2.9.1) (2026-11-01)
 

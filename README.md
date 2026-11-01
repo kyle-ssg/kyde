@@ -55,6 +55,17 @@ A hand-tuned dark palette, configurable at runtime via `~/.config/kyde/theme.jso
 Six built-in palettes ship — **Kyde Dark**, **Kyde Light**, and colour-vision-deficiency
 variants of each (**Red–Green** and **Blue–Yellow**, which separate the diff/syntax poles
 by lightness instead of hue) — switch in Settings.
+On Linux, **Match desktop** (Settings → Appearance → Theme, off by default) draws Kyde with your
+desktop's look instead: your terminal app's colours and font in the terminal, the desktop's
+monospace and UI fonts, and its light/dark preference, accent and GTK theme (or KDE colour scheme)
+colours. Anything Kyde can't read or draw stays its own.
+**Settings → Appearance → Terminal → Your terminal** (Linux) gives the terminal and agent tabs your
+terminal app's colours and font under any theme, say a black terminal in Kyde Dark; **Kyde** keeps
+Kyde's own.
+**Settings → Appearance → Text → Your desktop's** (Linux) draws text the way your desktop does,
+antialiased or crisp and with its hinting, from the next start; **Kyde** keeps Kyde's own smooth
+text. For it, Kyde carries a small patch to cosmic-text, gpui's Linux text renderer, in
+[`vendor/`](vendor/README.md).
 
 <p align="center">
   <img src="assets/screenshots/light.png" alt="Kyde Light theme — the same side-by-side diff rendered in the built-in light palette" width="900">
@@ -194,7 +205,7 @@ herdr still does things Kyde doesn't: it runs anywhere a terminal does (includin
 ### Look & feel
 
 * **Islands layout** — rounded panels, draggable dividers, activity rail, native title bar (double-click to zoom), status bar.
-* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu). Linux has no app menu bar, so there the same items sit behind a ☰ button: at the right end of the toolbar under the window manager's title bar (X11), at the left of Kyde's own title bar on Wayland.
+* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu). Linux has no app menu bar, so there the same items sit in a File / View / Help menu bar at the left of the toolbar where the window manager draws the title bar (X11), and behind a ☰ button at the left of Kyde's own title bar where Kyde draws it (GNOME on Wayland). `F10` opens the menus and Alt + a title's underlined letter opens that menu; Settings → Appearance → Menu bar puts the menu bar or the ☰ button everywhere instead.
 * **What's New** — the project's GitHub releases mirrored in-app: version list on the left, that release's notes rendered on the right.
 * **In-app updates** — a banner when a newer release exists; **Update & Relaunch** downloads and swaps the running `.app` in place (or opens the release page when not running from a bundle).
 * **Single instance** — a second `ky <path>` hands the project to the running app as another tab and brings it forward instead of starting a second process (`KYDE_SINGLE_INSTANCE=0` opts out).
@@ -213,7 +224,7 @@ Grab the latest build for your platform from the [Releases](../../releases) page
 
 **macOS** — download `kyde-macos.zip` (Apple Silicon) or `kyde-macos-x86_64.zip` (Intel), unzip, and drag **Kyde.app** to `/Applications`.
 
-**Linux** — download `kyde-linux-x86_64.AppImage`, `chmod +x` it, and run it. It needs glibc 2.39+ (Ubuntu 24.04, Linux Mint 22 or newer) and a Vulkan driver; a stock Ubuntu desktop already has the rest. On a minimal install: `sudo apt install libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 libwayland-client0 fuse3` (NVIDIA's driver brings its own Vulkan).
+**Linux** — download `kyde-linux-x86_64.AppImage`, `chmod +x` it, and run it. It needs glibc 2.35+ (Ubuntu 22.04, Debian 12, Linux Mint 21 or newer) and a Vulkan driver; a stock Ubuntu desktop already has the rest. On a minimal install: `sudo apt install libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 libwayland-client0 fuse3` (NVIDIA's driver brings its own Vulkan).
 
 On X11 the window manager draws Kyde's title bar; on a Wayland desktop that leaves that to the app (GNOME), Kyde draws its own — drag it to move, double-click to maximize, minimize / maximize / close at its right. On X11 Kyde follows the desktop's scale (`Xft.dpi`, which GNOME, Cinnamon and KDE set); to override it, start Kyde with `GPUI_X11_SCALE_FACTOR=1.5` (any factor), or `GPUI_X11_SCALE_FACTOR=randr` to use the monitor's physical DPI. Wayland uses each monitor's own scale.
 
