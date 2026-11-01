@@ -37,7 +37,7 @@ impl Kyde {
             .flex_row()
             .items_center()
             .flex_none()
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size))
             .on_children_prepainted(move |bounds, _w, _cx| *titles.borrow_mut() = bounds)
             .children(MENU_BAR.iter().enumerate().map(|(i, title)| {

@@ -56,7 +56,7 @@ pub fn confirm_body(title: impl Into<SharedString>, description: impl Into<Share
         .flex_col()
         .gap_3()
         .p_4()
-        .font_family(theme::font::UI_FAMILY)
+        .font_family(theme::font::ui_family())
         .text_size(px(t.ui_font_size + 1.0))
         .child(dialog_title(title))
         .child(dialog_body(description))

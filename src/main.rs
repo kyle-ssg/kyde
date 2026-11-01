@@ -2908,7 +2908,7 @@ impl Render for ModalWindow {
             }))
             .bg(theme::get().panel_bg)
             .text_color(theme::get().text)
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(theme::get().ui_font_size))
             // Escape closes (cancels) the window; Enter triggers the confirm-style
             // dialogs' primary action (New Branch / Rollback / Clear Data), IDE

@@ -1534,9 +1534,10 @@ impl Render for TerminalView {
             // Pin the mono font + a fixed size so the cell metrics the element measures (the
             // `M` advance) match the glyphs it actually shapes — otherwise the cursor, placed
             // at `col × cell_w`, drifts off the text (it inherits a proportional UI font).
-            // The UI size: dense like a real terminal, and the same as the Agents sidebar.
-            .font_family(theme::font::FAMILY)
-            .text_size(px(theme::get().ui_font_size))
+            // The UI size (dense like a real terminal, and the same as the Agents sidebar),
+            // unless Match desktop gives the user's own terminal font.
+            .font_family(theme::font::terminal_family())
+            .text_size(px(theme::font::terminal_size()))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
@@ -1715,7 +1716,7 @@ impl TerminalView {
             .shadow_md()
             .cursor_pointer()
             .hover(|d| d.bg(t.selected_bg))
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size - 1.0))
             .text_color(t.secondary_text)
             .child(
@@ -1781,7 +1782,7 @@ impl TerminalView {
             .border_color(t.divider)
             .rounded_md()
             .shadow_md()
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .child(
                 item("Copy", term_key("c"), has_selection).when(has_selection, |d| {
                     d.on_mouse_down(

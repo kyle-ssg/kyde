@@ -619,16 +619,89 @@ fn write_theme() -> std::sync::RwLockWriteGuard<'static, Option<Theme>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// A snapshot of the loaded theme. Loads lazily on first call (and writes defaults if absent).
-/// Returns by value (cheap — `Theme: Copy`), so `theme::get().primary` and
-/// `let t = theme::get();` both work unchanged.
+/// A snapshot of the loaded theme, with the [`Overlay`] (if any) laid over it. Loads lazily on
+/// first call (and writes defaults if absent). Returns by value (cheap — `Theme: Copy`), so
+/// `theme::get().primary` and `let t = theme::get();` both work unchanged.
 pub fn get() -> Theme {
+    read_overlay().over(saved())
+}
+
+/// The theme as saved in `theme.json` (no overlay), loaded on first use.
+fn saved() -> Theme {
     if let Some(t) = *read_theme() {
         return t;
     }
     let loaded = load();
     *write_theme() = Some(loaded);
     loaded
+}
+
+/// A look laid over the saved theme for this run only — it never reaches `theme.json`, so
+/// [`update`] and [`apply_palette`] keep writing the user's own palette and sizes underneath.
+/// Linux's "Match desktop" fills one from the desktop's fonts and colours; setting
+/// `Overlay::default()` brings back the saved palette and the bundled fonts.
+#[derive(Clone, Copy, Default)]
+pub struct Overlay {
+    /// Colours drawn instead of the saved palette (its sizes are ignored); `None` = the saved
+    /// palette.
+    pub palette: Option<Theme>,
+    /// UI chrome face (its size replaces `ui_font_size`); `None` = Inter at the saved size.
+    pub ui: Option<font::Face>,
+    /// Code face for the editor + diffs (its size replaces `editor_font_size`); `None` =
+    /// `JetBrains` Mono at the saved size.
+    pub editor: Option<font::Face>,
+    /// Terminal face; `None` = `JetBrains` Mono at `ui_font_size`.
+    pub terminal: Option<font::Face>,
+}
+
+impl Overlay {
+    /// `saved` as drawn under this overlay: its colours swapped for `palette`'s, its editor / UI
+    /// sizes for the faces' sizes. The tree-row height always stays the user's.
+    #[must_use]
+    pub fn over(&self, saved: Theme) -> Theme {
+        let mut t = self.palette.map_or(saved, |p| Theme {
+            editor_font_size: saved.editor_font_size,
+            ui_font_size: saved.ui_font_size,
+            tree_row_height: saved.tree_row_height,
+            ..p
+        });
+        if let Some(size) = self.editor.and_then(|f| f.size) {
+            t.editor_font_size = size;
+        }
+        if let Some(size) = self.ui.and_then(|f| f.size) {
+            t.ui_font_size = size;
+        }
+        t
+    }
+}
+
+/// The overlay in force (`Overlay::default()` when none).
+static OVERLAY: RwLock<Overlay> = RwLock::new(Overlay {
+    palette: None,
+    ui: None,
+    editor: None,
+    terminal: None,
+});
+
+// Poison-tolerant like `read_theme`: every writer replaces the whole `Copy` value at once.
+fn read_overlay() -> Overlay {
+    *OVERLAY
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Lay `overlay` over the saved theme (live: the next `get()` and the font accessors see it).
+/// Not persisted.
+pub fn set_overlay(overlay: Overlay) {
+    *OVERLAY
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = overlay;
+}
+
+/// The overlay in force (`Overlay::default()` when none).
+#[must_use]
+pub fn overlay() -> Overlay {
+    read_overlay()
 }
 
 /// Mutate the live theme and persist it to `theme.json`. The change is visible to the next
@@ -666,15 +739,73 @@ pub const ISLAND_RADIUS: f32 = 10.0;
 /// Gap (px) between the island panels and the window frame.
 pub const FRAME_GAP: f32 = 8.0;
 
-/// Fonts (no colour — separate from the themeable palette). Both bundled + OFL-licensed,
-/// registered at startup in `main::load_fonts`.
+/// Fonts (no colour — separate from the themeable palette). The two bundled families are
+/// OFL-licensed and registered at startup in `main::load_fonts`; draw with
+/// [`crate::font::family`], [`crate::font::ui_family`] and [`crate::font::terminal_family`], which
+/// give the bundled family unless an [`crate::Overlay`] supplies another.
 pub mod font {
-    /// Code font: diff + editor. `JetBrains` Mono.
+    use std::sync::{Mutex, PoisonError};
+
+    /// Bundled code font: diff + editor + terminal. `JetBrains` Mono.
     pub const FAMILY: &str = "JetBrains Mono";
-    /// UI chrome font: trees, buttons, labels, overlays. Inter.
+    /// Bundled UI chrome font: trees, buttons, labels, overlays. Inter.
     pub const UI_FAMILY: &str = "Inter";
     /// Line-height multiplier applied to both font families.
     pub const LINE_HEIGHT: f32 = 1.2;
+
+    /// A font one text role is drawn with in place of its bundled one.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Face {
+        /// Family name, as the text system knows it.
+        pub family: &'static str,
+        /// Size in px; `None` keeps Kyde's size for the role.
+        pub size: Option<f32>,
+    }
+
+    impl Face {
+        /// `family` at `size` px. The name is kept for the life of the process (each distinct
+        /// name once), so the accessors below hand out `&'static str` like the bundled consts.
+        #[must_use]
+        pub fn new(family: &str, size: Option<f32>) -> Self {
+            static NAMES: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+            let mut names = NAMES.lock().unwrap_or_else(PoisonError::into_inner);
+            let family = if let Some(known) = names.iter().find(|n| **n == family) {
+                known
+            } else {
+                let name: &'static str = Box::leak(family.into());
+                names.push(name);
+                name
+            };
+            Self { family, size }
+        }
+    }
+
+    /// Code font family: editor + diff panes.
+    #[must_use]
+    pub fn family() -> &'static str {
+        crate::read_overlay().editor.map_or(FAMILY, |f| f.family)
+    }
+
+    /// UI chrome font family.
+    #[must_use]
+    pub fn ui_family() -> &'static str {
+        crate::read_overlay().ui.map_or(UI_FAMILY, |f| f.family)
+    }
+
+    /// Terminal font family.
+    #[must_use]
+    pub fn terminal_family() -> &'static str {
+        crate::read_overlay().terminal.map_or(FAMILY, |f| f.family)
+    }
+
+    /// Terminal font size (px): the overlay's terminal size, else `ui_font_size`.
+    #[must_use]
+    pub fn terminal_size() -> f32 {
+        crate::read_overlay()
+            .terminal
+            .and_then(|f| f.size)
+            .unwrap_or_else(|| crate::get().ui_font_size)
+    }
 }
 
 #[cfg(test)]
@@ -915,6 +1046,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_overlay_swaps_colours_and_sizes_but_keeps_the_row_height() {
+        let saved = Theme {
+            editor_font_size: 15.0,
+            ui_font_size: 12.0,
+            tree_row_height: 30.0,
+            ..Theme::default()
+        };
+        // No overlay: the saved theme as is.
+        let t = Overlay::default().over(saved);
+        assert!(t.same_palette(&saved));
+        assert_eq!((t.editor_font_size, t.ui_font_size), (15.0, 12.0));
+        // A palette alone keeps every size.
+        let light = Overlay {
+            palette: Some(Theme::light()),
+            ..Overlay::default()
+        };
+        let t = light.over(saved);
+        assert!(t.same_palette(&Theme::light()));
+        assert_eq!(
+            (t.editor_font_size, t.ui_font_size, t.tree_row_height),
+            (15.0, 12.0, 30.0)
+        );
+        // A face with a size replaces its role's size; one without keeps it.
+        let faces = Overlay {
+            editor: Some(font::Face::new("DejaVu Sans Mono", Some(13.0))),
+            ui: Some(font::Face::new("Cantarell", None)),
+            ..Overlay::default()
+        };
+        let t = faces.over(saved);
+        assert!(t.same_palette(&saved));
+        assert_eq!(
+            (t.editor_font_size, t.ui_font_size, t.tree_row_height),
+            (13.0, 12.0, 30.0)
+        );
+    }
+
+    #[test]
+    fn faces_keep_one_copy_of_each_family_name() {
+        let a = font::Face::new(&String::from("Ubuntu Sans Mono"), None);
+        let b = font::Face::new(&String::from("Ubuntu Sans Mono"), Some(14.0));
+        assert!(std::ptr::eq(a.family, b.family));
+        assert_eq!(b.size, Some(14.0));
     }
 
     #[test]

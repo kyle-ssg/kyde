@@ -7,7 +7,7 @@ impl Kyde {
     /// Rollback Changes window body: checkbox tree of changes + Close/Rollback. Right-click a
     /// row → View Diff. Hosted in its own native window (`ModalWindow`).
     pub(crate) fn render_rollback_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let fs = px(theme::get().ui_font_size);
         let t = theme::get();
         let root_name = self.project_name();

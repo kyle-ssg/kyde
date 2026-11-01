@@ -577,7 +577,7 @@ impl Kyde {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .font_family(theme::font::UI_FAMILY)
+                .font_family(theme::font::ui_family())
                 .child(
                     div()
                         .text_color(t.text)
@@ -594,7 +594,7 @@ impl Kyde {
             return base
                 .items_center()
                 .justify_center()
-                .font_family(theme::font::UI_FAMILY)
+                .font_family(theme::font::ui_family())
                 .child(
                     div()
                         .text_color(t.line_number)
@@ -614,7 +614,7 @@ impl Kyde {
             .gap_3()
             .child(
                 div()
-                    .font_family(theme::font::UI_FAMILY)
+                    .font_family(theme::font::ui_family())
                     .text_color(t.line_number)
                     .text_size(px(12.0))
                     .child(family.clone()),

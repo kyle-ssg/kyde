@@ -282,9 +282,9 @@ impl MarkdownView {
 fn mk_font(bold: bool, italic: bool, code: bool) -> Font {
     Font {
         family: if code {
-            theme::font::FAMILY
+            theme::font::family()
         } else {
-            theme::font::UI_FAMILY
+            theme::font::ui_family()
         }
         .into(),
         features: Default::default(),

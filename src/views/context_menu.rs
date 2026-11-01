@@ -764,7 +764,7 @@ impl Kyde {
             .on_action(cx.listener(Self::menu_dismiss))
             .cursor(gpui::CursorStyle::Arrow)
             .min_w(px(160.0))
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size))
             .children(rows);
 

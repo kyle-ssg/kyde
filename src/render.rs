@@ -9,7 +9,7 @@ impl Render for Kyde {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Agent alerts sound / bounce for the tab on screen too while Kyde is in the back.
         self.agents.window_active = window.is_window_active();
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let fs = px(theme::get().ui_font_size);
         // Track the MAIN window's bounds (this `impl Render` runs only for the main window; the
         // modals are `ModalWindow`). The Diff modal opens at these bounds so it's as big as the
@@ -531,7 +531,7 @@ impl Render for Kyde {
                     .border_1()
                     .border_color(t.divider)
                     .text_color(t.text)
-                    .font_family(theme::font::FAMILY)
+                    .font_family(theme::font::family())
                     .text_size(px(11.0))
                     .child(SharedString::from(format!("{:.0} fps", self.fps.shown))),
             );

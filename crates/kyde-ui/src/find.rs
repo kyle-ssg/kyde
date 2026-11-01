@@ -220,7 +220,7 @@ impl RenderOnce for Bar {
             .border_color(t.divider)
             .rounded_md()
             .shadow_md()
-            .font_family(theme::font::UI_FAMILY)
+            .font_family(theme::font::ui_family())
             .text_size(px(t.ui_font_size))
             .child(find_row)
             .children(replace_row)

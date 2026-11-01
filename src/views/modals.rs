@@ -95,7 +95,7 @@ impl Kyde {
     /// badge, approximate compiled footprint, install state, and an Install/Uninstall button,
     /// filtered live by the search box.
     pub(crate) fn render_plugins_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let t = theme::get();
         let q = self.plugins_query.read(cx).text().to_lowercase();
         let q = q.trim();
@@ -236,7 +236,7 @@ impl Kyde {
     /// "Create New Branch" dialog body (own native window). Name field (`branch_query`) +
     /// Checkout / Overwrite toggles + Cancel / Create.
     pub(crate) fn render_new_branch_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let ui = theme::font::UI_FAMILY;
+        let ui = theme::font::ui_family();
         let t = theme::get();
         let (checkout, overwrite) = (self.new_branch_checkout, self.new_branch_overwrite);
 
@@ -258,7 +258,7 @@ impl Kyde {
                     .border_1()
                     .border_color(t.primary)
                     .bg(t.main_bg)
-                    .font_family(theme::font::FAMILY)
+                    .font_family(theme::font::family())
                     .child(self.branch.query.clone()),
             );
 

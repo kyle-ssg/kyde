@@ -163,11 +163,13 @@ the rounded island panels, while `main_bg`/`panel_bg` are the island surfaces �
 as floating. `ISLAND_RADIUS` / `FRAME_GAP` are non-themeable consts. Adding a palette key means
 adding it to the CVD variants too.
 
-Fonts stay compile-const in `theme::font` (**not** themeable): `UI_FAMILY` = **Inter** (all
-chrome), `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor). Both OFL, bundled
-in `assets/fonts/`, registered at startup via `main::load_fonts`. Chrome render fns thread a
-`ui` family arg; `render_diff` takes none and hard-codes `FAMILY`. (SF Mono was rejected —
-Apple license, not shippable.)
+Fonts are not in `theme.json`. The bundled `theme::font::UI_FAMILY` = **Inter** (all chrome)
+and `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor, and the terminal) are both
+OFL, in `assets/fonts/`, registered at startup via `main::load_fonts`. Draw with the accessors
+`font::ui_family()` / `family()` / `terminal_family()` (+ `terminal_size()`), never the consts:
+they give the bundled family unless a `theme::Overlay` (Linux "Match desktop", never persisted)
+supplies another. Chrome render fns thread a `ui` family arg. (SF Mono was rejected — Apple
+license, not shippable.)
 
 ## Build / run
 Rust 1.96 + Metal Toolchain are installed. gpui needs Apple's Metal Toolchain to compile

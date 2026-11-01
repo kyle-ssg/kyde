@@ -678,7 +678,7 @@ impl Kyde {
                             .border_1()
                             .border_color(t.divider)
                             .bg(t.main_bg)
-                            .font_family(theme::font::FAMILY)
+                            .font_family(theme::font::family())
                             .child(self.agents.default_cmd_input.clone()),
                     ),
             )
