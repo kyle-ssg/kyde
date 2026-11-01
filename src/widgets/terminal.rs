@@ -688,11 +688,15 @@ impl TerminalView {
         .detach();
     }
 
-    /// Relay a key's raw bytes to the PTY from an action handler (Enter / backspace / escape): jump to
-    /// the live screen, write, repaint — the same steps `on_key` does for typed keys.
+    /// Relay a key's raw bytes to the PTY (typed keys from `on_key`; Enter / backspace / escape
+    /// from their action handlers): jump to the live screen, accept Claude's prompt suggestion
+    /// first when the key acts on it, write, repaint.
     fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
         self.scroll(Scroll::Bottom);
+        if takes_suggestion(&bytes) {
+            self.accept_suggestion(cx);
+        }
         self.write(bytes);
         cx.notify();
     }
@@ -738,14 +742,7 @@ impl TerminalView {
 
         if let Some(bytes) = key_bytes(key, m.control, ks.key_char.as_deref()) {
             if !bytes.is_empty() {
-                // Any keystroke jumps back to the live screen (out of scrollback).
-                self.last_input = Some(std::time::Instant::now());
-                self.scroll(Scroll::Bottom);
-                if edits_at_cursor(&bytes) {
-                    self.accept_suggestion(cx);
-                }
-                self.write(bytes);
-                cx.notify();
+                self.send_key(bytes, cx);
             }
         }
     }
@@ -1448,12 +1445,11 @@ impl Render for TerminalView {
             // here rather than let it fall through to the app action (which deleted the selected
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
             .on_action(cx.listener(|this, _: &crate::TerminalEnter, _w, cx| {
-                this.taken_suggestion = None;
                 this.send_key(b"\r".to_vec(), cx);
+                this.taken_suggestion = None;
                 cx.emit(TerminalEvent::Submitted);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
-                this.accept_suggestion(cx);
                 this.send_key(vec![0x7f], cx);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
@@ -2363,9 +2359,12 @@ fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
     Some((text.split_whitespace().collect::<Vec<_>>().join(" "), end))
 }
 
-/// Whether a key's bytes edit the input at the cursor: typed text, ← or Backspace.
-fn edits_at_cursor(bytes: &[u8]) -> bool {
-    bytes == b"\x1b[D" || bytes == [0x7f] || bytes.first().is_some_and(|&b| b >= 0x20 && b != 0x7f)
+/// Whether a key's bytes act on Claude's input as if its prompt suggestion were typed there:
+/// typed text, ← or Backspace edit at the cursor, and Enter sends it — Claude's own Enter
+/// skips a suggestion and finds the box empty.
+fn takes_suggestion(bytes: &[u8]) -> bool {
+    matches!(bytes, b"\x1b[D" | b"\r" | [0x7f])
+        || bytes.first().is_some_and(|&b| b >= 0x20 && b != 0x7f)
 }
 
 /// Translate a (non-⌘) key press to the bytes to write to the PTY, or `None` if the key
@@ -2751,5 +2750,12 @@ mod tests {
             Some(("yes commit it".into(), GridPoint::new(Line(1), Column(15))))
         );
         assert_eq!(box_with("yes commit it"), None);
+    }
+
+    /// Enter on a suggestion sends it, as it would typed text — Claude alone submits nothing.
+    #[test]
+    fn enter_takes_claude_prompt_suggestion() {
+        assert!(takes_suggestion(b"\r"));
+        assert!(!takes_suggestion(b"\x1b"));
     }
 }
