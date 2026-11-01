@@ -45,6 +45,20 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.10.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.1...kyde-v2.10.0) (2026-11-01)
+
+
+### Features
+
+* **linux:** Match desktop with your terminal's look and your desktop's text, a File / View / Help menu bar, file drops on the terminal, and an AppImage for glibc 2.35+ ([#131](https://github.com/kyle-ssg/kyde/issues/131)) ([4dd3c17](https://github.com/kyle-ssg/kyde/commit/4dd3c17f6a0d8fbed0f1e6319e2c2a33eca99480))
+* local builds show the Ky logo upside down ([#132](https://github.com/kyle-ssg/kyde/issues/132)) ([93f3922](https://github.com/kyle-ssg/kyde/commit/93f392235094b166bd55246f2c4e51d15e208156))
+
+
+### Bug Fixes
+
+* **agents:** Issues and Pull Requests find gh when Kyde is opened from the Dock ([#134](https://github.com/kyle-ssg/kyde/issues/134)) ([9c30353](https://github.com/kyle-ssg/kyde/commit/9c303530a2238d45fa6f03d3ec183b4968efca68))
+* release-please skips the vendored cosmic-text, and dropped paths stay quoted in fish ([#135](https://github.com/kyle-ssg/kyde/issues/135)) ([35c50b9](https://github.com/kyle-ssg/kyde/commit/35c50b9e53b079053623393e554336110697cee9))
+
 ## [2.9.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.0...kyde-v2.9.1) (2026-11-01)
 
 
