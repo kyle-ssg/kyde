@@ -2468,6 +2468,10 @@ struct Kyde {
     settings_section: SettingsSection,
     /// The Appearance → Theme select dropdown.
     settings_theme: ui::SelectState,
+    /// Appearance → Theme → Match desktop (Linux): draw with the desktop's fonts and colours
+    /// (a `theme::Overlay`). Persisted in `ui.json`.
+    #[cfg(target_os = "linux")]
+    match_desktop: bool,
     /// The Keymap section's shortcut editor (recording state + last change's note).
     keymap_editor: KeymapEditor,
     /// Cached `(path, registered family name)` for the open font file's preview.

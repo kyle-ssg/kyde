@@ -80,14 +80,25 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// Theme select — the reusable `ui::select` over the named palettes. The dropdown floats
-    /// over the content (deferred absolute overlay), so it doesn't shove the size rows down.
-    /// Picking a palette applies it live (preserving the user's font sizes / row height).
+    /// Theme select — the reusable `ui::select` over the named palettes (+ Match desktop on
+    /// Linux). The dropdown floats over the content (deferred absolute overlay), so it doesn't
+    /// shove the size rows down. Picking a palette applies it live (preserving the user's font
+    /// sizes / row height).
     pub(crate) fn theme_select(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme::get();
         let presets = theme::Theme::presets();
         let labels: Vec<&'static str> = presets.iter().map(|(l, _)| *l).collect();
         let selected = presets.iter().position(|(_, p)| t.same_palette(p));
+        // Linux: Match desktop, after the presets.
+        #[cfg(target_os = "linux")]
+        let (labels, selected) = (
+            [labels, vec!["Match desktop"]].concat(),
+            if self.match_desktop {
+                Some(presets.len())
+            } else {
+                selected
+            },
+        );
         div()
             .flex()
             .flex_row()
@@ -109,18 +120,36 @@ impl Kyde {
                 &self.settings_theme,
                 |k: &mut Kyde| &mut k.settings_theme,
                 |_this, _cx| {},
-                |_this, i, _cx| {
-                    if let Some((_, palette)) = theme::Theme::presets().get(i) {
-                        theme::apply_palette(*palette);
-                    }
-                },
+                Kyde::pick_theme,
             ))
+    }
+
+    /// Theme select entry `i`: a preset (leaving Match desktop), or Match desktop, which
+    /// re-reads the desktop when already on.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    fn pick_theme(&mut self, i: usize, cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        {
+            if i == theme::Theme::presets().len() {
+                self.set_match_desktop(true, cx);
+                return;
+            }
+            if self.match_desktop {
+                self.set_match_desktop(false, cx);
+            }
+        }
+        if let Some((_, palette)) = theme::Theme::presets().get(i) {
+            theme::apply_palette(*palette);
+        }
     }
 
     /// Appearance section: theme + the three px size controls (live-applied), and on Linux
     /// where the menus live.
     fn settings_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
+        // A size Match desktop took from the desktop isn't Kyde's to step.
+        let overlay = theme::overlay();
+        let from_desktop = |f: Option<theme::font::Face>| f.and_then(|f| f.size).is_some();
         let section = div()
             .flex()
             .flex_col()
@@ -140,6 +169,7 @@ impl Kyde {
                 8.0,
                 40.0,
                 1.0,
+                from_desktop(overlay.ui),
                 |th, v| th.ui_font_size = v,
             ))
             .child(self.size_row(
@@ -150,6 +180,7 @@ impl Kyde {
                 8.0,
                 40.0,
                 1.0,
+                from_desktop(overlay.editor),
                 |th, v| th.editor_font_size = v,
             ))
             .child(self.size_row(
@@ -160,6 +191,7 @@ impl Kyde {
                 16.0,
                 40.0,
                 2.0,
+                false,
                 |th, v| th.tree_row_height = v,
             ));
         #[cfg(target_os = "linux")]
@@ -241,7 +273,8 @@ impl Kyde {
 
     /// A labelled `[−] value [+]` px stepper. `apply` writes the clamped value into the live
     /// theme (saved + repainted immediately). `value` is the current snapshot; after a click
-    /// the body re-renders and reads the new value.
+    /// the body re-renders and reads the new value. A size `from_desktop` (Match desktop) shows
+    /// without the stepper.
     #[allow(clippy::too_many_arguments)]
     fn size_row(
         &self,
@@ -252,9 +285,25 @@ impl Kyde {
         lo: f32,
         hi: f32,
         step: f32,
+        from_desktop: bool,
         apply: fn(&mut theme::Theme, f32),
     ) -> gpui::AnyElement {
         let t = theme::get();
+        if from_desktop {
+            return div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(140.0)).text_color(t.secondary_text).child(label))
+                .child(
+                    div()
+                        .text_color(t.text)
+                        .child(SharedString::from(format!("{value:.0}"))),
+                )
+                .child(div().text_color(t.line_number).child("from desktop"))
+                .into_any_element();
+        }
         let step_btn =
             |bid: SharedString, sym: &'static str, delta: f32, cx: &mut Context<Self>| {
                 div()
@@ -1443,6 +1492,55 @@ impl Kyde {
         self.keymap.save();
         apply_keymap(cx, &self.keymap);
         cx.notify();
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Kyde {
+    /// Turn Match desktop on (read the desktop, then draw with it) or off (back to the saved
+    /// palette and the bundled fonts at once). Persisted in `ui.json`.
+    pub(crate) fn set_match_desktop(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.match_desktop = on;
+        crate::save_ui_bool("match_desktop", on);
+        if on {
+            self.read_desktop_look(cx);
+        } else {
+            theme::set_overlay(theme::Overlay::default());
+            cx.refresh_windows();
+        }
+    }
+
+    /// Read the desktop's fonts and colours off the UI thread, then lay them over the theme —
+    /// unless Match desktop was turned off meanwhile.
+    pub(crate) fn read_desktop_look(&mut self, cx: &mut Context<Self>) {
+        let text_system = cx.text_system().clone();
+        cx.spawn(async move |this, cx| {
+            let overlay = cx
+                .background_executor()
+                .spawn(async move {
+                    // gpui's own font list: a family only switches when gpui can draw it.
+                    let families = text_system.all_font_names();
+                    let gpui_family = |family: &str| {
+                        families
+                            .iter()
+                            .find(|f| f.eq_ignore_ascii_case(family))
+                            .cloned()
+                    };
+                    crate::platform::desktop::read(
+                        &crate::platform::desktop::Probe::here(),
+                        &gpui_family,
+                    )
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.match_desktop {
+                    theme::set_overlay(overlay);
+                    cx.refresh_windows();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 }
 

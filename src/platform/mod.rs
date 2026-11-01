@@ -3,6 +3,8 @@
 pub(crate) mod alert;
 pub(crate) mod clipboard;
 #[cfg(target_os = "linux")]
+pub(crate) mod desktop;
+#[cfg(target_os = "linux")]
 pub(crate) mod input_method;
 #[cfg(unix)]
 pub(crate) mod instance;

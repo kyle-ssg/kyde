@@ -105,7 +105,7 @@ editor/  mdview.rs  terminal.rs  remote_img.rs
 clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
 terminal_app.rs (Open in Terminal off macOS)  window_icon.rs (X11 window icon)
 keyboard_layout.rs (Shift + symbol keys on the active Linux layout)  input_method.rs (no XIM for
-plain layouts on X11)
+plain layouts on X11)  desktop/ (Linux "Match desktop": the desktop's fonts + colours)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/

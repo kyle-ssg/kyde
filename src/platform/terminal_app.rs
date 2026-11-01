@@ -89,13 +89,7 @@ fn candidates(env_terminal: Option<&str>, setting: Option<&str>) -> Vec<String> 
 /// The gsettings schema holding the preferred terminal on the desktop named by
 /// `XDG_CURRENT_DESKTOP` (a `:`-separated list, e.g. `X-Cinnamon` or `ubuntu:GNOME`).
 fn terminal_schema(desktops: &str) -> Option<&'static str> {
-    let is = |name: &str| {
-        desktops.split(':').any(|d| {
-            d.eq_ignore_ascii_case(name)
-                || d.strip_prefix("X-")
-                    .is_some_and(|d| d.eq_ignore_ascii_case(name))
-        })
-    };
+    let is = |name: &str| names_desktop(desktops, name);
     if is("Cinnamon") {
         Some("org.cinnamon.desktop.default-applications.terminal")
     } else if is("MATE") {
@@ -108,6 +102,16 @@ fn terminal_schema(desktops: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Whether `XDG_CURRENT_DESKTOP` (`desktops`) names the desktop `name`, with or without the
+/// `X-` prefix (`X-Cinnamon`).
+pub(super) fn names_desktop(desktops: &str, name: &str) -> bool {
+    desktops.split(':').any(|d| {
+        d.eq_ignore_ascii_case(name)
+            || d.strip_prefix("X-")
+                .is_some_and(|d| d.eq_ignore_ascii_case(name))
+    })
 }
 
 /// The `exec` key of `schema`, read with the `gsettings` found on `path`. `None` when
@@ -126,14 +130,20 @@ fn desktop_setting(schema: &str, path: &OsStr) -> Option<String> {
     gsettings_string(&String::from_utf8_lossy(&out.stdout))
 }
 
-/// A gsettings string as printed (`'gnome-terminal'`), unquoted; `None` when empty.
-fn gsettings_string(printed: &str) -> Option<String> {
-    let v = printed.trim().trim_matches('\'').trim();
+/// A gsettings value as printed, unquoted (`'gnome-terminal'`, or `"It's Mono 10"` when the
+/// string holds a `'`); `None` when empty.
+pub(super) fn gsettings_string(printed: &str) -> Option<String> {
+    let v = printed.trim();
+    let v = ['\'', '"']
+        .into_iter()
+        .find_map(|q| v.strip_prefix(q).and_then(|v| v.strip_suffix(q)))
+        .unwrap_or(v)
+        .trim();
     (!v.is_empty()).then(|| v.to_string())
 }
 
 /// `name` as an executable file: itself when it holds a `/`, else the first match on `path`.
-fn find_on(name: &str, path: &OsStr) -> Option<PathBuf> {
+pub(super) fn find_on(name: &str, path: &OsStr) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let runnable = |p: &Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
@@ -278,6 +288,11 @@ esac"#,
             gsettings_string("'gnome-terminal'\n").as_deref(),
             Some("gnome-terminal")
         );
+        assert_eq!(
+            gsettings_string("\"It's Mono 10\"\n").as_deref(),
+            Some("It's Mono 10")
+        );
+        assert_eq!(gsettings_string("true\n").as_deref(), Some("true"));
         assert_eq!(gsettings_string("''\n"), None);
         assert_eq!(gsettings_string(""), None);
     }
