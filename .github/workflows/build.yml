@@ -44,6 +44,7 @@ jobs:
       # frameworks (Metal/AppKit) — nothing to install.
       - name: Install Linux deps
         if: runner.os == 'Linux'
+        # fish: the terminal's dropped-path quoting is tested against it as well as sh.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -51,7 +52,7 @@ jobs:
             libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
             libfontconfig-dev libfreetype-dev \
             libx11-dev libxcb1-dev libvulkan-dev \
-            clang cmake
+            clang cmake fish
 
       - name: Format check
         run: cargo fmt --all -- --check

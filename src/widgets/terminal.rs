@@ -1377,11 +1377,19 @@ fn shell_quoted(paths: &[PathBuf]) -> String {
         let Some(s) = p.to_str().filter(|s| !s.contains(char::is_control)) else {
             continue;
         };
-        // POSIX shells: single quotes, an embedded `'` written `'\''`.
+        // POSIX shells and fish: single quotes, with each `'` and `\` written outside them
+        // (`'\''`, `'\\'`). Fish reads `\'` and `\\` as escapes even inside single quotes, so a
+        // `\` left inside could end the quote early.
         #[cfg(not(target_os = "windows"))]
         {
             out.push('\'');
-            out.push_str(&s.replace('\'', r"'\''"));
+            for c in s.chars() {
+                match c {
+                    '\'' => out.push_str(r"'\''"),
+                    '\\' => out.push_str(r"'\\'"),
+                    c => out.push(c),
+                }
+            }
             out.push_str("' ");
         }
         // cmd.exe doesn't quote with `'`; double quotes do, and a Windows path can't hold `"`.
@@ -2855,28 +2863,33 @@ mod tests {
         );
         assert_eq!(dropped(&["/tmp/it's.png"]), r"'/tmp/it'\''s.png' ");
         assert_eq!(dropped(&["/tmp/café 日本.png"]), "'/tmp/café 日本.png' ");
+        assert_eq!(dropped(&[r"/tmp/a\b"]), r"'/tmp/a'\\'b' ");
         let all = [
             "/a",
             "/My Shots/b c.png",
             "/it's",
             "/\"$HOME\" `x` \\y",
             "/café 日本.png",
+            // Would end fish's quote early: a trailing `\`, and `\` before a `'`.
+            "/ends\\",
+            "/b\\'; echo pwned; echo \\",
         ];
-        assert_eq!(
-            dropped(&all),
-            "'/a' '/My Shots/b c.png' '/it'\\''s' '/\"$HOME\" `x` \\y' '/café 日本.png' "
-        );
-        // A POSIX shell reads each back as exactly the path, nothing expanded.
+        // A POSIX shell, and fish where installed (CI's Linux job has it), reads each back as
+        // exactly the path, nothing expanded or run.
         #[cfg(unix)]
-        {
-            let out = std::process::Command::new("sh")
+        for shell in ["sh", "fish"] {
+            let Ok(out) = std::process::Command::new(shell)
                 .arg("-c")
                 .arg(format!("printf '%s\\n' {}", dropped(&all)))
                 .output()
-                .unwrap();
+            else {
+                assert_ne!(shell, "sh", "sh is always there");
+                continue;
+            };
             assert_eq!(
                 String::from_utf8(out.stdout).unwrap(),
-                all.join("\n") + "\n"
+                all.join("\n") + "\n",
+                "{shell}"
             );
         }
     }
