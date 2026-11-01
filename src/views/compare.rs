@@ -320,6 +320,7 @@ impl Kyde {
             .child(header)
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .flex_1()
@@ -336,7 +337,8 @@ impl Kyde {
                         rw,
                         self.compare.right.clone().into_any_element(),
                         &scroll,
-                    )),
+                    ))
+                    .children(self.find_bar(FindHost::Modal(ModalKind::Compare), cx)),
             )
             .into_any_element()
     }

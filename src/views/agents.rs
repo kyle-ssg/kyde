@@ -4659,7 +4659,15 @@ impl Kyde {
                         .border_1()
                         .border_color(t.divider)
                         .bg(t.panel_bg)
-                        .child(self.agents.gh_comment.clone()),
+                        // A comment longer than the box scrolls inside it.
+                        .child(
+                            div()
+                                .id("gh-comment-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.agents.gh_comment_scroll)
+                                .child(self.agents.gh_comment.clone()),
+                        ),
                 )
                 .child(buttons)
                 .into_any_element(),

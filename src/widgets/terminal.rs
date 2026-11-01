@@ -1622,89 +1622,22 @@ impl TerminalView {
 
     /// The find bar, floated at the top right over the output.
     fn render_find(&self, f: &TermFind, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = theme::get();
-        let has_query = f.regex.is_some();
-        let label = match (has_query, f.count, f.index) {
-            (false, ..) => String::new(),
-            (true, 0, _) => "No results".to_string(),
-            (true, n, 0) => n.to_string(),
-            (true, n, i) => format!("{i}/{n}"),
-        };
-        let btn = |id: &'static str, icon: &'static str, tip: &'static str| {
-            crate::ui::icon_btn(id, 22.0)
-                .tooltip(crate::ui::tip(tip))
-                .child(svg().path(icon).size(px(14.0)).text_color(t.line_number))
-        };
-        let (older, newer) = if cfg!(target_os = "macos") {
-            ("Older match  (↩ / ⌘G)", "Newer match  (⇧↩ / ⇧⌘G)")
-        } else {
-            (
-                "Older match  (Enter / F3)",
-                "Newer match  (Shift+Enter / Shift+F3)",
-            )
-        };
-        div()
-            .absolute()
-            .top(px(6.0))
-            .right(px(SB_BAR + 6.0))
-            .occlude()
-            // Clicks on the bar stay on it (not a selection in the output underneath).
-            .on_mouse_down(MouseButton::Left, |_e, _w, cx| cx.stop_propagation())
-            .on_mouse_down(MouseButton::Right, |_e, _w, cx| cx.stop_propagation())
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .pl_2()
-            .pr_1()
-            .py_1p5()
-            .bg(t.panel_bg)
-            .border_1()
-            .border_color(t.divider)
-            .rounded_md()
-            .shadow_md()
-            .font_family(theme::font::UI_FAMILY)
-            .text_size(px(t.ui_font_size))
-            .child(
-                div()
-                    .w(px(200.0))
-                    .h(px(26.0))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .bg(t.main_bg)
-                    .border_1()
-                    .border_color(t.divider)
-                    .rounded_md()
-                    .child(f.query.clone()),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .min_w(px(64.0))
-                    .px_1()
-                    .text_color(t.line_number)
-                    .text_size(px(t.ui_font_size - 1.0))
-                    .child(label),
-            )
-            .child(
-                btn("term-find-older", "icons/arrow-up.svg", older).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.find_step(Pick::Older, cx)),
-                ),
-            )
-            .child(
-                btn("term-find-newer", "icons/arrow-down.svg", newer).on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, _w, cx| this.find_step(Pick::Newer, cx)),
-                ),
-            )
-            .child(
-                btn("term-find-close", "icons/x.svg", "Close  (Esc)").on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _e, window, cx| this.close_find(window, cx)),
-                ),
-            )
+        let (next, prev) = crate::FIND_STEP_KEYS;
+        let bar = crate::ui::find::Bar::new(
+            "term-find",
+            f.query.clone(),
+            crate::ui::find::match_label(f.regex.is_some(), f.count, f.index),
+        )
+        .on_up(
+            format!("Older match  ({next})"),
+            cx.listener(|this, _e, _w, cx| this.find_step(Pick::Older, cx)),
+        )
+        .on_down(
+            format!("Newer match  ({prev})"),
+            cx.listener(|this, _e, _w, cx| this.find_step(Pick::Newer, cx)),
+        )
+        .on_close(cx.listener(|this, _e, window, cx| this.close_find(window, cx)));
+        crate::ui::find::floating(bar)
     }
 
     /// The pill showing your last prompt once it has scrolled off the top, floated at the top

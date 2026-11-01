@@ -1627,7 +1627,7 @@ impl Kyde {
         let mode = self.merge.compare;
         let show_ours = matches!(mode, MergeCompare::MergeView3 | MergeCompare::LeftMiddle);
         let show_theirs = matches!(mode, MergeCompare::MergeView3 | MergeCompare::RightMiddle);
-        let mut panes = div().flex().flex_row().flex_1().min_h_0();
+        let mut panes = div().relative().flex().flex_row().flex_1().min_h_0();
         if show_ours {
             panes = panes
                 .child(pane(
@@ -1654,6 +1654,8 @@ impl Kyde {
                     &scroll,
                 ));
         }
+
+        let panes = panes.children(self.find_bar(FindHost::Modal(ModalKind::Merge), cx));
 
         // Column headers over the panes (mirroring whichever panes are shown).
         let hdr = |label: String| {
@@ -1742,6 +1744,7 @@ impl Kyde {
             .child(heads)
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .flex_1()
@@ -1764,7 +1767,8 @@ impl Kyde {
                         rw,
                         self.merge.cmp_r.clone().into_any_element(),
                         &scroll,
-                    )),
+                    ))
+                    .children(self.find_bar(FindHost::Modal(ModalKind::Merge), cx)),
             )
             .into_any_element()
     }

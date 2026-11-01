@@ -368,7 +368,15 @@ impl Kyde {
                     .p_2()
                     .bg(t.bg_mid)
                     .rounded_md()
-                    .child(self.commit.editor.clone()),
+                    // A message longer than the box scrolls inside it.
+                    .child(
+                        div()
+                            .id("commit-msg-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.commit.msg_scroll)
+                            .child(self.commit.editor.clone()),
+                    ),
             )
             // Cancel + Commit on their own line, right-aligned.
             .child(ui::modal_footer().child(cancel_btn).child(commit_btn))

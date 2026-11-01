@@ -5,131 +5,35 @@
 use crate::*;
 
 impl Kyde {
-    /// Find / replace bar shown atop the editor (cmd-f / cmd-r). Live-highlights matches;
-    /// enter / cmd-g cycle, the buttons replace.
-    pub(crate) fn render_find_bar(
-        &self,
-        ui: &'static str,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let t = theme::get();
+    /// Find / replace bar (⌘F / ⌘R), floated at the top right of the panes it searches.
+    /// Live-highlights matches; ↩ / ⌘G cycle, the buttons replace.
+    fn render_find_bar(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let (next, prev) = FIND_STEP_KEYS;
         let count = self.find.matches.len();
-        let label = if count == 0 {
-            "No results".to_string()
-        } else {
-            format!("{}/{}", self.find.idx + 1, count)
-        };
-        let input_box = |child: gpui::Entity<CodeEditor>| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .h(px(26.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .bg(t.main_bg)
-                .border_1()
-                .border_color(t.divider)
-                .rounded_md()
-                .child(child)
-        };
-        let btn = |glyph: &str, id: &'static str| {
-            div()
-                .id(SharedString::from(id))
-                .size(px(24.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .text_color(t.secondary_text)
-                .hover(|s| s.bg(t.bg_light).text_color(t.text))
-                .cursor_pointer()
-                .child(SharedString::from(glyph.to_string()))
-        };
-
-        let find_row = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(input_box(self.find.query.clone()))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(t.line_number)
-                    .text_size(px(theme::get().ui_font_size - 1.0))
-                    .child(label),
-            )
-            .child(btn("‹", "find-prev").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, w, cx| this.find_prev(&FindPrev, w, cx)),
-            ))
-            .child(btn("›", "find-next").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, w, cx| this.find_next(&FindNext, w, cx)),
-            ))
-            .child(btn("×", "find-close").on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _e, w, cx| this.close_find(&CloseFind, w, cx)),
-            ));
-
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px_2()
-            .py_1p5()
-            .bg(t.panel_bg)
-            .border_b_1()
-            .border_color(t.divider)
-            .font_family(ui)
-            .text_size(px(theme::get().ui_font_size))
-            .child(find_row);
-
+        let has_query = !self.find.query.read(cx).text().is_empty();
+        let current = if count == 0 { 0 } else { self.find.idx + 1 };
+        let mut bar = ui::find::Bar::new(
+            "find-bar",
+            self.find.query.clone(),
+            ui::find::match_label(has_query, count, current),
+        )
+        .on_up(
+            format!("Previous match  ({prev})"),
+            cx.listener(|this, _e, w, cx| this.find_prev(&FindPrev, w, cx)),
+        )
+        .on_down(
+            format!("Next match  ({next})"),
+            cx.listener(|this, _e, w, cx| this.find_next(&FindNext, w, cx)),
+        )
+        .on_close(cx.listener(|this, _e, w, cx| this.close_find(&CloseFind, w, cx)));
         if self.find.replace {
-            let replace_row = div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(input_box(self.find.replace_query.clone()))
-                .child(
-                    div()
-                        .id("replace-one")
-                        .px_2()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .rounded_md()
-                        .text_color(t.secondary_text)
-                        .hover(|s| s.bg(t.bg_light).text_color(t.text))
-                        .cursor_pointer()
-                        .child("Replace")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _e, w, cx| this.replace_one(&ReplaceOne, w, cx)),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("replace-all")
-                        .px_2()
-                        .h(px(24.0))
-                        .flex()
-                        .items_center()
-                        .rounded_md()
-                        .text_color(t.secondary_text)
-                        .hover(|s| s.bg(t.bg_light).text_color(t.text))
-                        .cursor_pointer()
-                        .child("All")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, _e, w, cx| this.replace_all(&ReplaceAll, w, cx)),
-                        ),
-                );
-            col = col.child(replace_row);
+            bar = bar.replace(
+                self.find.replace_query.clone(),
+                cx.listener(|this, _e, w, cx| this.replace_one(&ReplaceOne, w, cx)),
+                cx.listener(|this, _e, w, cx| this.replace_all(&ReplaceAll, w, cx)),
+            );
         }
-        col.into_any_element()
+        ui::find::floating(bar).into_any_element()
     }
 
     pub(crate) fn act_find(&mut self, _: &FindInFile, window: &mut Window, cx: &mut Context<Self>) {
@@ -241,14 +145,14 @@ impl Kyde {
                 .is_some_and(|t| self.find_candidates(host).contains(t))
     }
 
-    /// The find bar, when it's shown in `host` (see `find_shown`).
+    /// The find bar, when it's shown in `host` (see `find_shown`) — floated, so the caller
+    /// adds it to a `relative` container over the panes it searches.
     pub(crate) fn find_bar(
         &self,
         host: FindHost,
-        ui: &'static str,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        self.find_shown(host).then(|| self.render_find_bar(ui, cx))
+        self.find_shown(host).then(|| self.render_find_bar(cx))
     }
 
     pub(crate) fn close_find(

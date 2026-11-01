@@ -1405,6 +1405,7 @@ impl Kyde {
             .child(header)
             .child(
                 div()
+                    .relative()
                     .flex()
                     .flex_row()
                     .flex_1()
@@ -1423,7 +1424,8 @@ impl Kyde {
                         self.lh.right.clone().into_any_element(),
                         &scroll,
                         right_placeholder,
-                    )),
+                    ))
+                    .children(self.find_bar(FindHost::Modal(ModalKind::LocalHistory), cx)),
             );
 
         let mut root = div()

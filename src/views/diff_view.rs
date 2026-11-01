@@ -62,8 +62,9 @@ impl Kyde {
     }
 
     /// The inline diff with the install banner (when its file's language pack isn't installed)
-    /// and the find/replace bar (⌘F / ⌘R, while it's searching one of the panes) over it.
-    /// Every main-window view showing the diff renders it through here.
+    /// over it, and the find/replace bar (⌘F / ⌘R, while it's searching one of the panes)
+    /// floated at its top right. Every main-window view showing the diff renders it through
+    /// here.
     pub(crate) fn render_diff_with_find(
         &mut self,
         ui: &'static str,
@@ -76,10 +77,23 @@ impl Kyde {
             .diff_pending_pack()
             .zip(self.diff.path.clone())
             .map(|(pack, path)| self.render_install_banner(pack, &path, true, ui, fs, cx));
-        let bar = self.find_bar(FindHost::Main, ui, cx);
+        let bar = self.find_bar(FindHost::Main, cx);
         if banner.is_none() && bar.is_none() {
             return diff;
         }
+        let diff = match bar {
+            Some(bar) => div()
+                .relative()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .child(diff)
+                .child(bar)
+                .into_any_element(),
+            None => diff,
+        };
         div()
             .flex()
             .flex_col()
@@ -87,7 +101,6 @@ impl Kyde {
             .min_h_0()
             .min_w_0()
             .children(banner)
-            .children(bar)
             .child(diff)
             .into_any_element()
     }

@@ -232,13 +232,20 @@ impl Kyde {
             // is computed HERE (menu-open), not in the render arm, so an open menu never
             // re-parses the buffer per frame.
             let menu_path = self.browse.open_path.clone();
+            // The find bar (⌘F) floats over the editor's top right — not over an image.
+            let find_bar = image
+                .is_none()
+                .then(|| self.find_bar(FindHost::Main, cx))
+                .flatten();
             let editor_area = div()
+                .relative()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .child(editor_area)
+                .children(find_bar)
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
@@ -285,9 +292,6 @@ impl Kyde {
                     (self.pending_pack(), self.browse.open_path.clone())
                 {
                     r = r.child(self.render_install_banner(pack, &path, false, ui, fs, cx));
-                }
-                if let Some(bar) = self.find_bar(FindHost::Main, ui, cx) {
-                    r = r.child(bar);
                 }
             }
             r.child(editor_area)
