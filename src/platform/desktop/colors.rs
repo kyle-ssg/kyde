@@ -419,6 +419,9 @@ fn text_on(bg: Color, preferred: Option<Color>) -> Color {
 /// Minimum contrast for body text on its background (WCAG AA).
 const TEXT_CONTRAST: f32 = 4.5;
 
+/// Minimum contrast for icons and other non-text parts on their background (WCAG 1.4.11).
+const ICON_CONTRAST: f32 = 3.0;
+
 /// The desktop's surfaces + text, when they read: text at [`TEXT_CONTRAST`] on both the
 /// content and the window background.
 struct Surfaces {
@@ -472,7 +475,16 @@ pub(super) fn palette(c: &Colors) -> Option<Theme> {
         } else {
             s.text
         };
-        t.line_number = grey(0.35);
+        // Inactive icons and the gutter: the left rail draws them on the window background,
+        // the editor on the content's. Where those differ (a grey window round white or
+        // black fields) the plain mix can vanish on one of them, so it moves on toward the
+        // text until it reads at ICON_CONTRAST on both.
+        t.line_number = (35u8..=100)
+            .map(|k| grey(f32::from(k) / 100.0))
+            .find(|c| {
+                contrast(*c, s.main) >= ICON_CONTRAST && contrast(*c, s.frame) >= ICON_CONTRAST
+            })
+            .unwrap_or(s.text);
         t.caret_row = grey(0.04);
         t.bg_mid = grey(0.08);
         t.divider = grey(0.12);
@@ -739,5 +751,43 @@ mod tests {
         assert_eq!(hex(t.primary_text), 0x000000);
         // Nothing said: the user's own palette stays.
         assert!(palette(&Colors::default()).is_none());
+    }
+
+    #[test]
+    fn inactive_icons_read_on_the_window_and_the_content() {
+        // A grey window (the left rail sits on it) round black fields, and round white ones:
+        // a grey mixed from the fields alone vanishes on the rail.
+        for (frame, main, text) in [
+            (0x3C3C3C, 0x000000, 0xC0C0C0),
+            (0xC0C0C0, 0xFFFFFF, 0x000000),
+        ] {
+            let t = palette(&Colors {
+                window_bg: Some(rgb_hex(frame)),
+                view_bg: Some(rgb_hex(main)),
+                view_fg: Some(rgb_hex(text)),
+                ..Colors::default()
+            })
+            .unwrap();
+            assert!(
+                contrast(t.line_number, t.frame_bg) >= ICON_CONTRAST,
+                "on {frame:06X}"
+            );
+            assert!(
+                contrast(t.line_number, t.main_bg) >= ICON_CONTRAST,
+                "on {main:06X}"
+            );
+            // Still quieter than the text.
+            assert!(contrast(t.line_number, t.main_bg) < contrast(t.text, t.main_bg));
+        }
+        // One background, where the plain mix already reads: it's kept.
+        let (bg, fg) = (rgb_hex(0x242424), rgb_hex(0xFFFFFF));
+        let t = palette(&Colors {
+            window_bg: Some(bg),
+            view_bg: Some(bg),
+            view_fg: Some(fg),
+            ..Colors::default()
+        })
+        .unwrap();
+        assert_eq!(hex(t.line_number), hex(mix(bg, fg, 0.35)));
     }
 }
