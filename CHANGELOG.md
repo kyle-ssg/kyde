@@ -14,6 +14,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * **linux:** the menu bar's items (Open, Recent Projects, Settings, Plugins, What's New, FPS monitor, Clear Data & Restart, Quit) behind a ☰ button in the title strip
 * **linux:** agent alerts play their chime, and show a desktop notification while Kyde is in the background
 * **terminal:** drop files on a terminal or agent tab to type in their paths, quoted for the shell (Claude Code takes a dropped image as pasted)
+* **linux:** a File / View / Help menu bar where the window manager draws the title bar, in one row with the project switcher; F10 opens it, Alt + the underlined letter opens a menu, and Settings → Appearance → Menu bar picks the menu bar or the ☰ button
 
 ### Bug Fixes
 

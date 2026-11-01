@@ -95,8 +95,8 @@ divider.rs    unified divider dragging (Divider enum + geometry + drag methods).
 
 # ── views/ — per-feature modules (render_* + logic for one feature) ──
 agents  branch  browse  changelog  chrome  commit  compare  diff_view  file_ops  find  finder
-history  local_history  merge  modals  notifications  onboarding  projects_view  push  rollback
-settings  tabs  terminal_panel  worktree
+history  local_history  menu_bar (Linux)  merge  modals  notifications  onboarding  projects_view
+push  rollback  settings  tabs  terminal_panel  worktree
 
 # ── widgets/ — gpui-coupled widgets (own Entities/Elements) ──
 editor/  mdview.rs  terminal.rs  remote_img.rs
@@ -117,7 +117,8 @@ kyde-tree     Tree::build/visible — the file-tree model. (std)
 kyde-markdown Block/Span markdown model for the preview. (pulldown-cmark)
 kyde-update   GitHub release check + self-update download/swap, plus the changelog feed
               (`release_notes`/`parse_releases`). (thiserror: UpdateError, serde_json)
-kyde-config   keymap + plugins + projects + history + agents cfg: persistence (JSON, XDG). (serde)
+kyde-config   keymap + plugins + projects + history + agents + window (Linux) cfg: persistence
+              (JSON, XDG). (serde)
 kyde-local-history  per-project snapshot store: content-addressed blobs + append-only
               events.jsonl journal, prune/GC. (sha2)
 kyde-color    tiny RGBA `Color` POD shared by theme/syntax. Zero deps; optional `gpui`

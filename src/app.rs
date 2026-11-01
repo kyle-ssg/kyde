@@ -257,7 +257,7 @@ impl Kyde {
             menu_focus_pending: false,
             menu_return_focus: None,
             main_window_bounds: None,
-            chrome: chrome::WindowChrome::default(),
+            chrome: chrome::WindowChrome::new(),
             diff_view_open: false,
             rollback_win: None,
             new_branch_win: None,

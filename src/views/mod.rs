@@ -16,6 +16,8 @@ mod finder;
 mod history;
 mod keyboard;
 mod local_history;
+#[cfg(target_os = "linux")]
+mod menu_bar;
 mod merge;
 mod modals;
 mod notifications;

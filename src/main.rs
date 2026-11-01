@@ -200,6 +200,18 @@ actions!(
     ]
 );
 
+// The Linux menu bar's keys (`views::menu_bar`): F10 opens the first menu (the ☰ menu where
+// the menus sit behind the button).
+#[cfg(target_os = "linux")]
+actions!(kyde_menu_bar, [MenuKey]);
+
+/// Open the menu bar's Nth menu (Alt + its title's underlined letter). Carries the index, so
+/// it's a derived `Action`.
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Default, Debug, gpui::Action)]
+#[action(namespace = kyde_menu_bar, no_json)]
+struct MenuBarOpen(usize);
+
 /// The native macOS menu bar: the app menu (Settings/Plugins/Quit) + a File menu with
 /// "Open…" and a live "Recent Projects" submenu. Rebuilt whenever recents change (startup +
 /// each `open_project`) so the recent list stays current.
@@ -272,6 +284,59 @@ fn dock_menu(recents: &Recents) -> Vec<gpui::MenuItem> {
         name: "Recent Projects".into(),
         items,
     })]
+}
+
+/// The menu bar's titles on Linux, in order; `menu_bar_menus` fills them.
+#[cfg(target_os = "linux")]
+const MENU_BAR: [&str; 3] = ["File", "View", "Help"];
+
+/// A menu bar title's access key (Alt + it opens the menu): its first letter.
+#[cfg(target_os = "linux")]
+fn menu_bar_access_key(title: &str) -> char {
+    title
+        .chars()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// The menus of the menu bar on Linux (`views::menu_bar`): the macOS menu bar's items, laid
+/// out the way Linux IDEs do — the app menu's Settings, Plugins, Clear Data and Quit join
+/// File, the FPS monitor is under View and What's New under Help. Same items and actions
+/// (`menu_bar_holds_every_menu_bar_item` keeps the two in step).
+#[cfg(target_os = "linux")]
+fn menu_bar_menus(recents: &Recents) -> Vec<Menu> {
+    let [file, view, help] = MENU_BAR;
+    let mut file_items = vec![MenuItem::action("Open…", OpenProject)];
+    // The "Recent Projects" submenu (none without recents), as in the macOS File menu.
+    let recent = dock_menu(recents);
+    if !recent.is_empty() {
+        file_items.push(MenuItem::separator());
+        file_items.extend(recent);
+    }
+    file_items.extend([
+        MenuItem::separator(),
+        MenuItem::action("Settings…", OpenKeymap),
+        MenuItem::action("Plugins…", OpenPlugins),
+        MenuItem::separator(),
+        MenuItem::action("Clear Data & Restart…", ClearData),
+        MenuItem::separator(),
+        MenuItem::action("Quit Kyde", Quit),
+    ]);
+    vec![
+        Menu {
+            name: file.into(),
+            items: file_items,
+        },
+        Menu {
+            name: view.into(),
+            items: vec![MenuItem::action("Toggle FPS Monitor", ToggleFps)],
+        },
+        Menu {
+            name: help.into(),
+            items: vec![MenuItem::action("What's New…", OpenChangelog)],
+        },
+    ]
 }
 
 /// Read what Shift + each symbol key types on the active keyboard layout
@@ -388,6 +453,26 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     ]);
     // Standard quit shortcut (not user-configurable).
     cx.bind_keys([KeyBinding::new("secondary-q", Quit, None)]);
+    // The Linux menu bar (`views::menu_bar`): F10 opens its first menu (or the ☰ menu), Alt +
+    // a title's underlined letter opens that menu. In a terminal both stay the shell's (htop
+    // and mc quit on F10, Alt+F / Alt+B move by word).
+    #[cfg(target_os = "linux")]
+    {
+        let access = |title: &str| format!("alt-{}", menu_bar_access_key(title));
+        cx.bind_keys([KeyBinding::new("f10", MenuKey, Some("Kyde"))]);
+        cx.bind_keys(
+            MENU_BAR
+                .iter()
+                .enumerate()
+                .map(|(i, title)| KeyBinding::new(&access(title), MenuBarOpen(i), Some("Kyde"))),
+        );
+        #[cfg(feature = "terminal")]
+        cx.bind_keys(
+            std::iter::once("f10".to_string())
+                .chain(MENU_BAR.iter().map(|title| access(title)))
+                .map(|k| KeyBinding::new(&k, gpui::NoAction, Some("Terminal"))),
+        );
+    }
     // Close the active editor tab (standard ⌘W; not user-configurable). Global (no context) so
     // it fires no matter what's focused — editor, tree, commit box, terminal.
     cx.bind_keys([KeyBinding::new("secondary-w", CloseTab, None)]);
@@ -722,6 +807,9 @@ enum MenuTarget {
     Branch(String),
     /// The title strip's menu button (off macOS): the menu bar's items (`app_menus`).
     AppMenu,
+    /// The Nth menu of the menu bar on Linux (`menu_bar_menus`).
+    #[cfg(target_os = "linux")]
+    MenuBar(usize),
 }
 
 struct ContextMenu {
@@ -7451,6 +7539,206 @@ mod gpui_smoke_tests {
                 assert!(k.settings_win.is_some(), "Settings… opened Settings");
             })
             .unwrap();
+    }
+
+    /// Linux's menu bar holds every item of the macOS menu bar (the ☰ menu's), each running
+    /// the same action, under File / View / Help.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn menu_bar_holds_every_menu_bar_item() {
+        fn items(menus: Vec<Menu>) -> Vec<(String, String)> {
+            fn walk(items: Vec<MenuItem>, out: &mut Vec<(String, String)>) {
+                for item in items {
+                    match item {
+                        MenuItem::Action { name, action, .. } => {
+                            out.push((name.to_string(), action.name().to_string()));
+                        }
+                        MenuItem::Submenu(menu) => walk(menu.items, out),
+                        MenuItem::Separator | MenuItem::SystemMenu(_) => {}
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            for menu in menus {
+                walk(menu.items, &mut out);
+            }
+            out.sort();
+            out
+        }
+        let recents = Recents {
+            paths: vec![PathBuf::from("/work/alpha"), PathBuf::from("/work/beta")],
+        };
+        let bar = menu_bar_menus(&recents);
+        let titles: Vec<String> = bar.iter().map(|m| m.name.to_string()).collect();
+        assert_eq!(titles, MENU_BAR);
+        assert_eq!(items(bar), items(app_menus(&recents)));
+    }
+
+    /// Linux's menu bar, through the real keys: F10 opens File under its title with the first
+    /// item lit, ← / → walk the menus round (→ steps into Recent Projects first), Alt + a
+    /// title's letter opens that menu and again closes it, ⏎ runs the lit item, ⎋ closes. The
+    /// pointer opens a menu from its title and, with one open, switches as it crosses another.
+    /// Under the ☰ button F10 opens its menu and the Alt letters open nothing; in a terminal
+    /// the shell keeps all of them.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn menu_bar_works_from_keys_and_pointer(cx: &mut TestAppContext) {
+        use kyde_config::window::MenuBar;
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let (handle, dir) = boot(cx);
+        let press = |cx: &mut TestAppContext, keys: &str| {
+            for k in keys.split(' ') {
+                cx.update_window(handle.into(), |_, window, cx| {
+                    let ks = gpui::Keystroke::parse(k).expect("valid keystroke");
+                    window.dispatch_keystroke(ks, cx);
+                })
+                .unwrap();
+                cx.refresh().unwrap(); // a just-opened menu takes focus on its first render
+                cx.run_until_parked();
+            }
+        };
+        // (open menu of the bar, its lit row, its lit flyout row); `None` = no menu open.
+        let state = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, _w, _cx| {
+                    k.context_menu
+                        .as_ref()
+                        .map(|m| (k.open_bar_menu(), m.hl, m.sub_hl))
+                })
+                .unwrap()
+        };
+        handle
+            .update(cx, |k, w, cx| {
+                k.recents.paths = vec![dir.clone()];
+                k.chrome.cfg.menu_bar = MenuBar::Bar;
+                w.focus(&k.focus_handle);
+                cx.notify();
+            })
+            .unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let titles = handle
+            .update(cx, |k, _w, _cx| k.chrome.menu_titles.borrow().clone())
+            .unwrap();
+        assert_eq!(titles.len(), MENU_BAR.len(), "every title laid out");
+
+        press(cx, "f10");
+        assert_eq!(state(cx), Some((Some(0), Some(0), None)));
+        handle
+            .update(cx, |k, _w, _cx| {
+                let m = k.context_menu.as_ref().expect("menu open");
+                assert!(m.at.x == titles[0].left() && m.at.y > titles[0].bottom());
+                let labels: Vec<String> = m
+                    .entries
+                    .iter()
+                    .map(|e| match e {
+                        MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
+                        MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
+                        MenuEntry::Divider => "—".into(),
+                    })
+                    .collect();
+                assert_eq!(
+                    labels,
+                    [
+                        "Open…",
+                        "—",
+                        "Recent Projects ▸",
+                        "—",
+                        "Settings…",
+                        "Plugins…",
+                        "—",
+                        "Clear Data & Restart…",
+                        "—",
+                        "Quit Kyde"
+                    ]
+                );
+            })
+            .unwrap();
+        press(cx, "down right");
+        assert_eq!(
+            state(cx),
+            Some((Some(0), Some(2), Some(0))),
+            "→ enters the flyout"
+        );
+        press(cx, "left");
+        assert_eq!(state(cx), Some((Some(0), Some(2), None)), "← leaves it");
+        press(cx, "left");
+        assert_eq!(
+            state(cx),
+            Some((Some(2), Some(0), None)),
+            "← wraps round to Help"
+        );
+        press(cx, "right right");
+        assert_eq!(state(cx), Some((Some(1), Some(0), None)), "→ → is View");
+        press(cx, "escape");
+        assert_eq!(state(cx), None);
+
+        press(cx, "alt-h");
+        assert_eq!(state(cx), Some((Some(2), Some(0), None)));
+        press(cx, "alt-h");
+        assert_eq!(state(cx), None, "its letter again closes it");
+        let fps_was = handle.update(cx, |k, _w, _cx| k.fps.show).unwrap();
+        press(cx, "alt-v enter");
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_ne!(k.fps.show, fps_was, "View → Toggle FPS Monitor ran");
+                assert!(k.context_menu.is_none());
+            })
+            .unwrap();
+        press(cx, "alt-v enter"); // put it back (it's remembered)
+
+        // The pointer: a title opens its menu; with one open, crossing another title switches
+        // to it, and a press on the open menu's own title closes it.
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        let none = gpui::Modifiers::none();
+        vcx.simulate_click(titles[0].center(), none);
+        assert_eq!(state(cx), Some((Some(0), None, None)));
+        vcx.simulate_mouse_move(titles[1].center(), None, none);
+        assert_eq!(state(cx), Some((Some(1), None, None)));
+        vcx.simulate_click(titles[1].center(), none);
+        assert_eq!(state(cx), None);
+
+        // Under the ☰ button: F10 opens (and closes) its menu, the letters open nothing.
+        handle
+            .update(cx, |k, _w, cx| {
+                k.chrome.cfg.menu_bar = MenuBar::Button;
+                cx.notify();
+            })
+            .unwrap();
+        press(cx, "alt-f");
+        assert_eq!(state(cx), None);
+        press(cx, "f10");
+        handle
+            .update(cx, |k, _w, _cx| {
+                let m = k.context_menu.as_ref().expect("the ☰ menu");
+                assert!(matches!(m.target, MenuTarget::AppMenu) && m.hl == Some(0));
+            })
+            .unwrap();
+        press(cx, "f10");
+        assert_eq!(state(cx), None);
+
+        // In a terminal F10 and the Alt letters reach the shell.
+        #[cfg(feature = "terminal")]
+        cx.update(|cx| {
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let ctx: Vec<gpui::KeyContext> = ["Kyde", "Terminal"]
+                .iter()
+                .map(|n| gpui::KeyContext::parse(n).unwrap())
+                .collect();
+            let ran = |key: &str, ctx: &[gpui::KeyContext]| -> Vec<String> {
+                let ks = gpui::Keystroke::parse(key).unwrap();
+                let (bindings, _) = keymap.bindings_for_input(&[ks], ctx);
+                bindings
+                    .iter()
+                    .map(|b| b.action().name().to_string())
+                    .collect()
+            };
+            for key in ["f10", "alt-f", "alt-v", "alt-h"] {
+                assert!(ran(key, &ctx).is_empty(), "{key} in a terminal ran");
+                assert!(!ran(key, &ctx[..1]).is_empty(), "{key} is bound outside it");
+            }
+        });
     }
 
     /// Keyboard navigation end to end (issue #81), through the real bindings + key contexts:

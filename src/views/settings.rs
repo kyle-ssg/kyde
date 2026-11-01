@@ -117,10 +117,11 @@ impl Kyde {
             ))
     }
 
-    /// Appearance section: theme + the three px size controls (live-applied).
+    /// Appearance section: theme + the three px size controls (live-applied), and on Linux
+    /// where the menus live.
     fn settings_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
-        div()
+        let section = div()
             .flex()
             .flex_col()
             .gap_4()
@@ -160,7 +161,81 @@ impl Kyde {
                 40.0,
                 2.0,
                 |th, v| th.tree_row_height = v,
-            ))
+            ));
+        #[cfg(target_os = "linux")]
+        let section = section.child(self.menu_bar_choice(cx));
+        section.into_any_element()
+    }
+
+    /// Where the menus live (Linux): a menu bar, the ☰ button, or whichever fits the desktop
+    /// (`menu_bar`). Applies at once and persists to `window.json`.
+    #[cfg(target_os = "linux")]
+    fn menu_bar_choice(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        use kyde_config::window::MenuBar;
+        let t = theme::get();
+        let current = self.chrome.cfg.menu_bar;
+        let pill =
+            |id: &'static str, label: &'static str, choice: MenuBar, cx: &mut Context<Self>| {
+                crate::tab_pill(id, label, 0, current == choice).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        this.chrome.cfg.menu_bar = choice;
+                        this.chrome.cfg.save();
+                        // A menu of the bar mustn't outlive it.
+                        if this.open_bar_menu().is_some() {
+                            this.close_menu(cx);
+                        }
+                        cx.notify();
+                    }),
+                )
+            };
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(140.0))
+                    .pt_1()
+                    .flex_none()
+                    .text_color(t.secondary_text)
+                    .child("Menu bar"),
+            )
+            .child(
+                // Takes the rest of the row, so the note wraps inside the window.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(pill(
+                                "menu-bar-follow",
+                                "Follow desktop",
+                                MenuBar::FollowDesktop,
+                                cx,
+                            ))
+                            .child(pill("menu-bar-bar", "Menu bar", MenuBar::Bar, cx))
+                            .child(pill(
+                                "menu-bar-button",
+                                "Menu button (☰)",
+                                MenuBar::Button,
+                                cx,
+                            )),
+                    )
+                    .when(current == MenuBar::FollowDesktop, |d| {
+                        d.child(div().text_color(t.line_number).child(
+                            "A menu bar under the window manager's title bar, the ☰ button \
+                             where Kyde draws its own.",
+                        ))
+                    }),
+            )
             .into_any_element()
     }
 

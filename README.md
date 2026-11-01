@@ -194,7 +194,7 @@ herdr still does things Kyde doesn't: it runs anywhere a terminal does (includin
 ### Look & feel
 
 * **Islands layout** — rounded panels, draggable dividers, activity rail, native title bar (double-click to zoom), status bar.
-* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu). Linux has no app menu bar, so there the same items sit behind a ☰ button: at the right end of the toolbar under the window manager's title bar (X11), at the left of Kyde's own title bar on Wayland.
+* **Native menu bar** — Settings, Plugins, What's New, FPS monitor toggle, Clear Data & Restart, Quit, plus a File menu with Open and Recent Projects (also on the Dock icon's right-click menu). Linux has no app menu bar, so there the same items sit in a File / View / Help menu bar at the left of the toolbar where the window manager draws the title bar (X11), and behind a ☰ button at the left of Kyde's own title bar where Kyde draws it (GNOME on Wayland). `F10` opens the menus and Alt + a title's underlined letter opens that menu; Settings → Appearance → Menu bar puts the menu bar or the ☰ button everywhere instead.
 * **What's New** — the project's GitHub releases mirrored in-app: version list on the left, that release's notes rendered on the right.
 * **In-app updates** — a banner when a newer release exists; **Update & Relaunch** downloads and swaps the running `.app` in place (or opens the release page when not running from a bundle).
 * **Single instance** — a second `ky <path>` hands the project to the running app as another tab and brings it forward instead of starting a second process (`KYDE_SINGLE_INSTANCE=0` opts out).
