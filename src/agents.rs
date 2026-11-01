@@ -770,9 +770,10 @@ pub(crate) struct Busy {
 
 /// The note a new agent tab's first prompt carries (see [`brief_path`]): what's in its
 /// worktree, and — per `mode` — to move an unrelated task to a worktree of its own (Claude
-/// Code's `EnterWorktree`; the tab follows, see [`moved_worktree`]) or to ask first. `None`
-/// when the worktree is free (no changes, nothing unpushed, no other agent at work, on its
-/// mainline) or `mode` is Stay.
+/// Code's `EnterWorktree`; the tab follows, see [`moved_worktree`]) or to ask first; a related
+/// task stays, keeping its hands off another agent's changes there. `None` when the worktree
+/// is free (no changes, nothing unpushed, no other agent at work, on its mainline) or `mode`
+/// is Stay.
 pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option<String> {
     use kyde_config::agents::NewTask;
     let free = b.changed == 0 && b.ahead == 0 && !b.off_main && b.others.is_empty();
@@ -814,11 +815,17 @@ pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option
         "The user has set Kyde to give unrelated tasks a worktree of their own. If this request \
          starts a new task unrelated to that work, call EnterWorktree"
     };
+    // A related task stays put, but another tab's agent may still be mid-change here.
+    let stay = if b.others.is_empty() {
+        "stay here and ignore this note."
+    } else {
+        "stay here, but another agent may still be at work in it: check with the user before \
+         you edit, reformat, stash or commit changes you didn't make."
+    };
     Some(format!(
         "Kyde (the agent manager running this tab): this worktree already has work in it —\n\
          {}\n\n{what} (name: a short slug for the new task) before you change any file — Kyde \
-         moves this tab there. If it's related, a follow-up, a question or chit-chat, stay here \
-         and ignore this note.\n",
+         moves this tab there. If it's related, a follow-up, a question or chit-chat, {stay}\n",
         facts.join("\n")
     ))
 }
@@ -1047,6 +1054,7 @@ mod tests {
         assert!(note.contains("branch `feat/linux`: 3 uncommitted files, 1 unpushed commit"));
         assert!(note.contains("\"Linux AppImage packaging\""));
         assert!(note.contains("call EnterWorktree") && !note.contains("ask the user"));
+        assert!(note.contains("changes you didn't make") && !note.contains("ignore this note"));
         assert!(task_brief(&busy, NewTask::Ask)
             .unwrap()
             .contains("ask the user"));
