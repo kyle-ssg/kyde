@@ -1074,6 +1074,36 @@ impl TerminalView {
         (on_screen, cur)
     }
 
+    /// Bring the prompt you sent before (`older`) or after the one at the top of the view to
+    /// the top (⌘↑ / ⌘↓). Past the newest, back to the live screen.
+    fn jump_prompt(&mut self, older: bool, cx: &mut Context<Self>) {
+        let t = self.term.lock();
+        let (hist, off) = (
+            i32::try_from(t.grid().history_size()).unwrap_or(0),
+            i32::try_from(t.grid().display_offset()).unwrap_or(0),
+        );
+        let prompts = prompt_lines(&t);
+        drop(t);
+        // The view can't scroll past the live screen: a prompt already on it is as far down
+        // as a jump gets.
+        match prompt_jump(&prompts, -off, older).map(|top| (-top).clamp(0, hist)) {
+            Some(want) if want != off => self.scroll(Scroll::Delta(want - off)),
+            Some(_) | None if !older => self.scroll(Scroll::Bottom),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// Your newest prompt, when it's scrolled off above the view: its text, for the pill
+    /// that jumps back to it.
+    fn prompt_above(&self) -> Option<String> {
+        let t = self.term.lock();
+        let top = -i32::try_from(t.grid().display_offset()).unwrap_or(0);
+        last_prompt(&t)
+            .filter(|l| l.0 < top)
+            .map(|l| prompt_text(&t, l))
+    }
+
     /// Map a window-space cursor position to a grid point + which half of the cell it's in.
     /// Accounts for the current scrollback offset so a selection in history stays anchored.
     fn point_at(&self, pos: gpui::Point<Pixels>) -> Option<(GridPoint, Side)> {
@@ -1220,6 +1250,97 @@ fn shifted<T>(term: &Term<T>, (m, hist, off): &(Match, usize, isize)) -> Option<
     (a.line >= term.topmost_line() && b.line <= term.bottommost_line()).then_some(a..=b)
 }
 
+/// Claude Code's prompt marker: on its input box, and on each prompt you sent where it echoes
+/// it into the conversation.
+const PROMPT_MARK: char = '❯';
+
+/// How far above the view a prompt that runs onto it is looked for.
+const PROMPT_LOOKBACK: i32 = 1_000;
+
+/// The tint of `line` when it's Claude Code's echo of a prompt you sent: "❯ " and the text,
+/// on a background of its own. Its input box's "❯" is followed by a no-break space and isn't
+/// tinted, and neither is a shell prompt's.
+fn prompt_tint<T>(term: &Term<T>, line: Line) -> Option<AnsiColor> {
+    if term.columns() < 2 {
+        return None;
+    }
+    let row = &term.grid()[line];
+    let first = &row[Column(0)];
+    (first.c == PROMPT_MARK
+        && row[Column(1)].c == ' '
+        && first.bg != AnsiColor::Named(NamedColor::Background))
+    .then_some(first.bg)
+}
+
+/// The tint of `line` when it opens on a tinted blank — how a prompt's wrapped (or further)
+/// lines continue, indented under its text on its tint.
+fn tinted_blank<T>(term: &Term<T>, line: Line) -> Option<AnsiColor> {
+    let first = &term.grid()[line][Column(0)];
+    (first.c == ' ' && first.bg != AnsiColor::Named(NamedColor::Background)).then_some(first.bg)
+}
+
+/// For each of the `rows` rows from `top`, the tint of the prompt it's part of, if any.
+fn prompt_rows<T>(term: &Term<T>, top: Line, rows: usize) -> Vec<Option<AnsiColor>> {
+    let end = Line((top.0 + i32::try_from(rows).unwrap_or(0) - 1).min(term.bottommost_line().0));
+    // A prompt already under way at the top of the view: start from its first row.
+    let mut line = top;
+    let floor = Line((top.0 - PROMPT_LOOKBACK).max(term.topmost_line().0));
+    while line > floor && tinted_blank(term, line).is_some() {
+        line = Line(line.0 - 1);
+    }
+    let mut tint = None;
+    let mut out = Vec::with_capacity(rows);
+    while line <= end {
+        tint = prompt_tint(term, line)
+            .or_else(|| tint.filter(|&t| tinted_blank(term, line) == Some(t)));
+        if line >= top {
+            out.push(tint);
+        }
+        line = Line(line.0 + 1);
+    }
+    out
+}
+
+/// Every prompt you sent that's still in the buffer, oldest first.
+fn prompt_lines<T>(term: &Term<T>) -> Vec<Line> {
+    (term.topmost_line().0..=term.bottommost_line().0)
+        .map(Line)
+        .filter(|&l| prompt_tint(term, l).is_some())
+        .collect()
+}
+
+/// The newest prompt you sent that's still in the buffer.
+fn last_prompt<T>(term: &Term<T>) -> Option<Line> {
+    (term.topmost_line().0..=term.bottommost_line().0)
+        .rev()
+        .map(Line)
+        .find(|&l| prompt_tint(term, l).is_some())
+}
+
+/// The view's new top line for a jump from top line `top` to the prompt before it (`older`)
+/// or after it, among `prompts` (oldest first): the prompt a row down, so it reads as the
+/// start of its turn. `None` past the last one either way.
+fn prompt_jump(prompts: &[Line], top: i32, older: bool) -> Option<i32> {
+    let at = |l: &Line| l.0 - 1;
+    if older {
+        prompts.iter().rev().map(at).find(|&t| t < top)
+    } else {
+        prompts.iter().map(at).find(|&t| t > top)
+    }
+}
+
+/// The text of the prompt at `line` (its first row, after the "❯ ").
+fn prompt_text<T>(term: &Term<T>, line: Line) -> String {
+    let row = &term.grid()[line];
+    (2..term.columns())
+        .map(|c| &row[Column(c)])
+        .filter(|cell| !cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+        .map(|cell| cell.c)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Open a URI in the OS default handler.
 fn open_uri(uri: &str) {
     #[cfg(target_os = "macos")]
@@ -1290,6 +1411,13 @@ impl Render for TerminalView {
             // matches, ⇧Enter / ⇧⌘G back down, Escape closes it; closed, they're the app's.
             .on_action(cx.listener(|this, _: &crate::TerminalFind, window, cx| {
                 this.open_find(window, cx);
+            }))
+            // ⌘↑ / ⌘↓ step through the prompts you sent an agent (Terminal.app's marks keys).
+            .on_action(cx.listener(|this, _: &crate::TerminalPrevPrompt, _w, cx| {
+                this.jump_prompt(true, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::TerminalNextPrompt, _w, cx| {
+                this.jump_prompt(false, cx);
             }))
             .on_action(cx.listener(|this, _: &crate::FindNext, _w, cx| {
                 if this.find_open() {
@@ -1417,6 +1545,12 @@ impl Render for TerminalView {
                     .filter(|f| f.open)
                     .map(|f| self.render_find(f, cx)),
             )
+            .children(
+                (!self.find_open())
+                    .then(|| self.prompt_above())
+                    .flatten()
+                    .map(|text| self.render_prompt_pill(text, cx)),
+            )
             .children(menu_at.map(|at| self.render_context_menu(at, window, cx)))
     }
 }
@@ -1543,6 +1677,53 @@ impl TerminalView {
                     cx.listener(|this, _e, window, cx| this.close_find(window, cx)),
                 ),
             )
+    }
+
+    /// The pill showing your last prompt once it has scrolled off the top, floated at the top
+    /// right like the find bar; a click scrolls back to it.
+    fn render_prompt_pill(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme::get();
+        let key = crate::pretty_key(&format!("{}-up", crate::TERMINAL_MOD));
+        div()
+            .id("term-prompt-pill")
+            .absolute()
+            .top(px(6.0))
+            .right(px(SB_BAR + 6.0))
+            .max_w(px(360.0))
+            .occlude()
+            .tooltip(crate::ui::tip(format!("Back to your last prompt  ({key})")))
+            .on_mouse_down(MouseButton::Right, |_e, _w, cx| cx.stop_propagation())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    cx.stop_propagation();
+                    this.jump_prompt(true, cx);
+                }),
+            )
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_1()
+            .bg(t.panel_bg)
+            .border_1()
+            .border_color(t.divider)
+            .rounded_md()
+            .shadow_md()
+            .cursor_pointer()
+            .hover(|d| d.bg(t.selected_bg))
+            .font_family(theme::font::UI_FAMILY)
+            .text_size(px(t.ui_font_size - 1.0))
+            .text_color(t.secondary_text)
+            .child(
+                svg()
+                    .path("icons/arrow-up.svg")
+                    .flex_none()
+                    .size(px(12.0))
+                    .text_color(t.primary),
+            )
+            .child(div().min_w_0().truncate().child(text))
     }
 
     /// Right-click menu: a transparent dismiss backdrop + a small box anchored at the click.
@@ -1774,6 +1955,13 @@ impl Element for TerminalElement {
         let default_fg: Hsla = theme::get().text.into();
         let default_bg: Hsla = theme::get().main_bg.into();
 
+        let off = i32::try_from(content.display_offset).unwrap_or(0);
+        // Prompts you sent an agent (Claude Code's echo of them) take an accent tint, and their
+        // ❯ the accent, so your turns stand out from its replies.
+        let prompts = prompt_rows(&term, Line(-off), term.screen_lines());
+        let accent: Hsla = theme::get().primary.into();
+        let prompt_bg = default_bg.blend(accent.opacity(0.2));
+
         let selection = content.selection;
         let sel_bg: Hsla = theme::get().selected_bg.into();
         let mut lines: Vec<ShapedLine> = Vec::new();
@@ -1833,8 +2021,20 @@ impl Element for TerminalElement {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
+            let row_idx = line - base_line.unwrap_or(line);
             let mut fg = resolve(cell.fg, default_fg, content.colors);
             let mut bg = resolve_opt(cell.bg, content.colors);
+            let prompt = usize::try_from(row_idx)
+                .ok()
+                .and_then(|r| prompts.get(r).copied().flatten());
+            if let Some(tint) = prompt {
+                if cell.bg == tint {
+                    bg = Some(prompt_bg);
+                }
+                if col == 0 && cell.c == PROMPT_MARK {
+                    fg = accent;
+                }
+            }
             if cell.flags.contains(Flags::INVERSE) {
                 let f = fg;
                 fg = bg.unwrap_or(default_bg);
@@ -1843,7 +2043,6 @@ impl Element for TerminalElement {
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg.unwrap_or(default_bg);
             }
-            let row_idx = line - base_line.unwrap_or(line);
             // Selection tint wins over the cell's own bg (its runs paint after).
             let selected = selection.as_ref().is_some_and(|s| s.contains(cell.point));
             let width = if cell.flags.contains(Flags::WIDE_CHAR) {
@@ -1897,7 +2096,6 @@ impl Element for TerminalElement {
             .chain(&sel_runs)
             .map(|r| quad(r.row, r.col, r.len, r.color))
             .collect();
-        let off = i32::try_from(content.display_offset).unwrap_or(0);
         let last_col = term.columns().saturating_sub(1);
         let find_bg: Hsla = theme::get().find_match_bg.into();
         let mut find_quads: Vec<gpui::PaintQuad> = found
@@ -2128,7 +2326,7 @@ fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
     let row = &grid[at.line];
     if !term.mode().contains(TermMode::SHOW_CURSOR)
         || at.column.0 != 2
-        || row[Column(0)].c != '❯'
+        || row[Column(0)].c != PROMPT_MARK
         || !ghost(&row[at.column])
     {
         return None;
@@ -2397,6 +2595,85 @@ mod tests {
         // What `clear` sends.
         parser.advance(&mut term, b"\x1b[H\x1b[2J\x1b[3J");
         assert_eq!(shifted(&term, &cur), None);
+    }
+
+    /// A headless terminal that has been sent `bytes`.
+    fn term_with(
+        cols: usize,
+        rows: usize,
+        bytes: &[u8],
+    ) -> Term<alacritty_terminal::event::VoidListener> {
+        let mut term = Term::new(
+            Config::default(),
+            &TermSize::new(cols, rows),
+            alacritty_terminal::event::VoidListener,
+        );
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
+
+    /// Your prompts are found the way Claude Code echoes them — "❯ " on a tint, a long one
+    /// wrapping onto indented rows — but not a shell's "❯" prompt or Claude's input box; and
+    /// ⌘↑ / ⌘↓ step through them, a row of air above each.
+    #[test]
+    fn prompts_are_found_and_stepped_through() {
+        let tint = "\x1b[48;2;55;55;55m";
+        let mut out = String::from("❯ claude\r\n\r\n");
+        out.push_str(&format!(
+            "{tint}❯ first, long enough to\r\n  wrap\x1b[49m\r\n\r\n"
+        ));
+        for i in 0..30 {
+            out.push_str(&format!("⏺ reply {i}\r\n"));
+        }
+        out.push_str(&format!("\r\n{tint}❯ second\x1b[49m\r\n\r\n"));
+        for i in 0..20 {
+            out.push_str(&format!("⏺ more {i}\r\n"));
+        }
+        out.push_str("────\r\n❯\u{a0}\r\n────");
+        let term = term_with(40, 10, out.as_bytes());
+
+        let prompts = prompt_lines(&term);
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        let (first, second) = (prompts[0], prompts[1]);
+        assert_eq!(prompt_text(&term, second), "second");
+        assert_eq!(last_prompt(&term), Some(second));
+        // The wrapped row is part of the prompt, even with the view's top on it.
+        let wrap = Line(first.0 + 1);
+        let rows: Vec<bool> = prompt_rows(&term, first, 3)
+            .iter()
+            .map(Option::is_some)
+            .collect();
+        assert_eq!(rows, [true, true, false]);
+        assert!(prompt_rows(&term, wrap, 1)[0].is_some());
+
+        // From the live screen: up to the second, the first, then no further.
+        let (a, b) = (first.0 - 1, second.0 - 1);
+        assert_eq!(prompt_jump(&prompts, 0, true), Some(b));
+        assert_eq!(prompt_jump(&prompts, b, true), Some(a));
+        assert_eq!(prompt_jump(&prompts, a, true), None);
+        assert_eq!(prompt_jump(&prompts, a, false), Some(b));
+        assert_eq!(prompt_jump(&prompts, b, false), None);
+    }
+
+    /// Perf guard (see CLAUDE.md "Performance regression tests"): every frame finds the
+    /// prompts on screen and every render looks for your last one — through a full 10k-line
+    /// scrollback when there's none.
+    #[test]
+    fn perf_prompt_scan_full_scrollback() {
+        let mut out = String::new();
+        for i in 0..10_000 {
+            out.push_str(&format!("line {i} the quick brown fox jumps over\r\n"));
+        }
+        let term = term_with(120, 40, out.as_bytes());
+        let t0 = Instant::now();
+        assert_eq!(last_prompt(&term), None);
+        assert!(prompt_lines(&term).is_empty());
+        let top = term.topmost_line();
+        assert!(prompt_rows(&term, top, 40).iter().all(Option::is_none));
+        let took = t0.elapsed();
+        assert!(took < Duration::from_secs(2), "prompt scan took {took:?}");
     }
 
     #[test]
