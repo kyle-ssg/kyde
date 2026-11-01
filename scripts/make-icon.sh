@@ -9,6 +9,7 @@
 #
 # Outputs (overwrites):
 #   assets/logo.png      — 1024 rounded master (runtime Dock icon + window icon + README)
+#   assets/logo-dev.png  — the same, upside down: the runtime icon of a local build
 #   assets/AppIcon.icns  — bundled .app Dock/Finder icon (all sizes)
 #
 # Windows (assets/AppIcon.ico) is intentionally left full-bleed — Windows doesn't
@@ -38,6 +39,7 @@ magick "$TMP/art.png" \
 magick -size 1024x1024 xc:none "$TMP/round.png" -gravity center -compose over -composite "$TMP/icon1024.png"
 
 cp "$TMP/icon1024.png" assets/logo.png
+magick "$TMP/icon1024.png" -rotate 180 assets/logo-dev.png
 
 # Build the iconset (every size LaunchServices wants) and pack it into .icns.
 ISET="$TMP/Kyde.iconset"
@@ -55,4 +57,4 @@ gen 512  icon_512x512.png
 cp "$TMP/icon1024.png" "$ISET/icon_512x512@2x.png"
 iconutil -c icns "$ISET" -o assets/AppIcon.icns
 
-echo "wrote assets/logo.png (1024 rounded) + assets/AppIcon.icns"
+echo "wrote assets/logo.png (1024 rounded) + assets/logo-dev.png + assets/AppIcon.icns"

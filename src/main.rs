@@ -3581,6 +3581,16 @@ fn set_app_name() {
 #[cfg(not(target_os = "macos"))]
 fn set_app_name() {}
 
+/// The runtime app icon (Dock + X11 windows). Only the release workflow sets
+/// `KYDE_RELEASE_BUILD`, so every local build — debug or `--release` — gets the logo upside
+/// down and can't be mistaken for the installed app at a glance.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const LOGO_PNG: &[u8] = if option_env!("KYDE_RELEASE_BUILD").is_some() {
+    include_bytes!("../assets/logo.png")
+} else {
+    include_bytes!("../assets/logo-dev.png")
+};
+
 /// Set the macOS Dock icon from the bundled logo (no `.app` bundle needed). Runs on the
 /// main thread during app launch; silently no-ops if the image can't be built.
 #[cfg(target_os = "macos")]
@@ -3591,7 +3601,7 @@ fn set_dock_icon() {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
-    let data = NSData::with_bytes(include_bytes!("../assets/logo.png"));
+    let data = NSData::with_bytes(LOGO_PNG);
     let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
         return;
     };
