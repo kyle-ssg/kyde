@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+// Kyde patch (cosmic-text 0.14.2, src/glyph_cache.rs): the five flags after FAKE_ITALIC, the
+// rendering bits a `GlyphRendering` (src/swash.rs) sets. No other change in this file.
+
 bitflags::bitflags! {
     /// Flags that change rendering
     #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -7,6 +10,16 @@ bitflags::bitflags! {
     pub struct CacheKeyFlags: u32 {
         /// Skew by 14 degrees to synthesize italic
         const FAKE_ITALIC = 1;
+        /// Kyde patch: no antialiasing, a mask of only fully on and off pixels.
+        const NO_ANTIALIAS = 1 << 1;
+        /// Kyde patch: the outline unhinted.
+        const HINT_NONE = 1 << 2;
+        /// Kyde patch: slight hinting (FreeType's light target).
+        const HINT_SLIGHT = 1 << 3;
+        /// Kyde patch: medium hinting (FreeType's normal target).
+        const HINT_MEDIUM = 1 << 4;
+        /// Kyde patch: full hinting (FreeType's normal target).
+        const HINT_FULL = 1 << 5;
     }
 }
 

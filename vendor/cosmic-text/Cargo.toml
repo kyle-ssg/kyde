@@ -48,10 +48,17 @@ no_std = [
 ]
 peniko = ["dep:peniko"]
 shape-run-cache = []
+# Kyde patch: an explicit feature (it was the optional dependency's implicit one), so it also
+# brings skrifa, which draws the hinted outlines of src/swash.rs's `rendered_image`.
+swash = [
+    "dep:swash",
+    "dep:skrifa",
+]
 std = [
     "fontdb/memmap",
     "fontdb/std",
     "rustybuzz/std",
+    "skrifa?/std",
     "swash?/std",
     "sys-locale",
     "ttf-parser/std",
@@ -135,6 +142,12 @@ default-features = false
 
 [dependencies.self_cell]
 version = "1.0.1"
+
+# Kyde patch: skrifa, already in the tree as swash's own dependency (same version).
+[dependencies.skrifa]
+version = "0.42"
+optional = true
+default-features = false
 
 [dependencies.smol_str]
 version = "0.2.2"

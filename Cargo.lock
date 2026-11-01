@@ -1189,6 +1189,7 @@ dependencies = [
  "rustc-hash 1.1.0",
  "rustybuzz 0.14.1",
  "self_cell",
+ "skrifa",
  "smol_str",
  "swash",
  "sys-locale",
