@@ -121,6 +121,7 @@ actions!(
         TerminalEscape,
         TerminalCopy,
         TerminalPaste,
+        TerminalFind,
         DeleteFile,
         CloseTab,
         DiffNextChange,
@@ -433,6 +434,29 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
     ]);
+    // ⌘F (Ctrl+Shift+F elsewhere — Ctrl+F is the shell's) in a terminal searches its own
+    // scrollback. After the context-less ⌘F above, which ties with it on depth (later wins).
+    #[cfg(feature = "terminal")]
+    cx.bind_keys([KeyBinding::new(
+        &format!("{TERMINAL_MOD}-f"),
+        TerminalFind,
+        Some("Terminal"),
+    )]);
+    // In the terminal's find box ("Terminal" one level up) the context-less ⌘W / ⌘F outrank
+    // the terminal's keys and would close an editor tab or open the editor's find (Ctrl+F too,
+    // off macOS); these tie with them on depth instead and win as the later bindings. Off
+    // macOS Ctrl+Shift+C / V copy and paste the query, not the shell's selection / clipboard.
+    #[cfg(feature = "terminal")]
+    {
+        let in_box = Some("Terminal > CodeInput");
+        cx.bind_keys([
+            KeyBinding::new(&term("f"), TerminalFind, in_box),
+            KeyBinding::new("secondary-f", TerminalFind, in_box),
+            KeyBinding::new(&term("w"), CloseTerminalTab, in_box),
+            KeyBinding::new(&term("c"), editor::Copy, in_box),
+            KeyBinding::new(&term("v"), editor::Paste, in_box),
+        ]);
+    }
     // Off macOS the app's shortcuts are on Ctrl, and so are the shell's keys (Ctrl+C
     // interrupts, Ctrl+W rubs out a word, Ctrl+R searches history…). In a terminal, Ctrl+letter
     // goes to the shell: a `NoAction` in the "Terminal" context masks every app binding on it,
@@ -3947,7 +3971,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 .map(|s| real(PathBuf::from(s)))
                 .collect();
             view.agents.cfg.setup_done = true;
-            view.agents.cfg.command = "git --no-pager log --oneline --graph --decorate -16".into();
+            view.agents.cfg.command = std::env::var("KYDE_SHOT_AGENT_CMD")
+                .unwrap_or_else(|_| "git --no-pager log --oneline --graph --decorate -16".into());
             view.agents.cfg.spaces = vec![kyde_config::agents::Space {
                 path: root.clone(),
                 worktrees: wts.clone(),
@@ -4341,6 +4366,8 @@ mod gpui_smoke_tests {
             // Config too: the keymap / plugin / theme stores would otherwise read — and a test
             // that saves would overwrite — the developer's real ~/.config/kyde (CI has none).
             std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+            // …and the agents' state files / notes would land in the real ~/.kyde/agents.
+            std::env::set_var("KYDE_AGENTS_DIR", dir.join("agents"));
         });
     }
 
@@ -6966,6 +6993,77 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A new agent tab in a worktree with work in it gets Kyde's note for its first prompt;
+    /// when its agent then enters another worktree (Claude Code's `EnterWorktree`), the tab
+    /// follows it there — and the sidebar with it.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_follows_its_agent_into_a_new_worktree(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx); // uncommitted changes: a busy worktree
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let id = handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents.tabs[&dir].tabs.last().unwrap().id.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let note = std::fs::read_to_string(agents::brief_path(&id)).unwrap();
+        assert!(note.contains("2 uncommitted files") && note.contains("EnterWorktree"));
+
+        let out = std::process::Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                ".claude/worktrees/style",
+                "-b",
+                "style",
+            ])
+            .current_dir(&dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let cwd = dir.join(".claude/worktrees/style");
+        let transcript = agents::claude_project_dir(&cwd).unwrap().join("s1.jsonl");
+        let to = agents::moved_worktree(&dir, &cwd, &transcript).expect("EnterWorktree'd");
+        handle
+            .update(cx, |k, _w, cx| {
+                let report = agents::HookReport {
+                    hook: agents::Hook::Working,
+                    session: Some("s1".into()),
+                    cwd: Some(cwd.clone()),
+                    transcript: Some(transcript.clone()),
+                };
+                let read = (
+                    dir.clone(),
+                    id.clone(),
+                    std::time::SystemTime::now(),
+                    Some(report),
+                    Some(to.clone()),
+                );
+                k.agents_apply_hooks(vec![read], cx);
+                assert_eq!(k.agents.tabs[&dir].tabs.len(), 1, "the first tab stays");
+                let moved = &k.agents.tabs[&to].tabs;
+                assert_eq!((moved.len(), moved[0].id.as_str()), (1, id.as_str()));
+                assert_eq!(moved[0].session.as_deref(), Some("s1"));
+                assert!(k.agents.cfg.spaces[0].worktrees.contains(&to));
+                // It was on screen, so the view went with it.
+                assert_eq!(k.agents.selected.as_deref(), Some(to.as_path()));
+            })
+            .unwrap();
+    }
+
     /// Enter is also bound at the app root (`ConfirmKey`). The deeper Terminal binding must win
     /// and relay CR to the PTY instead of letting the root action consume the key.
     #[cfg(feature = "terminal")]
@@ -7105,6 +7203,35 @@ mod gpui_smoke_tests {
                         ran.first().is_some_and(|a| a.ends_with("TerminalCopy")),
                         "{ran:?}"
                     );
+                    // ⌘F is the terminal's own find, not the editor's / Find in Files…
+                    let find = format!("{TERMINAL_MOD}-f");
+                    let ran = resolve(&find, &ctx);
+                    assert!(
+                        ran.first().is_some_and(|a| a.ends_with("TerminalFind")),
+                        "{ran:?}"
+                    );
+                    // …and in its query box Enter / Escape drive the find, not the shell.
+                    let mut in_box = ctx.clone();
+                    in_box.push(gpui::KeyContext::parse("CodeInput FindBar").unwrap());
+                    for (key, action) in [("enter", "FindNext"), ("escape", "CloseFind")] {
+                        let ran = resolve(key, &in_box);
+                        assert!(ran.first().is_some_and(|a| a.ends_with(action)), "{ran:?}");
+                    }
+                    // ⌘W / ⌘F there stay the terminal's, not CloseTab / the editor's find, and
+                    // its paste goes into the query, not the shell.
+                    let term = |k: &str| format!("{TERMINAL_MOD}-{k}");
+                    for (key, action) in [
+                        (term("w"), "CloseTerminalTab"),
+                        (term("f"), "TerminalFind"),
+                        ("secondary-f".into(), "TerminalFind"),
+                        (term("v"), "::Paste"),
+                    ] {
+                        let ran = resolve(&key, &in_box);
+                        assert!(
+                            ran.first().is_some_and(|a| a.ends_with(action)),
+                            "{key}: {ran:?}"
+                        );
+                    }
                 }
                 if !cfg!(target_os = "macos") {
                     let ran = resolve("ctrl-s", &stack(&["Kyde"]));

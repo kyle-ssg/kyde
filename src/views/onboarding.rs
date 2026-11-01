@@ -15,9 +15,12 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let preset_card = |preset: Preset, cx: &mut Context<Self>| {
             let selected = self.onboarding.choice == preset;
-            // Only the actions this preset binds (VSCode leaves Push / Pull unbound).
+            // Only the actions this preset binds (VSCode leaves Push / Pull unbound). The
+            // Agents-view keys are the same in both presets, so they don't help the choice and
+            // would push the panel past the window; Settings lists them.
             let sample: Vec<gpui::AnyElement> = keymap::ACTIONS
                 .iter()
+                .filter(|a| !a.name.starts_with("agent_"))
                 .filter_map(|a| {
                     let key = match preset {
                         Preset::VSCode => a.vscode,
@@ -31,9 +34,17 @@ impl Kyde {
                         .flex_row()
                         .justify_between()
                         .gap_4()
-                        .child(SharedString::from(a.label))
                         .child(
                             div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(a.label)),
+                        )
+                        // The key never shrinks: a long label truncates instead of pushing
+                        // it past the card border.
+                        .child(
+                            div()
+                                .flex_none()
                                 .px_2()
                                 .bg(theme::get().bg_mid)
                                 .rounded_md()

@@ -4,27 +4,44 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <title>Kyde — fast native Git client &amp; diff editor</title>
-  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. Prebuilt for macOS and Linux; builds from source on Windows.">
-  <link rel="canonical" href="https://kyle-ssg.github.io/Kyde/">
+  <title>Kyde — fast native Git client &amp; diff editor for macOS and Linux</title>
+  <meta name="description" content="A fast native Git client and diff editor in Rust. Instant startup, side-by-side diffs with word-level highlighting and hunk staging, a 3-way merge tool, a git log with a commit graph, and Claude Code agents across git worktrees. Free and open source; prebuilt for macOS and Linux.">
+  <link rel="canonical" href="https://kyle-ssg.github.io/kyde/">
 
   <!-- Open Graph / social card -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Kyde — fast native Git client &amp; diff editor">
+  <meta property="og:title" content="Kyde — fast native Git client &amp; diff editor for macOS and Linux">
   <meta property="og:description" content="Instant startup, side-by-side diffs with word-level highlighting and hunk staging, an IDE-grade commit view. Native, GPU-rendered, written in Rust.">
-  <meta property="og:url" content="https://kyle-ssg.github.io/Kyde/">
-  <meta property="og:image" content="https://raw.githubusercontent.com/kyle-ssg/Kyde/main/assets/screenshots/git-diff.png">
+  <meta property="og:url" content="https://kyle-ssg.github.io/kyde/">
+  <meta property="og:image" content="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/git-diff.png">
   <meta property="og:image:width" content="1279">
   <meta property="og:image:height" content="816">
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kyde — fast native Git client &amp; diff editor">
+  <meta name="twitter:title" content="Kyde — fast native Git client &amp; diff editor for macOS and Linux">
   <meta name="twitter:description" content="Instant startup, side-by-side diffs with hunk staging, an IDE-grade commit view. Native, GPU-rendered, written in Rust.">
-  <meta name="twitter:image" content="https://raw.githubusercontent.com/kyle-ssg/Kyde/main/assets/screenshots/git-diff.png">
+  <meta name="twitter:image" content="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/git-diff.png">
 
   <meta name="theme-color" content="#0D0E10">
-  <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/kyle-ssg/Kyde/main/assets/logo.png">
+  <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/logo.png">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Kyde",
+    "description": "A fast native Git client and side-by-side diff editor with hunk staging, a 3-way merge tool, a commit graph and a Claude Code agents view.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Linux",
+    "url": "https://kyle-ssg.github.io/kyde/",
+    "downloadUrl": "https://github.com/kyle-ssg/kyde/releases",
+    "codeRepository": "https://github.com/kyle-ssg/kyde",
+    "license": "https://www.apache.org/licenses/LICENSE-2.0",
+    "screenshot": "https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/git-diff.png",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
 
   <style>
     :root {
@@ -112,19 +129,19 @@
 </head>
 <body>
   <header class="wrap">
-    <img class="logo" src="https://raw.githubusercontent.com/kyle-ssg/Kyde/main/assets/logo.png" alt="Kyde logo">
+    <img class="logo" src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/logo.png" alt="Kyde logo">
     <h1>Kyde</h1>
     <p class="tagline">A fast native Git client and diff editor that opens instantly.</p>
-    <p class="sub">Side-by-side diffs · hunk staging · IDE-grade commit view · GPU-rendered · written in Rust</p>
+    <p class="sub">Side-by-side diffs · hunk staging · 3-way merge · Claude Code agents · GPU-rendered · written in Rust</p>
     <div class="cta">
-      <a class="btn btn-primary" href="https://github.com/kyle-ssg/Kyde/releases">Download</a>
-      <a class="btn btn-secondary" href="https://github.com/kyle-ssg/Kyde">View on GitHub</a>
+      <a class="btn btn-primary" href="https://github.com/kyle-ssg/kyde/releases">Download</a>
+      <a class="btn btn-secondary" href="https://github.com/kyle-ssg/kyde">View on GitHub</a>
     </div>
   </header>
 
   <div class="wrap shot-wrap">
     <img class="shot" loading="lazy"
-      src="https://raw.githubusercontent.com/kyle-ssg/Kyde/main/assets/screenshots/git-diff.png"
+      src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/git-diff.png"
       alt="Kyde commit view — side-by-side diff with word-level highlighting and a center gutter to stage and revert hunks">
   </div>
 
@@ -156,6 +173,11 @@
         <span class="ic">🕘</span>
         <h3>Local history</h3>
         <p>Per-file snapshots independent of git — a timeline, a before/after diff, and per-hunk or whole-file revert for anything you edited, deleted or rolled back.</p>
+      </div>
+      <div class="card">
+        <span class="ic">🤖</span>
+        <h3>Claude Code agents</h3>
+        <p>Run many Claude Code agents across projects and git worktrees, with live working / done / needs-input status. Start a GitHub issue or review a PR in its own worktree, and finished worktrees clean themselves up. Agents keep running after you quit.</p>
       </div>
       <div class="card">
         <span class="ic">▮</span>
@@ -195,7 +217,7 @@ cargo build --release</code></pre>
   </section>
 
   <footer class="wrap">
-    <p><a href="https://github.com/kyle-ssg/Kyde">GitHub</a> · <a href="https://github.com/kyle-ssg/Kyde/releases">Releases</a> · Apache-2.0</p>
+    <p><a href="https://github.com/kyle-ssg/kyde">GitHub</a> · <a href="https://github.com/kyle-ssg/kyde/releases">Releases</a> · Apache-2.0</p>
   </footer>
 </body>
 </html>
