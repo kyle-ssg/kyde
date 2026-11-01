@@ -21,3 +21,6 @@ pub mod plugins;
 pub mod projects;
 /// Shared JSON config-file persistence (XDG dir + generic load/save).
 pub mod store;
+/// Where the menus live on Linux: a menu bar or the ☰ button ([`window::WindowCfg`]).
+#[cfg(target_os = "linux")]
+pub mod window;
