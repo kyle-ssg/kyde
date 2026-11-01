@@ -1799,18 +1799,27 @@ impl Kyde {
         });
         // A tab started on a task (an issue, a review) is in use from the start.
         let seeded = agent && prompt.is_some();
-        // A blank agent tab hears what's already going on here with its first prompt.
-        let brief = (agent && prompt.is_none())
-            .then(|| self.agents_task_brief(&wt, cx))
+        // Every agent tab hears how to move to another worktree with its first prompt; a
+        // blank one also hears what's already going on here.
+        let brief = agent
+            .then(|| self.agents_task_brief(&wt, prompt.is_none(), cx))
             .flatten();
         self.agents_spawn_tab(wt, agent, line, None, seeded, brief, cx);
     }
 
-    /// Kyde's note for a new agent tab in `wt` about the work already there — `None` when
-    /// the worktree is free or the setting says stay (see `agents::task_brief`).
-    fn agents_task_brief(&self, wt: &Path, cx: &gpui::App) -> Option<String> {
+    /// Kyde's note for a new agent tab in `wt`: how to move to another worktree, plus the
+    /// work already there when `blank` (a seeded tab's worktree was made for its task) — see
+    /// `agents::task_brief`. `None` without the hook.
+    fn agents_task_brief(&self, wt: &Path, blank: bool, cx: &gpui::App) -> Option<String> {
         if !self.agents.cfg.claude_hooks {
             return None; // the hook is what hands it over
+        }
+        let mode = self.agents.cfg.new_task;
+        if !blank {
+            return Some(crate::agents::task_brief(
+                &crate::agents::Busy::default(),
+                mode,
+            ));
         }
         let git = self.agents.git.get(wt).copied().unwrap_or_default();
         let busy = crate::agents::Busy {
@@ -1834,7 +1843,7 @@ impl Kyde {
                 .get(wt)
                 .and_then(|c| c.title.clone().or_else(|| c.last_prompt.clone())),
         };
-        crate::agents::task_brief(&busy, self.agents.cfg.new_task)
+        Some(crate::agents::task_brief(&busy, mode))
     }
 
     /// A new agent tab started on `prompt`, named `name` in the tab strip.
