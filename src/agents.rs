@@ -768,17 +768,22 @@ pub(crate) struct Busy {
     pub last_task: Option<String>,
 }
 
-/// The note a new agent tab's first prompt carries (see [`brief_path`]): what's in its
-/// worktree, and — per `mode` — to move an unrelated task to a worktree of its own (Claude
-/// Code's `EnterWorktree`; the tab follows, see [`moved_worktree`]) or to ask first; a related
-/// task stays, keeping its hands off another agent's changes there. `None` when the worktree
-/// is free (no changes, nothing unpushed, no other agent at work, on its mainline) or `mode`
-/// is Stay.
-pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option<String> {
+/// Every tab's note ends with this: only `EnterWorktree` moves the session — and so the tab
+/// (see [`moved_worktree`]) — to another worktree; a shell `cd` leaves both behind.
+const MOVE_HOW: &str = "To work in another worktree, call EnterWorktree — `name` for a new \
+     one, `path` for one that exists (e.g. made with `git worktree add`) — so this session \
+     moves there and Kyde moves this tab with it. A `cd` in the shell leaves both behind.";
+
+/// The note a new agent tab's first prompt carries (see [`brief_path`]): always how to move
+/// to another worktree ([`MOVE_HOW`]); and when its worktree is busy (changes, unpushed
+/// commits, another agent at work, off its mainline), what's there and — per `mode` — to move
+/// an unrelated task to a worktree of its own or to ask first; a related task stays, keeping
+/// its hands off another agent's changes there. Stay leaves out the busy part.
+pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> String {
     use kyde_config::agents::NewTask;
     let free = b.changed == 0 && b.ahead == 0 && !b.off_main && b.others.is_empty();
     if free || mode == NewTask::Stay {
-        return None;
+        return format!("Kyde (the agent manager running this tab): {MOVE_HOW}\n");
     }
     let count = |n: usize, what: &str| match n {
         0 => None,
@@ -817,17 +822,18 @@ pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> Option
     };
     // A related task stays put, but another tab's agent may still be mid-change here.
     let stay = if b.others.is_empty() {
-        "stay here and ignore this note."
+        "stay here."
     } else {
         "stay here, but another agent may still be at work in it: check with the user before \
          you edit, reformat, stash or commit changes you didn't make."
     };
-    Some(format!(
+    format!(
         "Kyde (the agent manager running this tab): this worktree already has work in it —\n\
          {}\n\n{what} (name: a short slug for the new task) before you change any file — Kyde \
-         moves this tab there. If it's related, a follow-up, a question or chit-chat, {stay}\n",
+         moves this tab there. If it's related, a follow-up, a question or chit-chat, {stay}\n\n\
+         {MOVE_HOW}\n",
         facts.join("\n")
-    ))
+    )
 }
 
 /// Where a tab's agent has moved itself, from what its hook reported: the worktree holding
@@ -1042,7 +1048,10 @@ mod tests {
             last_task: Some("old work".into()),
             ..Busy::default()
         };
-        assert_eq!(task_brief(&free, NewTask::Move), None);
+        // A free worktree's note is only how to move — so a hand-made worktree doesn't strand
+        // the tab in its old one.
+        let only_how = task_brief(&free, NewTask::Move);
+        assert!(only_how.contains("`path` for one that exists") && !only_how.contains("old work"));
         let busy = Busy {
             branch: Some("feat/linux".into()),
             changed: 3,
@@ -1050,15 +1059,15 @@ mod tests {
             others: vec!["Linux AppImage packaging".into()],
             ..free
         };
-        let note = task_brief(&busy, NewTask::Move).unwrap();
+        let note = task_brief(&busy, NewTask::Move);
         assert!(note.contains("branch `feat/linux`: 3 uncommitted files, 1 unpushed commit"));
         assert!(note.contains("\"Linux AppImage packaging\""));
         assert!(note.contains("call EnterWorktree") && !note.contains("ask the user"));
-        assert!(note.contains("changes you didn't make") && !note.contains("ignore this note"));
-        assert!(task_brief(&busy, NewTask::Ask)
-            .unwrap()
-            .contains("ask the user"));
-        assert_eq!(task_brief(&busy, NewTask::Stay), None);
+        assert!(
+            note.contains("changes you didn't make") && note.ends_with(&format!("{MOVE_HOW}\n"))
+        );
+        assert!(task_brief(&busy, NewTask::Ask).contains("ask the user"));
+        assert_eq!(task_brief(&busy, NewTask::Stay), only_how);
     }
 
     #[test]
