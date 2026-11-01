@@ -39,6 +39,13 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.9.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.0...kyde-v2.9.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **agents:** every agent tab learns EnterWorktree moves it, a shell cd doesn't ([#129](https://github.com/kyle-ssg/kyde/issues/129)) ([17f57d3](https://github.com/kyle-ssg/kyde/commit/17f57d377ba10c2bf01dc8462b4ce4d9acb1969d))
+
 ## [2.9.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.8.0...kyde-v2.9.0) (2026-11-01)
 
 
