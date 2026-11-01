@@ -4,7 +4,8 @@
 
 use crate::{io_err, GitError, Result};
 use serde::Deserialize;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// An open issue.
@@ -93,15 +94,41 @@ struct RawPr {
     is_draft: bool,
 }
 
+/// The `gh` CLI: on `PATH`, else the usual install spots — a GUI-launched app gets a bare
+/// `PATH` (`/usr/bin:/bin:…`) that misses Homebrew. Bare `gh` if none has it.
+fn gh_bin() -> PathBuf {
+    find_bin(
+        "gh",
+        std::env::var_os("PATH").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// `name` in the `path` dirs, then Homebrew, `/usr/local`, `/opt/local` and `home`'s
+/// `.local/bin`; bare `name` (left to the OS) if none has it.
+fn find_bin(name: &str, path: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
+    path.map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .chain(["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"].map(PathBuf::from))
+        .chain(home.map(|h| Path::new(h).join(".local/bin")))
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| name.into())
+}
+
 /// Run `gh <args>` in `dir`; its stdout, or its stderr as the error.
 fn gh(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new("gh")
+    let out = Command::new(gh_bin())
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")
         .env("NO_COLOR", "1")
         .args(args)
         .output()
-        .map_err(io_err(format!("running gh {args:?}")))?;
+        .map_err(|source| match source.kind() {
+            std::io::ErrorKind::NotFound => GitError::GhMissing,
+            _ => io_err(format!("running gh {args:?}"))(source),
+        })?;
     if !out.status.success() {
         return Err(GitError::Command {
             command: format!("gh {args:?}"),
@@ -766,4 +793,22 @@ pub fn reply_to_thread(dir: &Path, number: u64, root: u64, body: &str) -> Result
         ],
     )
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_bin_reaches_past_a_bare_gui_path() {
+        let home = std::env::temp_dir().join(format!("kyde-gh-home-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("kyde-test-gh"), "").unwrap();
+        // The `PATH` a Dock-launched app gets: no Homebrew, no ~/.local/bin.
+        let bare = OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin");
+        let found = find_bin("kyde-test-gh", Some(bare), Some(home.as_os_str()));
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(found, bin.join("kyde-test-gh"));
+    }
 }

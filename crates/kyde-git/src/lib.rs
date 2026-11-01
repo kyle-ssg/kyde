@@ -54,6 +54,9 @@ pub enum GitError {
         #[source]
         source: std::io::Error,
     },
+    /// The GitHub CLI (`gh`) isn't installed — not on `PATH` nor in the usual spots.
+    #[error("GitHub CLI not found — install it (brew install gh), then gh auth login")]
+    GhMissing,
     /// A tool's JSON output didn't parse (e.g. `gh … --json`).
     #[error("parsing {what}: {source}")]
     Json {
