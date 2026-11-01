@@ -1366,6 +1366,35 @@ fn prompt_text<T>(term: &Term<T>, line: Line) -> String {
         .to_string()
 }
 
+/// Dropped paths as the terminal's shell takes them: one quoted word each, space-separated,
+/// with one trailing space so the next word starts clear of them. A path that isn't UTF-8 or
+/// holds a control character types nothing: the tty and line editor act on ESC, CR and Ctrl-C
+/// even inside quotes (a crafted name could end a bracketed paste or run a command), and a
+/// lossy copy of a non-UTF-8 name points at no file.
+fn shell_quoted(paths: &[PathBuf]) -> String {
+    let mut out = String::new();
+    for p in paths {
+        let Some(s) = p.to_str().filter(|s| !s.contains(char::is_control)) else {
+            continue;
+        };
+        // POSIX shells: single quotes, an embedded `'` written `'\''`.
+        #[cfg(not(target_os = "windows"))]
+        {
+            out.push('\'');
+            out.push_str(&s.replace('\'', r"'\''"));
+            out.push_str("' ");
+        }
+        // cmd.exe doesn't quote with `'`; double quotes do, and a Windows path can't hold `"`.
+        #[cfg(target_os = "windows")]
+        {
+            out.push('"');
+            out.push_str(s);
+            out.push_str("\" ");
+        }
+    }
+    out
+}
+
 /// Open a URI in the OS default handler.
 fn open_uri(uri: &str) {
     #[cfg(target_os = "macos")]
@@ -1425,6 +1454,18 @@ impl Render for TerminalView {
             .relative()
             .size_full()
             .bg(theme::get().main_bg)
+            // Files dropped from a file manager are typed in as shell-quoted paths, sent the
+            // way a paste is (bracketed when the program asked for it), so an image dropped on
+            // an agent tab reaches Claude as a pasted path. Tinted like a tree folder while
+            // they hover.
+            .drag_over::<gpui::ExternalPaths>(|s, _, _, _| s.bg(theme::get().selected_bg))
+            .on_drop(cx.listener(|this, ep: &gpui::ExternalPaths, window, cx| {
+                window.focus(&this.focus);
+                let text = shell_quoted(ep.paths());
+                if !text.is_empty() {
+                    this.paste_text(text, cx);
+                }
+            }))
             // ⌘K clears the current (unsubmitted) input line — overrides the global commit
             // binding in this context.
             .on_action(cx.listener(|this, _: &crate::ClearTerminal, window, cx| {
@@ -2680,6 +2721,87 @@ mod tests {
         assert_eq!(url_at(line, 35), None);
         // No URL at all → None.
         assert_eq!(url_at("plain text only", 3), None);
+    }
+
+    fn dropped(ps: &[&str]) -> String {
+        shell_quoted(&ps.iter().map(PathBuf::from).collect::<Vec<_>>())
+    }
+
+    /// A name the tty or line editor would act on types nothing, on every OS: Ctrl-C then a
+    /// command and CR, and an early end of bracketed paste (ESC and C1 CSI forms).
+    #[test]
+    fn dropped_paths_with_control_chars_type_nothing() {
+        let crafted = [
+            "/tmp/a\x03cmd\r.png",
+            "/tmp/b\x1b[201~.png",
+            "/tmp/c\u{9b}201~.png",
+        ];
+        assert_eq!(dropped(&crafted), "");
+        let mixed = dropped(&["/tmp/a.png", crafted[0], crafted[1], "/tmp/b.png"]);
+        assert!(!mixed.contains(char::is_control), "{mixed:?}");
+        assert!(
+            mixed.contains("a.png") && mixed.contains("b.png"),
+            "{mixed:?}"
+        );
+    }
+
+    /// A non-UTF-8 name types nothing (a lossy copy would point at no file).
+    #[cfg(unix)]
+    #[test]
+    fn dropped_non_utf8_path_types_nothing() {
+        use std::os::unix::ffi::OsStrExt;
+        let latin1 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/caf\xe9.png"));
+        assert_eq!(shell_quoted(&[latin1]), "");
+    }
+
+    /// Dropped paths are typed in as one shell word each, whatever printable characters they hold.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn dropped_paths_are_single_quoted_shell_words() {
+        assert_eq!(dropped(&[]), "");
+        assert_eq!(dropped(&["/tmp/shot.png"]), "'/tmp/shot.png' ");
+        assert_eq!(
+            dropped(&["/tmp/My Shots/a b.png"]),
+            "'/tmp/My Shots/a b.png' "
+        );
+        assert_eq!(dropped(&["/tmp/it's.png"]), r"'/tmp/it'\''s.png' ");
+        assert_eq!(dropped(&["/tmp/café 日本.png"]), "'/tmp/café 日本.png' ");
+        let all = [
+            "/a",
+            "/My Shots/b c.png",
+            "/it's",
+            "/\"$HOME\" `x` \\y",
+            "/café 日本.png",
+        ];
+        assert_eq!(
+            dropped(&all),
+            "'/a' '/My Shots/b c.png' '/it'\\''s' '/\"$HOME\" `x` \\y' '/café 日本.png' "
+        );
+        // A POSIX shell reads each back as exactly the path, nothing expanded.
+        #[cfg(unix)]
+        {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf '%s\\n' {}", dropped(&all)))
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(out.stdout).unwrap(),
+                all.join("\n") + "\n"
+            );
+        }
+    }
+
+    /// cmd.exe doesn't quote with `'`, so on Windows each path is double-quoted.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dropped_paths_are_double_quoted_on_windows() {
+        assert_eq!(dropped(&[]), "");
+        assert_eq!(dropped(&[r"C:\shot.png"]), "\"C:\\shot.png\" ");
+        assert_eq!(
+            dropped(&[r"C:\My Shots\it's.png", r"C:\café 日本.png"]),
+            "\"C:\\My Shots\\it's.png\" \"C:\\café 日本.png\" "
+        );
     }
 
     #[test]
