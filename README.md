@@ -213,7 +213,7 @@ Grab the latest build for your platform from the [Releases](../../releases) page
 
 **macOS** — download `kyde-macos.zip` (Apple Silicon) or `kyde-macos-x86_64.zip` (Intel), unzip, and drag **Kyde.app** to `/Applications`.
 
-**Linux** — download `kyde-linux-x86_64.AppImage`, `chmod +x` it, and run it. It needs glibc 2.39+ (Ubuntu 24.04, Linux Mint 22 or newer) and a Vulkan driver; a stock Ubuntu desktop already has the rest. On a minimal install: `sudo apt install libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 libwayland-client0 fuse3` (NVIDIA's driver brings its own Vulkan).
+**Linux** — download `kyde-linux-x86_64.AppImage`, `chmod +x` it, and run it. It needs glibc 2.35+ (Ubuntu 22.04, Debian 12, Linux Mint 21 or newer) and a Vulkan driver; a stock Ubuntu desktop already has the rest. On a minimal install: `sudo apt install libvulkan1 mesa-vulkan-drivers libxkbcommon-x11-0 libwayland-client0 fuse3` (NVIDIA's driver brings its own Vulkan).
 
 On X11 the window manager draws Kyde's title bar; on a Wayland desktop that leaves that to the app (GNOME), Kyde draws its own — drag it to move, double-click to maximize, minimize / maximize / close at its right. On X11 Kyde follows the desktop's scale (`Xft.dpi`, which GNOME, Cinnamon and KDE set); to override it, start Kyde with `GPUI_X11_SCALE_FACTOR=1.5` (any factor), or `GPUI_X11_SCALE_FACTOR=randr` to use the monitor's physical DPI. Wayland uses each monitor's own scale.
 

@@ -39,6 +39,7 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * relay Enter to the embedded terminal instead of consuming it as an app confirmation shortcut
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
+* **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
 ## [2.9.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.0...kyde-v2.9.1) (2026-11-01)
 

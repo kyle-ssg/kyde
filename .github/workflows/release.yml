@@ -67,12 +67,13 @@ jobs:
             asset: kyde-macos-x86_64.zip
           # Linux ships an AppImage. Pinned to an Ubuntu release (not ubuntu-latest): the glibc
           # it builds against is the oldest one the AppImage runs on, so it must not jump when
-          # -latest moves (a 26.04 build needs glibc 2.43 and won't start on 24.04; a 24.04
-          # build needs 2.39 for Rust std's pidfd_spawnp/pidfd_getpid, so 22.04 refuses it too).
+          # -latest moves. 22.04 sets that floor at glibc 2.35 (Ubuntu 22.04, Debian 12, Linux
+          # Mint 21); a 24.04 build needs 2.39 for Rust std's pidfd_spawnp/pidfd_getpid, and a
+          # 26.04 one needs 2.43, so neither starts on 22.04.
           # The name ends in .AppImage, not .zip, so no macOS updater — the old first-zip one
           # or the arch-aware one — can ever pick it.
           - name: linux
-            os: ubuntu-24.04
+            os: ubuntu-22.04
             asset: kyde-linux-x86_64.AppImage
           # Parked. This worked; to revive it, uncomment its matrix entry here AND its package
           # step further down.
