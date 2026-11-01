@@ -39,6 +39,28 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * keep Windows builds compiling when Unix-only single-instance IPC is unavailable
 * use the system command shell when opening the embedded terminal on Windows
 
+## [2.9.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.8.0...kyde-v2.9.0) (2026-11-01)
+
+
+### Features
+
+* **agents:** a new task in a busy worktree moves to its own ([#118](https://github.com/kyle-ssg/kyde/issues/118)) ([fb20d19](https://github.com/kyle-ssg/kyde/commit/fb20d194ea03ad136ae12135a7defcdbeacc6881))
+* **agents:** Claude's prompt suggestion acts as typed text in agent tabs ([#121](https://github.com/kyle-ssg/kyde/issues/121)) ([4941f78](https://github.com/kyle-ssg/kyde/commit/4941f78a97d203a05e0d60f656f80584b059899b))
+* **agents:** the Clean Up window lists finished tabs, the main checkout's too ([#126](https://github.com/kyle-ssg/kyde/issues/126)) ([11b4f48](https://github.com/kyle-ssg/kyde/commit/11b4f4873ee1dc43478ff19a872b34963d352076))
+* **find:** the terminal's find bar everywhere, and text that stays inside its box ([#128](https://github.com/kyle-ssg/kyde/issues/128)) ([9b940bc](https://github.com/kyle-ssg/kyde/commit/9b940bc1902434c2b20a37caa92aa20c951bf6c4))
+* **linux:** a working Linux build — AppImage releases, Ctrl shortcuts, window chrome and desktop integration ([#115](https://github.com/kyle-ssg/kyde/issues/115)) ([722dda2](https://github.com/kyle-ssg/kyde/commit/722dda208ace2bca1d71ca7257339bf56292cd21))
+* **terminal:** less lag under streaming output, find in scrollback (⌘F) and a scrollbar ([#119](https://github.com/kyle-ssg/kyde/issues/119)) ([533334b](https://github.com/kyle-ssg/kyde/commit/533334bd502743fda40406ae6565a11f534688d2))
+* **terminal:** your prompts to Claude stand out, ⌘↑ / ⌘↓ jump between them ([#123](https://github.com/kyle-ssg/kyde/issues/123)) ([cbf1e1b](https://github.com/kyle-ssg/kyde/commit/cbf1e1b21bd3efea0610c334e805b675b8ff7e8c))
+
+
+### Bug Fixes
+
+* **agents:** a related task in a shared worktree leaves the other agent's work alone ([#122](https://github.com/kyle-ssg/kyde/issues/122)) ([3dfa47e](https://github.com/kyle-ssg/kyde/commit/3dfa47e6ab3c794b756c9ed90f4a9c5a1f0c6282))
+* **agents:** Backspace clears Claude's prompt suggestion in agent tabs ([#127](https://github.com/kyle-ssg/kyde/issues/127)) ([a2cc9b3](https://github.com/kyle-ssg/kyde/commit/a2cc9b35788eae3f8333139a0db67754d6ea0328))
+* **agents:** Enter sends Claude's prompt suggestion in agent tabs ([#125](https://github.com/kyle-ssg/kyde/issues/125)) ([a7bb945](https://github.com/kyle-ssg/kyde/commit/a7bb9451605ba04c60ad0603005ea1b1cd9ac8b7))
+* **onboarding:** the keymap picker fits the window ([#120](https://github.com/kyle-ssg/kyde/issues/120)) ([45ec500](https://github.com/kyle-ssg/kyde/commit/45ec500d9928405574ce1aa03c6a495eb58feec6))
+* **terminal:** Claude's prompt suggestion shows fainter than your typed text ([#124](https://github.com/kyle-ssg/kyde/issues/124)) ([f5558d6](https://github.com/kyle-ssg/kyde/commit/f5558d6d4b6d647202649e192f85cbe4c6097bce))
+
 ## [2.8.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.7.0...kyde-v2.8.0) (2026-10-30)
 
 
