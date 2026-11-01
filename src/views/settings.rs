@@ -93,7 +93,7 @@ impl Kyde {
         #[cfg(target_os = "linux")]
         let (labels, selected) = (
             [labels, vec!["Match desktop"]].concat(),
-            if self.match_desktop {
+            if self.desktop_look.match_desktop {
                 Some(presets.len())
             } else {
                 selected
@@ -124,8 +124,8 @@ impl Kyde {
             ))
     }
 
-    /// Theme select entry `i`: a preset (leaving Match desktop), or Match desktop, which
-    /// re-reads the desktop when already on.
+    /// Theme select entry `i`: a preset (leaving Match desktop, the Terminal choice as it is),
+    /// or Match desktop, which re-reads the desktop when already on.
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
     fn pick_theme(&mut self, i: usize, cx: &mut Context<Self>) {
         #[cfg(target_os = "linux")]
@@ -134,7 +134,7 @@ impl Kyde {
                 self.set_match_desktop(true, cx);
                 return;
             }
-            if self.match_desktop {
+            if self.desktop_look.match_desktop {
                 self.set_match_desktop(false, cx);
             }
         }
@@ -144,7 +144,7 @@ impl Kyde {
     }
 
     /// Appearance section: theme + the three px size controls (live-applied), and on Linux
-    /// where the menus live.
+    /// the terminal's look and where the menus live.
     fn settings_appearance(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let t = theme::get();
         // A size Match desktop took from the desktop isn't Kyde's to step.
@@ -195,8 +195,79 @@ impl Kyde {
                 |th, v| th.tree_row_height = v,
             ));
         #[cfg(target_os = "linux")]
-        let section = section.child(self.menu_bar_choice(cx));
+        let section = section
+            .child(self.terminal_choice(cx))
+            .child(self.menu_bar_choice(cx));
         section.into_any_element()
+    }
+
+    /// How the terminal and agent tabs look (Linux): Kyde's own terminal, or the user's own
+    /// terminal app's colours and font. Independent of the theme; applies at once and persists
+    /// to `ui.json`.
+    #[cfg(target_os = "linux")]
+    fn terminal_choice(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let own = self.desktop_look.own_terminal;
+        let pill = |id: &'static str, label: &'static str, on: bool, cx: &mut Context<Self>| {
+            crate::tab_pill(id, label, 0, own == on).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| {
+                    this.set_own_terminal(on, cx);
+                    cx.notify();
+                }),
+            )
+        };
+        let note = own.then(|| {
+            let look = theme::terminal_look();
+            let colours = look.background.is_some()
+                || look.foreground.is_some()
+                || look.ansi.iter().any(Option::is_some);
+            match self.desktop_look.terminal_app {
+                Some(app) if !colours => format!(
+                    "Kyde can't read {app}'s colours, so they stay Kyde's. The font is {app}'s."
+                ),
+                Some(app) => format!(
+                    "{app}'s colours and font: the terminal Open in Terminal starts. Anything \
+                     Kyde can't read stays its own."
+                ),
+                None => "Your terminal app's colours and font: the one Open in Terminal \
+                         starts. Anything Kyde can't read stays its own."
+                    .to_string(),
+            }
+        });
+        div()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(140.0))
+                    .pt_1()
+                    .flex_none()
+                    .text_color(t.secondary_text)
+                    .child("Terminal"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_1()
+                            .child(pill("terminal-kyde", "Kyde", false, cx))
+                            .child(pill("terminal-yours", "Your terminal", true, cx)),
+                    )
+                    .when_some(note, |d, note| {
+                        d.child(div().text_color(t.line_number).child(note))
+                    }),
+            )
+            .into_any_element()
     }
 
     /// Where the menus live (Linux): a menu bar, the ☰ button, or whichever fits the desktop
@@ -1495,17 +1566,38 @@ impl Kyde {
     }
 }
 
+/// A read of the desktop: what it found, given the desktop and gpui's spelling of a font family
+/// (`None` for one gpui can't draw).
+#[cfg(target_os = "linux")]
+type DesktopRead<T> = fn(&crate::platform::desktop::Probe, &dyn Fn(&str) -> Option<String>) -> T;
+
 #[cfg(target_os = "linux")]
 impl Kyde {
-    /// Turn Match desktop on (read the desktop, then draw with it) or off (back to the saved
-    /// palette and the bundled fonts at once). Persisted in `ui.json`.
+    /// Turn Match desktop on (read the desktop, then draw with it, and set the terminal to Your
+    /// terminal) or off (back to the saved palette and the bundled fonts at once; the terminal
+    /// keeps its own choice). Persisted in `ui.json`.
     pub(crate) fn set_match_desktop(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.match_desktop = on;
+        self.desktop_look.match_desktop = on;
         crate::save_ui_bool("match_desktop", on);
         if on {
             self.read_desktop_look(cx);
+            self.set_own_terminal(true, cx);
         } else {
             theme::set_overlay(theme::Overlay::default());
+            cx.refresh_windows();
+        }
+    }
+
+    /// Terminal → Your terminal on (read the user's terminal app, then draw the terminal with
+    /// it) or off (Kyde's own terminal at once). Persisted in `ui.json`.
+    pub(crate) fn set_own_terminal(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.desktop_look.own_terminal = on;
+        crate::save_ui_bool("own_terminal_look", on);
+        if on {
+            self.read_terminal_look(cx);
+        } else {
+            theme::set_terminal_look(theme::TerminalLook::default());
+            self.desktop_look.terminal_app = None;
             cx.refresh_windows();
         }
     }
@@ -1513,12 +1605,44 @@ impl Kyde {
     /// Read the desktop's fonts and colours off the UI thread, then lay them over the theme —
     /// unless Match desktop was turned off meanwhile.
     pub(crate) fn read_desktop_look(&mut self, cx: &mut Context<Self>) {
+        self.read_desktop(cx, crate::platform::desktop::read, |this, overlay, cx| {
+            if this.desktop_look.match_desktop {
+                theme::set_overlay(overlay);
+                cx.refresh_windows();
+            }
+        });
+    }
+
+    /// Read the user's terminal app off the UI thread, then draw the terminal with it — unless
+    /// Terminal was set back to Kyde meanwhile.
+    pub(crate) fn read_terminal_look(&mut self, cx: &mut Context<Self>) {
+        self.read_desktop(
+            cx,
+            crate::platform::desktop::read_terminal,
+            |this, (look, app), cx| {
+                if this.desktop_look.own_terminal {
+                    theme::set_terminal_look(look);
+                    this.desktop_look.terminal_app = app;
+                    cx.refresh_windows();
+                }
+            },
+        );
+    }
+
+    /// Run `read` on a background thread over this session's desktop and gpui's own font list
+    /// (a family only switches when gpui can draw it), then hand what it found to `apply` on
+    /// the UI thread.
+    fn read_desktop<T: Send + 'static>(
+        &mut self,
+        cx: &mut Context<Self>,
+        read: DesktopRead<T>,
+        apply: fn(&mut Self, T, &mut Context<Self>),
+    ) {
         let text_system = cx.text_system().clone();
         cx.spawn(async move |this, cx| {
-            let overlay = cx
+            let found = cx
                 .background_executor()
                 .spawn(async move {
-                    // gpui's own font list: a family only switches when gpui can draw it.
                     let families = text_system.all_font_names();
                     let gpui_family = |family: &str| {
                         families
@@ -1526,19 +1650,10 @@ impl Kyde {
                             .find(|f| f.eq_ignore_ascii_case(family))
                             .cloned()
                     };
-                    crate::platform::desktop::read(
-                        &crate::platform::desktop::Probe::here(),
-                        &gpui_family,
-                    )
+                    read(&crate::platform::desktop::Probe::here(), &gpui_family)
                 })
                 .await;
-            this.update(cx, |this, cx| {
-                if this.match_desktop {
-                    theme::set_overlay(overlay);
-                    cx.refresh_windows();
-                }
-            })
-            .ok();
+            this.update(cx, |this, cx| apply(this, found, cx)).ok();
         })
         .detach();
     }

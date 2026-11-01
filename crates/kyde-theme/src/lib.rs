@@ -639,7 +639,8 @@ fn saved() -> Theme {
 /// A look laid over the saved theme for this run only — it never reaches `theme.json`, so
 /// [`update`] and [`apply_palette`] keep writing the user's own palette and sizes underneath.
 /// Linux's "Match desktop" fills one from the desktop's fonts and colours; setting
-/// `Overlay::default()` brings back the saved palette and the bundled fonts.
+/// `Overlay::default()` brings back the saved palette and the bundled fonts. The terminal has a
+/// look of its own, [`TerminalLook`].
 #[derive(Clone, Copy, Default)]
 pub struct Overlay {
     /// Colours drawn instead of the saved palette (its sizes are ignored); `None` = the saved
@@ -650,8 +651,6 @@ pub struct Overlay {
     /// Code face for the editor + diffs (its size replaces `editor_font_size`); `None` =
     /// `JetBrains` Mono at the saved size.
     pub editor: Option<font::Face>,
-    /// Terminal face; `None` = `JetBrains` Mono at `ui_font_size`.
-    pub terminal: Option<font::Face>,
 }
 
 impl Overlay {
@@ -680,7 +679,6 @@ static OVERLAY: RwLock<Overlay> = RwLock::new(Overlay {
     palette: None,
     ui: None,
     editor: None,
-    terminal: None,
 });
 
 // Poison-tolerant like `read_theme`: every writer replaces the whole `Copy` value at once.
@@ -702,6 +700,61 @@ pub fn set_overlay(overlay: Overlay) {
 #[must_use]
 pub fn overlay() -> Overlay {
     read_overlay()
+}
+
+/// How the terminal (and every agent tab) draws, laid over the theme for this run only like
+/// [`Overlay`] and never written to `theme.json`. Each `None` is the theme's own: so
+/// `TerminalLook::default()` is Kyde's terminal, and Linux's Settings → Appearance → Terminal →
+/// "Your terminal" fills in what it could read from the user's own terminal app. The panel
+/// chrome around a terminal always keeps the theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TerminalLook {
+    /// Background; `None` = `main_bg`.
+    pub background: Option<Rgba>,
+    /// Default text; `None` = `text`.
+    pub foreground: Option<Rgba>,
+    /// The 16 ANSI colours (0–7 normal, 8–15 bright); a `None` slot keeps Kyde's own.
+    pub ansi: [Option<Rgba>; 16],
+    /// Bold text in the default colour; `None` = the default colour.
+    pub bold: Option<Rgba>,
+    /// The cursor; `None` = `primary`.
+    pub cursor: Option<Rgba>,
+    /// The character under a block cursor; `None` = the character's own colour.
+    pub cursor_text: Option<Rgba>,
+    /// Font (its size replaces `ui_font_size` in the terminal); `None` = the code font
+    /// ([`font::family`]) at `ui_font_size`.
+    pub face: Option<font::Face>,
+}
+
+/// The terminal look in force (`TerminalLook::default()` when none).
+static TERMINAL_LOOK: RwLock<TerminalLook> = RwLock::new(TerminalLook {
+    background: None,
+    foreground: None,
+    ansi: [None; 16],
+    bold: None,
+    cursor: None,
+    cursor_text: None,
+    face: None,
+});
+
+// Poison-tolerant like `read_theme`: every writer replaces the whole `Copy` value at once.
+fn read_terminal_look() -> TerminalLook {
+    *TERMINAL_LOOK
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Draw the terminal with `look` (live: the next frame sees it). Not persisted.
+pub fn set_terminal_look(look: TerminalLook) {
+    *TERMINAL_LOOK
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = look;
+}
+
+/// The terminal look in force (`TerminalLook::default()` when none).
+#[must_use]
+pub fn terminal_look() -> TerminalLook {
+    read_terminal_look()
 }
 
 /// Mutate the live theme and persist it to `theme.json`. The change is visible to the next
@@ -742,7 +795,8 @@ pub const FRAME_GAP: f32 = 8.0;
 /// Fonts (no colour — separate from the themeable palette). The two bundled families are
 /// OFL-licensed and registered at startup in `main::load_fonts`; draw with
 /// [`crate::font::family`], [`crate::font::ui_family`] and [`crate::font::terminal_family`], which
-/// give the bundled family unless an [`crate::Overlay`] supplies another.
+/// give the bundled family unless an [`crate::Overlay`] (or, for the terminal, a
+/// [`crate::TerminalLook`]) supplies another.
 pub mod font {
     use std::sync::{Mutex, PoisonError};
 
@@ -792,17 +846,19 @@ pub mod font {
         crate::read_overlay().ui.map_or(UI_FAMILY, |f| f.family)
     }
 
-    /// Terminal font family.
+    /// Terminal font family: the terminal look's, else the code font.
     #[must_use]
     pub fn terminal_family() -> &'static str {
-        crate::read_overlay().terminal.map_or(FAMILY, |f| f.family)
+        crate::read_terminal_look()
+            .face
+            .map_or_else(family, |f| f.family)
     }
 
-    /// Terminal font size (px): the overlay's terminal size, else `ui_font_size`.
+    /// Terminal font size (px): the terminal look's, else `ui_font_size`.
     #[must_use]
     pub fn terminal_size() -> f32 {
-        crate::read_overlay()
-            .terminal
+        crate::read_terminal_look()
+            .face
             .and_then(|f| f.size)
             .unwrap_or_else(|| crate::get().ui_font_size)
     }
@@ -1091,6 +1147,27 @@ mod tests {
         let b = font::Face::new(&String::from("Ubuntu Sans Mono"), Some(14.0));
         assert!(std::ptr::eq(a.family, b.family));
         assert_eq!(b.size, Some(14.0));
+    }
+
+    /// The terminal's font is its look's, else the code font; the default look sets nothing.
+    #[test]
+    fn the_terminal_draws_with_its_own_look_else_the_code_font() {
+        let none = TerminalLook::default();
+        assert_eq!(
+            (none.background, none.foreground, none.ansi, none.face),
+            (None, None, [None; 16], None)
+        );
+        set_terminal_look(none);
+        assert_eq!(font::terminal_family(), font::family());
+        let face = font::Face::new("DejaVu Sans Mono", Some(13.0));
+        set_terminal_look(TerminalLook {
+            face: Some(face),
+            ..TerminalLook::default()
+        });
+        assert_eq!(font::terminal_family(), "DejaVu Sans Mono");
+        assert!((font::terminal_size() - 13.0).abs() < f32::EPSILON);
+        set_terminal_look(TerminalLook::default());
+        assert_eq!(terminal_look(), TerminalLook::default());
     }
 
     #[test]

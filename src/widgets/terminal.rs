@@ -1453,7 +1453,7 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .relative()
             .size_full()
-            .bg(theme::get().main_bg)
+            .bg(TermColors::current().bg)
             // Files dropped from a file manager are typed in as shell-quoted paths, sent the
             // way a paste is (bracketed when the program asked for it), so an image dropped on
             // an agent tab reaches Claude as a pasted path. Tinted like a tree folder while
@@ -1955,8 +1955,23 @@ impl Element for TerminalElement {
         let view = self.view.read(cx);
         let term = view.term.lock();
         let content = term.renderable_content();
-        let default_fg: Hsla = theme::get().text.into();
-        let default_bg: Hsla = theme::get().main_bg.into();
+        let pal = TermColors::current();
+        let (default_fg, default_bg) = (pal.fg, pal.bg);
+        // Where the cursor is drawn — only on the live screen (no scrollback offset) and when
+        // shown; over a Claude prompt suggestion it's at the suggestion's end, where typing
+        // goes — and whether it's a filled block (focused, and not a beam or underline).
+        let cursor_at = (content.display_offset == 0
+            && content.cursor.shape != CursorShape::Hidden)
+            .then(|| {
+                view.open_suggestion(&term)
+                    .map_or(content.cursor.point, |(_, end)| end)
+            });
+        let focused = view.focus.is_focused(window);
+        let filled_cursor = focused
+            && !matches!(
+                content.cursor.shape,
+                CursorShape::Beam | CursorShape::Underline
+            );
 
         let off = i32::try_from(content.display_offset).unwrap_or(0);
         // Prompts you sent an agent (Claude Code's echo of them) take an accent tint, and their
@@ -2026,8 +2041,16 @@ impl Element for TerminalElement {
                 continue;
             }
             let row_idx = line - base_line.unwrap_or(line);
-            let mut fg = resolve(cell.fg, default_fg, content.colors);
-            let mut bg = resolve_opt(cell.bg, content.colors);
+            let mut fg = resolve(cell.fg, default_fg, content.colors, &pal.ansi);
+            let mut bg = resolve_opt(cell.bg, content.colors, &pal.ansi);
+            // Bold text in the default colour takes the look's bold colour, when it has one.
+            if let Some(bold) = pal.bold {
+                if cell.flags.contains(Flags::BOLD)
+                    && cell.fg == AnsiColor::Named(NamedColor::Foreground)
+                {
+                    fg = bold;
+                }
+            }
             let prompt = usize::try_from(row_idx)
                 .ok()
                 .and_then(|r| prompts.get(r).copied().flatten());
@@ -2050,6 +2073,12 @@ impl Element for TerminalElement {
             }
             if cell.flags.contains(Flags::HIDDEN) {
                 fg = bg.unwrap_or(default_bg);
+            }
+            // The character under a filled block cursor, in the look's cursor text colour.
+            if let Some(text) = pal.cursor_text {
+                if filled_cursor && cursor_at == Some(cell.point) {
+                    fg = text;
+                }
             }
             // Selection tint wins over the cell's own bg (its runs paint after).
             let selected = selection.as_ref().is_some_and(|s| s.contains(cell.point));
@@ -2134,20 +2163,15 @@ impl Element for TerminalElement {
             );
         }
 
-        // Block cursor — only on the live screen (no scrollback offset) and when shown. Over
-        // a Claude prompt suggestion it's at the suggestion's end: that's where typing goes.
-        let cursor = if content.display_offset == 0 && content.cursor.shape != CursorShape::Hidden {
+        // Block cursor, where `cursor_at` says.
+        let cursor = if let Some(at) = cursor_at {
             let base = base_line.unwrap_or(0);
-            let at = view
-                .open_suggestion(&term)
-                .map_or(content.cursor.point, |(_, end)| end);
             let row = at.line.0 - base;
             let col = at.column.0.min(usize::from(cols).saturating_sub(1));
             if row >= 0 && (row as u16) < rows {
                 let x = bounds.left() + px(col as f32 * cell_w_f);
                 let y = bounds.top() + line_height * (row as f32 + shift);
-                let focused = view.focus.is_focused(window);
-                let color: Hsla = theme::get().primary.into();
+                let color = pal.cursor;
                 let rect = match content.cursor.shape {
                     CursorShape::Beam => Bounds::new(point(x, y), gpui::size(px(2.0), line_height)),
                     CursorShape::Underline => Bounds::new(
@@ -2262,28 +2286,87 @@ fn match_rows(m: &Match, off: i32, rows: i32, last_col: usize) -> Vec<(i32, usiz
         .collect()
 }
 
+/// What a terminal draws with: the theme's colours and `ANSI_PALETTE` (Kyde's terminal), with
+/// the Terminal look (Settings → Appearance → Terminal on Linux) laid over where it sets one.
+/// The panel chrome around the terminal keeps the theme.
+#[derive(Debug, PartialEq)]
+struct TermColors {
+    /// Default text.
+    fg: Hsla,
+    /// Background, painted behind the whole terminal.
+    bg: Hsla,
+    /// The 16 ANSI colours (named, and indexed 0–15).
+    ansi: [Rgb; 16],
+    /// Bold text in the default colour; `None` = `fg`.
+    bold: Option<Hsla>,
+    /// The cursor.
+    cursor: Hsla,
+    /// The character under a filled block cursor; `None` = its own colour.
+    cursor_text: Option<Hsla>,
+}
+
+impl TermColors {
+    /// The colours in force now.
+    fn current() -> Self {
+        Self::of(&theme::get(), &theme::terminal_look())
+    }
+
+    fn of(t: &theme::Theme, look: &theme::TerminalLook) -> Self {
+        let mut ansi = ANSI_PALETTE;
+        for (slot, color) in ansi.iter_mut().zip(look.ansi) {
+            if let Some(c) = color {
+                *slot = color_rgb(c);
+            }
+        }
+        Self {
+            fg: look.foreground.unwrap_or(t.text).into(),
+            bg: look.background.unwrap_or(t.main_bg).into(),
+            ansi,
+            bold: look.bold.map(Into::into),
+            cursor: look.cursor.unwrap_or(t.primary).into(),
+            cursor_text: look.cursor_text.map(Into::into),
+        }
+    }
+}
+
+/// A theme colour as the terminal's 8-bit RGB.
+fn color_rgb(c: kyde_color::Color) -> Rgb {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped to 0–255
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Rgb {
+        r: byte(c.r),
+        g: byte(c.g),
+        b: byte(c.b),
+    }
+}
+
 /// Resolve an alacritty cell color to an `Hsla`, falling back to `default` for the
-/// default-foreground sentinel.
+/// default-foreground sentinel. `ansi` is the 16-colour palette in force.
 fn resolve(
     color: AnsiColor,
     default: Hsla,
     colors: &alacritty_terminal::term::color::Colors,
+    ansi: &[Rgb; 16],
 ) -> Hsla {
     match color {
         AnsiColor::Named(NamedColor::Foreground) => default,
-        AnsiColor::Named(n) => named_rgb(n, colors).map_or(default, rgb_to_hsla),
+        AnsiColor::Named(n) => named_rgb(n, colors, ansi).map_or(default, rgb_to_hsla),
         AnsiColor::Spec(rgb) => rgb_to_hsla(rgb),
-        AnsiColor::Indexed(i) => rgb_to_hsla(indexed_rgb(i, colors)),
+        AnsiColor::Indexed(i) => rgb_to_hsla(indexed_rgb(i, colors, ansi)),
     }
 }
 
 /// Like `resolve` but returns `None` for the default background (so it isn't painted).
-fn resolve_opt(color: AnsiColor, colors: &alacritty_terminal::term::color::Colors) -> Option<Hsla> {
+fn resolve_opt(
+    color: AnsiColor,
+    colors: &alacritty_terminal::term::color::Colors,
+    ansi: &[Rgb; 16],
+) -> Option<Hsla> {
     match color {
         AnsiColor::Named(NamedColor::Background) => None,
-        AnsiColor::Named(n) => named_rgb(n, colors).map(rgb_to_hsla),
+        AnsiColor::Named(n) => named_rgb(n, colors, ansi).map(rgb_to_hsla),
         AnsiColor::Spec(rgb) => Some(rgb_to_hsla(rgb)),
-        AnsiColor::Indexed(i) => Some(rgb_to_hsla(indexed_rgb(i, colors))),
+        AnsiColor::Indexed(i) => Some(rgb_to_hsla(indexed_rgb(i, colors, ansi))),
     }
 }
 
@@ -2291,21 +2374,26 @@ fn rgb_to_hsla(rgb: Rgb) -> Hsla {
     gpui::rgb((u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)).into()
 }
 
-/// Named ANSI color → RGB: prefer an OSC-overridden value, else the builtin palette.
-fn named_rgb(n: NamedColor, colors: &alacritty_terminal::term::color::Colors) -> Option<Rgb> {
+/// Named ANSI color → RGB: prefer an OSC-overridden value, else the palette in force.
+fn named_rgb(
+    n: NamedColor,
+    colors: &alacritty_terminal::term::color::Colors,
+    ansi: &[Rgb; 16],
+) -> Option<Rgb> {
     if let Some(c) = colors[n] {
         return Some(c);
     }
-    let idx = n as usize;
-    if idx < 16 {
-        Some(ANSI_PALETTE[idx])
-    } else {
-        None
-    }
+    ansi.get(n as usize).copied()
 }
 
-fn indexed_rgb(i: u8, colors: &alacritty_terminal::term::color::Colors) -> Rgb {
-    colors[i as usize].unwrap_or_else(|| default_indexed(i))
+/// Indexed color → RGB: an OSC-overridden value, else the palette in force for 0–15 and the
+/// standard cube + grey ramp above.
+fn indexed_rgb(i: u8, colors: &alacritty_terminal::term::color::Colors, ansi: &[Rgb; 16]) -> Rgb {
+    colors[i as usize].unwrap_or_else(|| {
+        ansi.get(usize::from(i))
+            .copied()
+            .unwrap_or_else(|| default_indexed(i))
+    })
 }
 
 /// The standard 256-color cube + grayscale ramp for indices the program hasn't overridden.
@@ -2810,11 +2898,83 @@ mod tests {
         let colors = alacritty_terminal::term::color::Colors::default();
         let def: Hsla = gpui::rgb(0x123456).into();
         assert_eq!(
-            resolve(AnsiColor::Named(NamedColor::Foreground), def, &colors),
+            resolve(
+                AnsiColor::Named(NamedColor::Foreground),
+                def,
+                &colors,
+                &ANSI_PALETTE
+            ),
             def
         );
         // Default background resolves to None (not painted).
-        assert!(resolve_opt(AnsiColor::Named(NamedColor::Background), &colors).is_none());
+        assert!(resolve_opt(
+            AnsiColor::Named(NamedColor::Background),
+            &colors,
+            &ANSI_PALETTE
+        )
+        .is_none());
+    }
+
+    /// Terminal = Kyde (no look set): exactly the theme's colours and Kyde's own palette, as
+    /// the terminal drew before the Terminal choice existed.
+    #[test]
+    fn kydes_terminal_keeps_the_themes_colours() {
+        for (_, t) in theme::Theme::presets() {
+            let c = TermColors::of(&t, &theme::TerminalLook::default());
+            let hsla = |c: kyde_color::Color| -> Hsla { c.into() };
+            assert_eq!(c.fg, hsla(t.text));
+            assert_eq!(c.bg, hsla(t.main_bg));
+            assert_eq!(c.cursor, hsla(t.primary));
+            assert_eq!(c.ansi, ANSI_PALETTE);
+            assert_eq!((c.bold, c.cursor_text), (None, None));
+        }
+    }
+
+    /// Your terminal: black, silver text and the VGA palette, the cursor still Kyde's; named
+    /// and indexed colours both take the look's palette, the cube above 15 stays standard.
+    #[test]
+    fn your_terminal_draws_with_its_own_colours() {
+        let rgb = |hex: u32| kyde_color::Color::rgb(hex);
+        let vga = [
+            0x000000, 0x800000, 0x008000, 0x808000, 0x000080, 0x800080, 0x008080, 0xC0C0C0,
+            0x808080, 0xFF0000, 0x00FF00, 0xFFFF00, 0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
+        ];
+        let look = theme::TerminalLook {
+            background: Some(rgb(0x000000)),
+            foreground: Some(rgb(0xC0C0C0)),
+            ansi: vga.map(|c| Some(rgb(c))),
+            ..theme::TerminalLook::default()
+        };
+        let t = theme::Theme::default();
+        let c = TermColors::of(&t, &look);
+        assert_eq!(c.bg, gpui::rgb(0x000000).into());
+        assert_eq!(c.fg, gpui::rgb(0xC0C0C0).into());
+        assert_eq!(c.cursor, Hsla::from(t.primary));
+        let colors = alacritty_terminal::term::color::Colors::default();
+        let default = c.fg;
+        assert_eq!(
+            resolve(
+                AnsiColor::Named(NamedColor::Blue),
+                default,
+                &colors,
+                &c.ansi
+            ),
+            gpui::rgb(0x000080).into()
+        );
+        assert_eq!(
+            resolve(AnsiColor::Indexed(9), default, &colors, &c.ansi),
+            gpui::rgb(0xFF0000).into()
+        );
+        assert_eq!(
+            resolve(AnsiColor::Indexed(16), default, &colors, &c.ansi),
+            rgb_to_hsla(default_indexed(16))
+        );
+        // A slot the look leaves unset keeps Kyde's.
+        let partial = theme::TerminalLook {
+            ansi: [None; 16],
+            ..look
+        };
+        assert_eq!(TermColors::of(&t, &partial).ansi, ANSI_PALETTE);
     }
 
     #[test]

@@ -294,7 +294,7 @@ pub(super) fn terminal(p: &Probe) -> Option<FontSpec> {
 /// Which of [`TERMINALS`] the terminal program is: by its name (Debian's `.real` / `.wrapper`
 /// launchers included), else the program a link points to (Debian's `x-terminal-emulator`),
 /// and for `xdg-terminal-exec` the first installed terminal on its lists.
-fn terminal_name(p: &Probe) -> Option<&'static str> {
+pub(super) fn terminal_name(p: &Probe) -> Option<&'static str> {
     let program = p.terminal.as_deref()?;
     let known = |name: &str| {
         let name = name
@@ -441,15 +441,7 @@ fn kitty(p: &Probe) -> FontSpec {
 /// Alacritty: `[font] size` and `[font.normal] family` (or `normal = { family = … }`) in
 /// `alacritty.toml`, else Alacritty's defaults (fontconfig's `monospace`, 11.25 pt).
 fn alacritty(p: &Probe) -> Option<FontSpec> {
-    let text = [
-        p.config_home.join("alacritty/alacritty.toml"),
-        p.config_home.join("alacritty.toml"),
-        p.home.join(".config/alacritty/alacritty.toml"),
-        p.home.join(".alacritty.toml"),
-    ]
-    .iter()
-    .find_map(|f| std::fs::read_to_string(f).ok())
-    .unwrap_or_default();
+    let text = alacritty_toml(p);
     let (mut family, mut size) = ("monospace".to_string(), 11.25);
     let mut section = "";
     for line in text.lines().map(str::trim) {
@@ -480,8 +472,22 @@ fn alacritty(p: &Probe) -> Option<FontSpec> {
     })
 }
 
+/// Alacritty's `alacritty.toml`, from the first place Alacritty looks that has one; `""` when
+/// there's none.
+pub(super) fn alacritty_toml(p: &Probe) -> String {
+    [
+        p.config_home.join("alacritty/alacritty.toml"),
+        p.config_home.join("alacritty.toml"),
+        p.home.join(".config/alacritty/alacritty.toml"),
+        p.home.join(".alacritty.toml"),
+    ]
+    .iter()
+    .find_map(|f| std::fs::read_to_string(f).ok())
+    .unwrap_or_default()
+}
+
 /// The quoted string `s` starts with, or its first word.
-fn quoted_or_word(s: &str) -> &str {
+pub(super) fn quoted_or_word(s: &str) -> &str {
     let s = s.trim_start();
     match s.chars().next() {
         Some(q @ ('"' | '\'')) => s[1..].split(q).next().unwrap_or(""),

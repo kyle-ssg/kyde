@@ -1318,6 +1318,33 @@ impl TermState {
     }
 }
 
+/// Linux's own-look choices in Settings → Appearance, grouped out of the `Kyde` god-struct.
+/// Both are kept in `ui.json`, next to the other display prefs, and read again at start.
+#[cfg(target_os = "linux")]
+struct DesktopLook {
+    /// Theme → Match desktop: draw with the desktop's fonts and colours (a `theme::Overlay`).
+    match_desktop: bool,
+    /// Terminal → Your terminal: the terminal and agent tabs draw with the user's own terminal
+    /// app's colours and font (a `theme::TerminalLook`); off is Kyde's own terminal.
+    own_terminal: bool,
+    /// The terminal app Your terminal last read (its name, for the note under the choice).
+    terminal_app: Option<&'static str>,
+}
+
+#[cfg(target_os = "linux")]
+impl DesktopLook {
+    /// The saved choices. A `ui.json` from before the Terminal choice existed gives Your
+    /// terminal exactly when Match desktop is on, as turning Match desktop on now does.
+    fn load() -> Self {
+        let match_desktop = load_ui_bool("match_desktop", false);
+        Self {
+            match_desktop,
+            own_terminal: load_ui_bool("own_terminal_look", match_desktop),
+            terminal_app: None,
+        }
+    }
+}
+
 /// The Agents view's state (spaces → worktrees → tabs; see `agents.rs` for the pure model and
 /// `views/agents.rs` for the UI). The persisted layout is `cfg`; the PTY-backed tabs are
 /// runtime-only and live behind the `terminal` feature. Global, NOT per project — switching
@@ -2468,10 +2495,9 @@ struct Kyde {
     settings_section: SettingsSection,
     /// The Appearance → Theme select dropdown.
     settings_theme: ui::SelectState,
-    /// Appearance → Theme → Match desktop (Linux): draw with the desktop's fonts and colours
-    /// (a `theme::Overlay`). Persisted in `ui.json`.
+    /// Appearance → Match desktop and Terminal (Linux).
     #[cfg(target_os = "linux")]
-    match_desktop: bool,
+    desktop_look: DesktopLook,
     /// The Keymap section's shortcut editor (recording state + last change's note).
     keymap_editor: KeymapEditor,
     /// Cached `(path, registered family name)` for the open font file's preview.

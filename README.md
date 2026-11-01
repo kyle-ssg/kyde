@@ -56,9 +56,12 @@ Six built-in palettes ship — **Kyde Dark**, **Kyde Light**, and colour-vision-
 variants of each (**Red–Green** and **Blue–Yellow**, which separate the diff/syntax poles
 by lightness instead of hue) — switch in Settings.
 On Linux, **Match desktop** (Settings → Appearance → Theme, off by default) draws Kyde with your
-desktop's look instead: your terminal app's font in the terminal, the desktop's monospace and UI
-fonts, and its light/dark preference, accent and GTK theme (or KDE colour scheme) colours.
-Anything Kyde can't read or draw stays its own.
+desktop's look instead: your terminal app's colours and font in the terminal, the desktop's
+monospace and UI fonts, and its light/dark preference, accent and GTK theme (or KDE colour scheme)
+colours. Anything Kyde can't read or draw stays its own.
+**Settings → Appearance → Terminal → Your terminal** (Linux) gives the terminal and agent tabs your
+terminal app's colours and font under any theme, say a black terminal in Kyde Dark; **Kyde** keeps
+Kyde's own.
 
 <p align="center">
   <img src="assets/screenshots/light.png" alt="Kyde Light theme — the same side-by-side diff rendered in the built-in light palette" width="900">

@@ -244,7 +244,7 @@ impl Kyde {
             settings_section: SettingsSection::Appearance,
             settings_theme: ui::SelectState::new(cx),
             #[cfg(target_os = "linux")]
-            match_desktop: crate::load_ui_bool("match_desktop", false),
+            desktop_look: crate::DesktopLook::load(),
             keymap_editor: KeymapEditor::new(cx),
             font_preview: None,
             welcome_frame: 0,
@@ -304,8 +304,13 @@ impl Kyde {
             me.enter_agents(cx);
         }
         #[cfg(target_os = "linux")]
-        if me.match_desktop {
-            me.read_desktop_look(cx);
+        {
+            if me.desktop_look.match_desktop {
+                me.read_desktop_look(cx);
+            }
+            if me.desktop_look.own_terminal {
+                me.read_terminal_look(cx);
+            }
         }
         // Background: ask GitHub if there's a newer release, then surface the update banner.
         // Network I/O off the UI thread; failures stay silent.

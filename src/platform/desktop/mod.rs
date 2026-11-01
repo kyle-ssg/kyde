@@ -1,17 +1,19 @@
-//! "Match desktop" (Settings → Appearance): read the Linux desktop's fonts and colours so
-//! Kyde can draw with them.
+//! "Match desktop" and "Your terminal" (Settings → Appearance): read the Linux desktop's fonts
+//! and colours, and the user's own terminal app's, so Kyde can draw with them.
 //!
-//! Three fonts — the terminal's (from the user's own terminal app, the one Open in Terminal
-//! starts), the code font (the desktop's monospace font) and the UI font — and a palette from
-//! the desktop's dark preference, accent and GTK theme or KDE colour scheme. Every read falls
-//! back on its own: a desktop Kyde doesn't know, a missing tool (`gsettings`, `xfconf-query`,
+//! Match desktop ([`read`]): the code font (the desktop's monospace font), the UI font, and a
+//! palette from the desktop's dark preference, accent and GTK theme or KDE colour scheme. Your
+//! terminal ([`read_terminal`]): the background, text, 16 ANSI colours, bold and cursor colours
+//! and font of the terminal Open in Terminal starts. Every read falls back on its own: a
+//! desktop or terminal Kyde doesn't know, a missing tool (`gsettings`, `xfconf-query`,
 //! `fc-list`), an unreadable file, or a font gpui can't draw leaves just that piece on Kyde's
-//! own default. Nothing here fails or panics; [`read`] runs on a background thread.
+//! own default. Nothing here fails or panics; both reads run on a background thread.
 //!
 //! Pure + unit-tested apart from [`Probe::here`], which reads the environment.
 
 mod colors;
 mod fonts;
+mod term_colors;
 
 use super::terminal_app::{find_on, gsettings_string, names_desktop, resolve_here};
 use crate::theme;
@@ -178,22 +180,55 @@ impl Desktop {
 /// gpui's text system has, `None` for one it doesn't.
 pub(crate) fn read(p: &Probe, gpui_family: &dyn Fn(&str) -> Option<String>) -> theme::Overlay {
     let scale = fonts::text_scale(p);
-    let face = |spec: fonts::FontSpec| fonts::face(p, spec, scale, gpui_family);
-    // No monospace setting at all: fontconfig's `monospace`, at Kyde's size.
-    let editor = match fonts::monospace(p) {
-        Some(spec) => face(spec),
-        None => face(fonts::FontSpec::family("monospace")),
-    };
-    // A terminal on the system monospace font, or one Kyde can't read: the code font.
-    let terminal = match fonts::terminal(p) {
-        Some(spec) => face(spec),
-        None => editor,
-    };
     theme::Overlay {
         palette: colors::palette(&colors::read(p)),
-        ui: fonts::ui(p).and_then(face),
-        editor,
-        terminal,
+        ui: fonts::ui(p).and_then(|spec| fonts::face(p, spec, scale, gpui_family)),
+        editor: code_face(p, scale, gpui_family),
+    }
+}
+
+/// What the terminal draws with while Terminal is "Your terminal": the colours and font of the
+/// user's own terminal app (the one Open in Terminal starts), each `None` (Kyde's own) where
+/// Kyde can't read or draw it; and that terminal's name, `None` when it's one Kyde doesn't
+/// read. `gpui_family` as for [`read`].
+pub(crate) fn read_terminal(
+    p: &Probe,
+    gpui_family: &dyn Fn(&str) -> Option<String>,
+) -> (theme::TerminalLook, Option<&'static str>) {
+    let terminal = fonts::terminal_name(p);
+    let mut look = terminal.map_or_else(theme::TerminalLook::default, |t| term_colors::read(p, t));
+    let scale = fonts::text_scale(p);
+    // A terminal on the system monospace font, or one Kyde can't read: the desktop's
+    // monospace font, as that terminal draws.
+    look.face = match fonts::terminal(p) {
+        Some(spec) => fonts::face(p, spec, scale, gpui_family),
+        None => code_face(p, scale, gpui_family),
+    };
+    (look, terminal.map(terminal_label))
+}
+
+/// The desktop's monospace font as a face gpui can draw; with no monospace setting at all,
+/// fontconfig's `monospace` at Kyde's size.
+fn code_face(
+    p: &Probe,
+    scale: f32,
+    gpui_family: &dyn Fn(&str) -> Option<String>,
+) -> Option<theme::font::Face> {
+    let spec = fonts::monospace(p).unwrap_or_else(|| fonts::FontSpec::family("monospace"));
+    fonts::face(p, spec, scale, gpui_family)
+}
+
+/// A terminal's name as its own window shows it.
+fn terminal_label(terminal: &str) -> &'static str {
+    match terminal {
+        "gnome-terminal" => "GNOME Terminal",
+        "ptyxis" => "Ptyxis",
+        "mate-terminal" => "MATE Terminal",
+        "xfce4-terminal" => "Xfce Terminal",
+        "konsole" => "Konsole",
+        "kitty" => "kitty",
+        "alacritty" => "Alacritty",
+        _ => "your terminal",
     }
 }
 
@@ -360,9 +395,14 @@ mod tests {
                 &gpui_with(&["DejaVu Sans Mono"]),
             );
             assert!(o.palette.is_none(), "{desktop}");
+            assert_eq!((o.ui, o.editor), (None, None), "{desktop}");
+            let (look, terminal) = read_terminal(
+                &probe(desktop, &root, &[]),
+                &gpui_with(&["DejaVu Sans Mono"]),
+            );
             assert_eq!(
-                (o.ui, o.editor, o.terminal),
-                (None, None, None),
+                (look, terminal),
+                (theme::TerminalLook::default(), None),
                 "{desktop}"
             );
         }
@@ -426,12 +466,15 @@ mod tests {
              @define-color theme_text_color #000000;\n@define-color theme_selected_bg_color #000080;\n\
              @define-color theme_selected_fg_color #ffffff;\n",
         );
-        let o = read(&p, &gpui_with(&["DejaVu Sans Mono", "Noto Sans Mono"]));
+        let gpui = gpui_with(&["DejaVu Sans Mono", "Noto Sans Mono"]);
+        let o = read(&p, &gpui);
         let px = |pt: f32| pt * 96.0 / 72.0;
+        let (look, terminal) = read_terminal(&p, &gpui);
         assert_eq!(
-            o.terminal,
+            look.face,
             Some(theme::font::Face::new("DejaVu Sans Mono", Some(px(10.0))))
         );
+        assert_eq!(terminal, Some("GNOME Terminal"));
         assert_eq!(
             o.editor,
             Some(theme::font::Face::new("Noto Sans Mono", Some(px(11.0))))

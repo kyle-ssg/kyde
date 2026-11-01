@@ -26,6 +26,22 @@ pub(super) struct Colors {
     dark: Option<bool>,
 }
 
+impl Colors {
+    /// The content text and background (the theme's view colours, else its window's): what a
+    /// terminal set to use the theme's colours draws with.
+    pub(super) fn content(&self) -> (Option<Color>, Option<Color>) {
+        (
+            self.view_fg.or(self.window_fg),
+            self.view_bg.or(self.window_bg),
+        )
+    }
+
+    /// Whether the desktop prefers dark (`None`: it didn't say).
+    pub(super) fn dark(&self) -> Option<bool> {
+        self.dark
+    }
+}
+
 /// Read the desktop's colours: KDE's colour scheme, else the GTK 3 theme.
 pub(super) fn read(p: &Probe) -> Colors {
     if p.desktop == Desktop::Kde {
@@ -183,14 +199,33 @@ fn import_target(rest: &str) -> Option<&str> {
     (!target.is_empty() && !target.contains("://")).then_some(target)
 }
 
-/// A CSS colour: `#rgb`, `#rrggbb`, opaque `rgb()` / `rgba()`, or a basic colour name.
-/// Anything else (a translucent colour, a GTK colour function) is `None`.
-fn parse_color(s: &str) -> Option<Color> {
+/// A CSS colour: `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb` (as GDK writes 16-bit
+/// colours), opaque `rgb()` / `rgba()`, or a basic colour name. Anything else (a translucent
+/// colour, a GTK colour function) is `None`.
+pub(super) fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#') {
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
         let digits = match hex.len() {
             3 => hex.chars().flat_map(|c| [c, c]).collect(),
             6 => hex.to_string(),
+            // Each channel's digits, scaled to 0–1 by their own width.
+            9 | 12 => {
+                let width = hex.len() / 3;
+                let max = f32::from(u16::MAX >> (16 - 4 * width));
+                let chan = |i: usize| -> Option<f32> {
+                    let v = u16::from_str_radix(&hex[i * width..(i + 1) * width], 16).ok()?;
+                    Some(f32::from(v) / max)
+                };
+                return Some(Color {
+                    r: chan(0)?,
+                    g: chan(1)?,
+                    b: chan(2)?,
+                    a: 1.0,
+                });
+            }
             _ => return None,
         };
         return u32::from_str_radix(&digits, 16).ok().map(rgb_hex);
@@ -248,6 +283,46 @@ fn parse_color(s: &str) -> Option<Color> {
     Some(rgb_hex(hex))
 }
 
+/// A colour as terminals write one: what [`parse_color`] reads, quoted or not, plus Alacritty's
+/// `0xRRGGBB`, and a translucent `rgba()` taken as its opaque colour (Kyde doesn't draw a
+/// terminal see-through).
+pub(super) fn parse_term_color(s: &str) -> Option<Color> {
+    let s = super::unquote(s).trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return parse_color(&format!("#{hex}"));
+    }
+    parse_color(s).or_else(|| {
+        let args = s.strip_prefix("rgba(")?.strip_suffix(')')?;
+        let parts: Vec<&str> = args.split(',').collect();
+        let [r, g, b, _] = parts.as_slice() else {
+            return None;
+        };
+        parse_color(&format!("rgb({r},{g},{b})"))
+    })
+}
+
+/// A KDE colour: `r,g,b` (or `r,g,b,a`) in 0–255, or a CSS colour.
+pub(super) fn kde_color(value: &str) -> Option<Color> {
+    let channels: Option<Vec<f32>> = value
+        .split(',')
+        .map(|c| {
+            c.trim()
+                .parse::<f32>()
+                .ok()
+                .map(|n| n.clamp(0.0, 255.0) / 255.0)
+        })
+        .collect();
+    match channels.as_deref() {
+        Some(&[red, green, blue] | &[red, green, blue, _]) => Some(Color {
+            r: red,
+            g: green,
+            b: blue,
+            a: 1.0,
+        }),
+        _ => parse_color(value),
+    }
+}
+
 fn rgb_hex(hex: u32) -> Color {
     let chan = |shift: u32| ((hex >> shift) & 0xFF) as f32 / 255.0;
     Color {
@@ -279,28 +354,7 @@ fn gnome_accent(name: &str) -> Option<Color> {
 /// `[Colors:Selection]`), the accent, and the scheme's name for its lightness when the colours
 /// themselves aren't written.
 fn kde(p: &Probe) -> Colors {
-    // `r,g,b` (or `r,g,b,a`) in 0–255, or a `#rrggbb`.
-    let color = |section: &str, key: &str| {
-        let value = p.kde_setting(section, key)?;
-        let channels: Option<Vec<f32>> = value
-            .split(',')
-            .map(|c| {
-                c.trim()
-                    .parse::<f32>()
-                    .ok()
-                    .map(|n| n.clamp(0.0, 255.0) / 255.0)
-            })
-            .collect();
-        match channels.as_deref() {
-            Some(&[red, green, blue] | &[red, green, blue, _]) => Some(Color {
-                r: red,
-                g: green,
-                b: blue,
-                a: 1.0,
-            }),
-            _ => parse_color(&value),
-        }
-    };
+    let color = |section: &str, key: &str| kde_color(&p.kde_setting(section, key)?);
     Colors {
         window_bg: color("Colors:Window", "BackgroundNormal"),
         window_fg: color("Colors:Window", "ForegroundNormal"),
@@ -472,6 +526,35 @@ mod tests {
         assert_eq!(p("transparent"), None);
         assert_eq!(p("#12345"), None);
         assert_eq!(p("rgb(1, 2)"), None);
+        // GDK's 16-bit (and 12-bit) hex, as MATE Terminal and older gnome-terminals store.
+        assert_eq!(p("#FFFF80800000"), Some(0xFF8000));
+        assert_eq!(p("#AAAA00000000"), Some(0xAA0000));
+        assert_eq!(p("#fff800000"), Some(0xFF8000));
+        assert_eq!(p("#+12345"), None);
+        assert_eq!(p("#ÿÿÿÿ"), None);
+    }
+
+    #[test]
+    fn terminal_colours_in_the_forms_terminals_write() {
+        let p = |s: &str| parse_term_color(s).map(hex);
+        assert_eq!(p("#C0C0C0"), Some(0xC0C0C0));
+        assert_eq!(p("'#C0C0C0'"), Some(0xC0C0C0));
+        assert_eq!(p("\"#1d1f21\""), Some(0x1D1F21));
+        assert_eq!(p("0x1d1f21"), Some(0x1D1F21));
+        assert_eq!(p("#c0c0c0c0c0c0"), Some(0xC0C0C0));
+        assert_eq!(p("rgb(192,192,192)"), Some(0xC0C0C0));
+        assert_eq!(p("rgba(0,0,0,1)"), Some(0x000000));
+        // A see-through terminal background: its colour, drawn opaque.
+        assert_eq!(p("rgba(0, 0, 128, 0.85)"), Some(0x000080));
+        // Not a colour: Kyde's own.
+        assert_eq!(p("CellBackground"), None);
+        assert_eq!(p(""), None);
+        assert_eq!(p("rgba(0,0,0)x"), None);
+        assert_eq!(
+            kde_color("35,38,39").map(hex),
+            Some(0x232627),
+            "a Konsole scheme's r,g,b"
+        );
     }
 
     #[test]

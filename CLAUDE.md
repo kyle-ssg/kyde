@@ -105,7 +105,8 @@ editor/  mdview.rs  terminal.rs  remote_img.rs
 clipboard.rs  scratch.rs  shellcmd.rs  instance.rs (single-instance socket)
 terminal_app.rs (Open in Terminal off macOS)  window_icon.rs (X11 window icon)
 keyboard_layout.rs (Shift + symbol keys on the active Linux layout)  input_method.rs (no XIM for
-plain layouts on X11)  desktop/ (Linux "Match desktop": the desktop's fonts + colours)
+plain layouts on X11)  desktop/ (Linux "Match desktop" + "Your terminal": the desktop's and the
+terminal app's fonts + colours)
 
 # ── workspace crates (pure Rust, no Kyde; see crates/<name>) ──
 kyde-git      Repo: discover/status/numstat/base_content/working_content/stage/unstage/
@@ -168,8 +169,9 @@ and `FAMILY` = **JetBrains Mono** (code surfaces — diff panes + editor, and th
 OFL, in `assets/fonts/`, registered at startup via `main::load_fonts`. Draw with the accessors
 `font::ui_family()` / `family()` / `terminal_family()` (+ `terminal_size()`), never the consts:
 they give the bundled family unless a `theme::Overlay` (Linux "Match desktop", never persisted)
-supplies another. Chrome render fns thread a `ui` family arg. (SF Mono was rejected — Apple
-license, not shippable.)
+supplies another; the terminal's font and colours come from a `theme::TerminalLook` (Linux
+"Your terminal", never persisted), else the code font and the theme. Chrome render fns thread a
+`ui` family arg. (SF Mono was rejected — Apple license, not shippable.)
 
 ## Build / run
 Rust 1.96 + Metal Toolchain are installed. gpui needs Apple's Metal Toolchain to compile
