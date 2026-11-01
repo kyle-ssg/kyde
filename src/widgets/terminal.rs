@@ -37,6 +37,7 @@ use gpui::{
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent,
     ShapedLine, Style, TextRun, Window,
 };
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -223,8 +224,8 @@ pub struct TerminalView {
     /// is drawn at its end, and typing there accepts it first (`accept_suggestion`). Its
     /// other greyed hints in the box come while it starts up or works.
     claude_done: bool,
-    /// The suggestion last accepted for you. Claude greys an accepted one back in when the
-    /// box is emptied; that time it's left alone, so emptying the box still starts afresh.
+    /// The suggestion last accepted or cleared (Backspace) for you. Claude greys it back in
+    /// whenever the box is emptied; that time it's left out, so the box shows empty.
     taken_suggestion: Option<String>,
     /// Input held back while Claude takes in an accepted suggestion, then written in order.
     held: Option<Vec<u8>>,
@@ -661,6 +662,28 @@ impl TerminalView {
         prompt_suggestion(term).filter(|(text, _)| self.taken_suggestion.as_ref() != Some(text))
     }
 
+    /// The rows of Claude's input box holding a suggestion already accepted or cleared, which
+    /// Claude has greyed back into the emptied box. They're drawn as the empty box they are.
+    fn cleared_suggestion_rows(&self, term: &Term<EventProxy>) -> Option<RangeInclusive<Line>> {
+        if !self.claude_done {
+            return None;
+        }
+        let (text, end) = prompt_suggestion(term)?;
+        (self.taken_suggestion.as_ref() == Some(&text))
+            .then(|| term.grid().cursor.point.line..=end.line)
+    }
+
+    /// Backspace on Claude's prompt suggestion: clear it whole, not its last character.
+    /// Nothing reaches Claude (its box is empty, the suggestion only greyed in) — the
+    /// suggestion is just left out from then on, and typing replaces it as Claude does.
+    fn clear_suggestion(&mut self) -> bool {
+        let Some((text, _)) = self.open_suggestion(&self.term.lock()) else {
+            return false;
+        };
+        self.taken_suggestion = Some(text);
+        true
+    }
+
     /// Before a key that edits Claude's input: accept its prompt suggestion with →, Claude's
     /// own key for that, so the key lands at the suggestion's end, where the cursor is drawn.
     /// The key waits a moment — arriving in the same read as the →, Claude applies it to the
@@ -689,16 +712,18 @@ impl TerminalView {
     }
 
     /// Relay a key's raw bytes to the PTY (typed keys from `on_key`; Enter / backspace / escape
-    /// from their action handlers): jump to the live screen, accept Claude's prompt suggestion
-    /// first when the key acts on it, write, repaint.
+    /// from their action handlers): jump to the live screen, accept or clear Claude's prompt
+    /// suggestion first when the key acts on it, write, repaint.
     fn send_key(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
         self.scroll(Scroll::Bottom);
-        if takes_suggestion(&bytes) {
-            self.accept_suggestion(cx);
+        cx.notify();
+        match on_suggestion(&bytes) {
+            Some(OnSuggestion::Accept) => self.accept_suggestion(cx),
+            Some(OnSuggestion::Clear) if self.clear_suggestion() => return,
+            _ => {}
         }
         self.write(bytes);
-        cx.notify();
     }
 
     /// Re-size the grid + PTY when the panel geometry changes. No-op if unchanged.
@@ -1445,8 +1470,12 @@ impl Render for TerminalView {
             // here rather than let it fall through to the app action (which deleted the selected
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
             .on_action(cx.listener(|this, _: &crate::TerminalEnter, _w, cx| {
+                // An emptied box sends nothing, so a cleared suggestion stays cleared.
+                let empty = this.cleared_suggestion_rows(&this.term.lock()).is_some();
                 this.send_key(b"\r".to_vec(), cx);
-                this.taken_suggestion = None;
+                if !empty {
+                    this.taken_suggestion = None;
+                }
                 cx.emit(TerminalEvent::Submitted);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
@@ -1958,6 +1987,7 @@ impl Element for TerminalElement {
         // Prompts you sent an agent (Claude Code's echo of them) take an accent tint, and their
         // ❯ the accent, so your turns stand out from its replies.
         let prompts = prompt_rows(&term, Line(-off), term.screen_lines());
+        let cleared = view.cleared_suggestion_rows(&term);
         let accent: Hsla = theme::get().primary.into();
         let prompt_bg = default_bg.blend(accent.opacity(0.2));
 
@@ -2059,7 +2089,17 @@ impl Element for TerminalElement {
             if selected {
                 push_run(&mut sel_runs, row_idx, col, width, sel_bg);
             }
-            let ch = cell.c;
+            // A cleared suggestion Claude greyed back into its emptied box is left out.
+            let ch = if cell.flags.contains(Flags::DIM)
+                && col >= 2
+                && cleared
+                    .as_ref()
+                    .is_some_and(|r| r.contains(&cell.point.line))
+            {
+                ' '
+            } else {
+                cell.c
+            };
             if (ch != ' ' && ch != '\0') || bg.is_some() {
                 last_used = last_used.max(line - base_line.unwrap_or(line));
             }
@@ -2359,12 +2399,24 @@ fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
     Some((text.split_whitespace().collect::<Vec<_>>().join(" "), end))
 }
 
-/// Whether a key's bytes act on Claude's input as if its prompt suggestion were typed there:
-/// typed text, ← or Backspace edit at the cursor, and Enter sends it — Claude's own Enter
-/// skips a suggestion and finds the box empty.
-fn takes_suggestion(bytes: &[u8]) -> bool {
-    matches!(bytes, b"\x1b[D" | b"\r" | [0x7f])
-        || bytes.first().is_some_and(|&b| b >= 0x20 && b != 0x7f)
+/// What a key does to Claude's prompt suggestion, drawn as if typed into its box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OnSuggestion {
+    /// Accept it first, as typed text: typed text and ← edit at the cursor, and Enter sends
+    /// it — Claude's own Enter skips a suggestion and finds the box empty.
+    Accept,
+    /// Clear it whole: Backspace.
+    Clear,
+}
+
+/// How a key's bytes act on Claude's prompt suggestion, if at all.
+fn on_suggestion(bytes: &[u8]) -> Option<OnSuggestion> {
+    match bytes {
+        [0x7f] => Some(OnSuggestion::Clear),
+        b"\x1b[D" | b"\r" => Some(OnSuggestion::Accept),
+        [b, ..] if *b >= 0x20 && *b != 0x7f => Some(OnSuggestion::Accept),
+        _ => None,
+    }
 }
 
 /// Translate a (non-⌘) key press to the bytes to write to the PTY, or `None` if the key
@@ -2753,9 +2805,11 @@ mod tests {
     }
 
     /// Enter on a suggestion sends it, as it would typed text — Claude alone submits nothing.
+    /// Backspace clears it whole rather than taking it and deleting its last character.
     #[test]
-    fn enter_takes_claude_prompt_suggestion() {
-        assert!(takes_suggestion(b"\r"));
-        assert!(!takes_suggestion(b"\x1b"));
+    fn keys_on_claude_prompt_suggestion() {
+        assert_eq!(on_suggestion(b"\r"), Some(OnSuggestion::Accept));
+        assert_eq!(on_suggestion(&[0x7f]), Some(OnSuggestion::Clear));
+        assert_eq!(on_suggestion(b"\x1b"), None);
     }
 }
