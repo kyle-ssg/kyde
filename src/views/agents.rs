@@ -1962,7 +1962,10 @@ impl Kyde {
     ) {
         let spawned_at = std::time::SystemTime::now();
         // The agent's input box sits at the bottom of the pane, herdr-style.
-        view.update(cx, |v, _| v.anchor_bottom = true);
+        view.update(cx, |v, _| {
+            v.anchor_bottom = true;
+            v.claude_input = agent;
+        });
         let key = wt.clone();
         cx.subscribe(&view, move |this, v, ev, cx| match ev {
             terminal::TerminalEvent::Output => this.agents_on_output(&key, &v, cx),

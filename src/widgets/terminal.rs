@@ -23,7 +23,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as GridPoint, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{test::TermSize, Config, Term, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Rgb};
@@ -204,6 +204,14 @@ pub struct TerminalView {
     pid: Arc<std::sync::atomic::AtomicU32>,
     /// When you last typed or pasted into it.
     pub last_input: Option<std::time::Instant>,
+    /// Claude Code runs in it (agent tabs): its prompt suggestion acts as typed text — the
+    /// cursor is drawn at its end, and typing there accepts it first (`accept_suggestion`).
+    pub claude_input: bool,
+    /// The suggestion last accepted for you. Claude greys an accepted one back in when the
+    /// box is emptied; that time it's left alone, so emptying the box still starts afresh.
+    taken_suggestion: Option<String>,
+    /// Input held back while Claude takes in an accepted suggestion, then written in order.
+    held: Option<Vec<u8>>,
 }
 
 impl TerminalView {
@@ -389,6 +397,9 @@ impl TerminalView {
             anchor_bottom: false,
             pid,
             last_input: None,
+            claude_input: false,
+            taken_suggestion: None,
+            held: None,
         }
     }
 
@@ -516,15 +527,55 @@ impl TerminalView {
         self.focus.clone()
     }
 
-    /// Write raw bytes to the PTY (typed text, pasted text, key escape sequences).
-    fn write<B: Into<std::borrow::Cow<'static, [u8]>>>(&self, bytes: B) {
-        self.backend.write(bytes.into());
+    /// Write raw bytes to the PTY (typed text, pasted text, key escape sequences) — after
+    /// any input still held back for an accepted suggestion.
+    fn write<B: Into<std::borrow::Cow<'static, [u8]>>>(&mut self, bytes: B) {
+        let bytes = bytes.into();
+        match &mut self.held {
+            Some(held) => held.extend_from_slice(&bytes),
+            None => self.backend.write(bytes),
+        }
     }
 
     /// Feed a string to the shell as if typed (used by the screenshot harness to seed a
     /// realistic session). The PTY buffers it until the shell is ready, so it's race-free.
     pub fn send_input(&self, text: &str) {
-        self.write(text.as_bytes().to_vec());
+        self.backend.write(text.as_bytes().to_vec().into());
+    }
+
+    /// Claude's prompt suggestion on screen, unless it's the one already accepted for you.
+    fn open_suggestion(&self, term: &Term<EventProxy>) -> Option<(String, GridPoint)> {
+        if !self.claude_input {
+            return None;
+        }
+        prompt_suggestion(term).filter(|(text, _)| self.taken_suggestion.as_ref() != Some(text))
+    }
+
+    /// Before a key that edits Claude's input: accept its prompt suggestion with →, Claude's
+    /// own key for that, so the key lands at the suggestion's end, where the cursor is drawn.
+    /// The key waits a moment — arriving in the same read as the →, Claude applies it to the
+    /// box as it was before the accept, and the suggestion is lost.
+    fn accept_suggestion(&mut self, cx: &mut Context<Self>) {
+        if self.held.is_some() {
+            return;
+        }
+        let Some((text, _)) = self.open_suggestion(&self.term.lock()) else {
+            return;
+        };
+        self.taken_suggestion = Some(text);
+        self.backend.write(b"\x1b[C".to_vec().into());
+        self.held = Some(Vec::new());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(25))
+                .await;
+            let _ = this.update(cx, |v, _| {
+                if let Some(held) = v.held.take().filter(|h| !h.is_empty()) {
+                    v.backend.write(held.into());
+                }
+            });
+        })
+        .detach();
     }
 
     /// Relay a key's raw bytes to the PTY from an action handler (Enter / backspace / escape): jump to
@@ -580,6 +631,9 @@ impl TerminalView {
                 // Any keystroke jumps back to the live screen (out of scrollback).
                 self.last_input = Some(std::time::Instant::now());
                 self.term.lock().scroll_display(Scroll::Bottom);
+                if edits_at_cursor(&bytes) {
+                    self.accept_suggestion(cx);
+                }
                 self.write(bytes);
                 cx.notify();
             }
@@ -620,6 +674,7 @@ impl TerminalView {
     /// Send pasted `text` to the shell, honouring bracketed-paste mode.
     fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
+        self.accept_suggestion(cx);
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
             self.write(b"\x1b[200~".to_vec());
@@ -838,10 +893,12 @@ impl Render for TerminalView {
             // here rather than let it fall through to the app action (which deleted the selected
             // file / closed a modal). Mirrors how the editor binds backspace to a buffer action.
             .on_action(cx.listener(|this, _: &crate::TerminalEnter, _w, cx| {
+                this.taken_suggestion = None;
                 this.send_key(b"\r".to_vec(), cx);
                 cx.emit(TerminalEvent::Submitted);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalBackspace, _w, cx| {
+                this.accept_suggestion(cx);
                 this.send_key(vec![0x7f], cx);
             }))
             .on_action(cx.listener(|this, _: &crate::TerminalEscape, _w, cx| {
@@ -1254,11 +1311,15 @@ impl Element for TerminalElement {
             })
             .collect();
 
-        // Block cursor — only on the live screen (no scrollback offset) and when shown.
+        // Block cursor — only on the live screen (no scrollback offset) and when shown. Over
+        // a Claude prompt suggestion it's at the suggestion's end: that's where typing goes.
         let cursor = if content.display_offset == 0 && content.cursor.shape != CursorShape::Hidden {
             let base = base_line.unwrap_or(0);
-            let row = content.cursor.point.line.0 - base;
-            let col = content.cursor.point.column.0;
+            let at = view
+                .open_suggestion(&term)
+                .map_or(content.cursor.point, |(_, end)| end);
+            let row = at.line.0 - base;
+            let col = at.column.0.min(usize::from(cols).saturating_sub(1));
             if row >= 0 && (row as u16) < rows {
                 let x = bounds.left() + px(col as f32 * cell_w_f);
                 let y = bounds.top() + line_height * (row as f32 + shift);
@@ -1387,6 +1448,54 @@ fn default_indexed(i: u8) -> Rgb {
             Rgb { r: v, g: v, b: v }
         }
     }
+}
+
+/// Claude Code's prompt suggestion, when its input box shows one: a predicted next prompt
+/// greyed (SGR dim) into the empty box, the cursor parked at its start just after the `❯ `
+/// marker — it looks typed, but typing replaces it. Its text and the point just past its end
+/// (on the box's indented rows below, when it wraps). A fresh session's `Try "…"`
+/// placeholder is drawn the same way but isn't one.
+fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
+    let grid = term.grid();
+    let at = grid.cursor.point;
+    let ghost = |c: &Cell| c.flags.contains(Flags::DIM) && !matches!(c.c, ' ' | '\0');
+    let row = &grid[at.line];
+    if !term.mode().contains(TermMode::SHOW_CURSOR)
+        || at.column.0 != 2
+        || row[Column(0)].c != '❯'
+        || !ghost(&row[at.column])
+    {
+        return None;
+    }
+    let (mut text, mut end, mut line) = (String::new(), at, at.line);
+    while line <= grid.bottommost_line() {
+        let row = &grid[line];
+        if line != at.line && (row[Column(0)].c != ' ' || !ghost(&row[Column(2)])) {
+            break;
+        }
+        for col in 2..grid.columns() {
+            let cell = &row[Column(col)];
+            if ghost(cell) {
+                text.push(cell.c);
+                let width = if cell.flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else {
+                    1
+                };
+                end = GridPoint::new(line, Column(col + width));
+            } else if !cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                text.push(' ');
+            }
+        }
+        line = Line(line.0 + 1);
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.starts_with("Try \"")).then_some((text, end))
+}
+
+/// Whether a key's bytes edit the input at the cursor: typed text, ← or Backspace.
+fn edits_at_cursor(bytes: &[u8]) -> bool {
+    bytes == b"\x1b[D" || bytes == [0x7f] || bytes.first().is_some_and(|&b| b >= 0x20 && b != 0x7f)
 }
 
 /// Translate a (non-⌘) key press to the bytes to write to the PTY, or `None` if the key
@@ -1608,5 +1717,29 @@ mod tests {
         // Plain typed char falls through to key_char; an unknown key with no char → None.
         assert_eq!(key_bytes("a", false, Some("a")), Some(b"a".to_vec()));
         assert_eq!(key_bytes("f5", false, None), None);
+    }
+
+    /// Claude's input box, drawn the way a real session draws it: a greyed suggestion with the
+    /// cursor parked before it is one, ending after its text; the same words typed, or the
+    /// fresh-session placeholder, are not.
+    #[test]
+    fn claude_prompt_suggestion_is_the_dim_text_under_the_cursor() {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        let box_with = |text: &str| {
+            let mut term = Term::new(
+                Config::default(),
+                &TermSize::new(40, 4),
+                alacritty_terminal::event::VoidListener,
+            );
+            let bytes = format!("\r\n\u{276f}\u{a0}{text}\r\n\u{2500}\u{2500}\r\x1b[2C\x1b[1A");
+            Processor::<StdSyncHandler>::new().advance(&mut term, bytes.as_bytes());
+            prompt_suggestion(&term)
+        };
+        assert_eq!(
+            box_with("\x1b[2myes commit it\x1b[22m"),
+            Some(("yes commit it".into(), GridPoint::new(Line(1), Column(15))))
+        );
+        assert_eq!(box_with("yes commit it"), None);
+        assert_eq!(box_with("\x1b[2mTry \"fix lint errors\"\x1b[22m"), None);
     }
 }
