@@ -3,6 +3,10 @@
 
 use crate::*;
 
+/// Largest working file the Commit view reads and diffs. Past this it's a log or a dump,
+/// and reading + diffing it on the UI thread would stall (or, at GBs, exhaust) the app.
+const DIFF_MAX_BYTES: u64 = 20 << 20;
+
 impl Kyde {
     pub(crate) fn render_commit(
         &mut self,
@@ -424,12 +428,21 @@ impl Kyde {
             } else {
                 // A binary / unreadable working file errors here — don't feed an empty
                 // string through the diff (it would render as "all deleted" and, worse,
-                // the right pane's autosave would truncate the file to empty).
-                let Ok(a) = repo.working_content(&file.path) else {
+                // the right pane's autosave would truncate the file to empty). A huge one
+                // (a stray log or dump) isn't read at all.
+                let size = std::fs::metadata(repo.root().join(&file.path)).map_or(0, |m| m.len());
+                let read = (size <= DIFF_MAX_BYTES)
+                    .then(|| repo.working_content(&file.path).ok())
+                    .flatten();
+                let Some(a) = read else {
                     self.diff.current = None;
                     if let Some(cx) = cx {
                         self.diff.path = None; // disables diff_autosave for this file
-                        let msg = String::from("Binary or non-text file — no diff.");
+                        let msg = if size > DIFF_MAX_BYTES {
+                            format!("File too large to diff ({} MB).", size / 1_000_000)
+                        } else {
+                            String::from("Binary or non-text file — no diff.")
+                        };
                         self.diff
                             .left
                             .update(cx, |e, cx| e.set_content(msg.clone(), Lang::PlainText, cx));
@@ -707,7 +720,14 @@ impl Kyde {
         // this once the input element is in the tree).
         self.commit.focus_msg = true;
         if let Some(repo) = self.repo() {
-            self.files = repo.status().unwrap_or_default();
+            // Re-read so a Browse edit from a moment ago is listed. Not when the last read
+            // hit the untracked cap: then git walks a huge folder for seconds, so keep the
+            // list the background refresh read and refresh it off the UI thread instead.
+            if self.untracked_capped {
+                self.refresh(cx);
+            } else {
+                self.files = repo.status().unwrap_or_default();
+            }
             // One push-base resolution feeds both (`push_files()` would resolve it again).
             let base = repo.push_base();
             self.sync
@@ -765,7 +785,7 @@ impl Kyde {
         let t = theme::get();
         let init_btn = btn_primary("git-init", "Initialize Git Repository").on_mouse_down(
             MouseButton::Left,
-            cx.listener(|this, _e, _w, cx| this.do_git_init(cx)),
+            cx.listener(|this, _e, _w, cx| this.request_git_init(cx)),
         );
         div()
             .flex()
@@ -803,6 +823,73 @@ impl Kyde {
                     ),
             )
             .child(init_btn)
+            .into_any_element()
+    }
+
+    /// "Initialize Git Repository": `git init` straight away, unless the folder is the
+    /// home folder (or holds it) or has more files than the Browse walk lists. Git would
+    /// list every file in there as an untracked change, so ask first (#137).
+    pub(crate) fn request_git_init(&mut self, cx: &mut Context<Self>) {
+        self.commit.init_warning = self.git_init_warning();
+        if self.commit.init_warning.is_some() {
+            self.open_modal_window(
+                ModalKind::ConfirmGitInit,
+                "Initialize Git Repository",
+                460.0,
+                220.0,
+                cx,
+            );
+        } else {
+            self.do_git_init(cx);
+        }
+    }
+
+    /// Why `git init` in the open folder needs a second look, as the confirmation's
+    /// (title, text), or `None`.
+    fn git_init_warning(&self) -> Option<(&'static str, &'static str)> {
+        let root = self.repo_root.as_ref()?;
+        let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.into());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        if home.is_some_and(|h| canon(&h).starts_with(canon(root))) {
+            return Some((
+                "Initialize a repository in your home folder?",
+                "Git would list every file in your home folder as an untracked change. \
+                 You usually want a project folder instead.",
+            ));
+        }
+        (self.browse.all_files.len() >= DIR_WALK_CAP).then_some((
+            "Initialize a repository here?",
+            "This folder holds a very large number of files, and git would list each one \
+             as an untracked change. Add a .gitignore for build output and caches first, \
+             or pick a smaller folder.",
+        ))
+    }
+
+    /// The confirmation's "Initialize Anyway".
+    pub(crate) fn confirm_git_init(&mut self, cx: &mut Context<Self>) {
+        self.close_modal_window(ModalKind::ConfirmGitInit, cx);
+        self.do_git_init(cx);
+    }
+
+    /// Body of the "Initialize Git Repository" confirmation window (Enter confirms, Escape
+    /// cancels — the shared `ModalWindow` key handling).
+    pub(crate) fn render_confirm_git_init_body(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let cancel = btn_secondary("git-init-cancel", "Cancel").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| {
+                this.close_modal_window(ModalKind::ConfirmGitInit, cx);
+            }),
+        );
+        let confirm = btn_primary("git-init-confirm", "Initialize Anyway").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| this.confirm_git_init(cx)),
+        );
+        let (title, text) = self.commit.init_warning.unwrap_or_default();
+        ui::confirm_body(title, text)
+            .child(ui::modal_footer().child(cancel).child(confirm))
             .into_any_element()
     }
 

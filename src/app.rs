@@ -22,6 +22,30 @@ pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration =
 pub(crate) const CONTENT_MIN_QUERY: usize = 2;
 /// Max fuzzy-finder results rendered at once.
 pub(crate) const FINDER_RESULT_CAP: usize = 50;
+/// Most files the Browse tree lists for a folder that isn't a git repo (`list_dir_files`).
+pub(crate) const DIR_WALK_CAP: usize = 20_000;
+
+/// The folders Kyde itself writes to (config, local history, agent state) that sit inside
+/// `root`, as given and canonicalized (`FSEvents` reports canonical paths). Only a project
+/// at or above the home folder has any. Kyde writes to them constantly, and a refresh
+/// records local history, so letting their events through would refresh in a loop.
+fn own_dirs_inside(root: &std::path::Path) -> Vec<PathBuf> {
+    let roots = [Some(root.to_path_buf()), std::fs::canonicalize(root).ok()];
+    let history = kyde_local_history::default_base_dir();
+    let data = history
+        .parent()
+        .map_or(history.clone(), std::path::Path::to_path_buf);
+    [
+        kyde_config::store::config_dir(),
+        data,
+        kyde_config::agents::agents_dir(),
+    ]
+    .into_iter()
+    .flat_map(|d| [std::fs::canonicalize(&d).ok(), Some(d)])
+    .flatten()
+    .filter(|d| roots.iter().flatten().any(|r| d.starts_with(r) && d != r))
+    .collect()
+}
 
 /// Recursively list files under `root` (repo-relative, sorted) for the Browse tree when the
 /// folder is NOT a git repo — `git ls-files` can't drive it then, so we walk the filesystem
@@ -30,7 +54,6 @@ pub(crate) const FINDER_RESULT_CAP: usize = 50;
 /// tree (e.g. a `target/` that wasn't ignored) can't hang the walk. Symlinks are not followed
 /// (their `file_type` is neither file nor dir here), so the walk can't cycle.
 fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
-    const CAP: usize = 20_000;
     let mut skip_dirs: std::collections::HashSet<String> =
         [".git", "target", "dist", "node_modules"]
             .iter()
@@ -49,7 +72,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if out.len() >= CAP {
+        if out.len() >= DIR_WALK_CAP {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -70,7 +93,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out.truncate(CAP);
+    out.truncate(DIR_WALK_CAP);
     out
 }
 
@@ -86,6 +109,8 @@ struct RepoSnapshot {
     /// `Some(message)` when `git status` failed — surfaced as the op-error banner while
     /// the previous file list is kept (so a transient failure doesn't blank the tree).
     status_err: Option<String>,
+    /// `files` stops at `git::UNTRACKED_CAP` untracked files and more exist.
+    untracked_capped: bool,
     /// All tracked+untracked files (git) or the filesystem walk (non-git), for the tree.
     all_files: Vec<PathBuf>,
     /// Current branch (`None` when detached / non-git).
@@ -125,6 +150,7 @@ impl RepoSnapshot {
                 files: Vec::new(),
                 stats: std::collections::HashMap::new(),
                 status_err: None,
+                untracked_capped: false,
                 all_files: list_dir_files(root),
                 current_branch: None,
                 worktrees: Vec::new(),
@@ -140,17 +166,22 @@ impl RepoSnapshot {
         };
         // `git status` failing means we can't trust the file list — carry the message so
         // `apply` keeps the old list and shows the banner rather than a looks-clean tree.
-        let (files, status_err) = match repo.status() {
-            Ok(files) => (files, None),
-            Err(e) => (Vec::new(), Some(format!("Reading status failed: {e}"))),
+        let (files, untracked_capped, status_err) = match repo.status_capped() {
+            Ok((files, capped)) => (files, capped, None),
+            Err(e) => (
+                Vec::new(),
+                false,
+                Some(format!("Reading status failed: {e}")),
+            ),
         };
         // One push-base resolution feeds both (`push_files()` would resolve it again).
         let push_base = repo.push_base();
         Self {
+            stats: repo.numstat(&files),
+            all_files: repo.list_files(&files).unwrap_or_default(),
             files,
-            stats: repo.numstat().unwrap_or_default(),
             status_err,
-            all_files: repo.list_files().unwrap_or_default(),
+            untracked_capped,
             current_branch: repo.current_branch(),
             worktrees: repo.worktrees().unwrap_or_default(),
             ahead: repo.ahead_count(),
@@ -208,6 +239,7 @@ impl Kyde {
             projects_hl: None,
             files: Vec::new(),
             stats: std::collections::HashMap::new(),
+            untracked_capped: false,
             selected: None,
             commit: CommitView::new(cx),
             diff: DiffPanes::new(cx),
@@ -237,6 +269,7 @@ impl Kyde {
             fonts_win: None,
             clear_data_win: None,
             clear_lh_win: None,
+            git_init_win: None,
             remove_wt_win: None,
             scrollback_win: None,
             cleanup_win: None,
@@ -367,6 +400,7 @@ impl Kyde {
             // stale tree/branch never lingers behind the landing view.
             self.files.clear();
             self.stats.clear();
+            self.untracked_capped = false;
             self.sync.set_push_files(Vec::new());
             self.is_git = false;
             self.current_branch = None;
@@ -461,11 +495,13 @@ impl Kyde {
             } else {
                 self.files = snap.files;
                 self.stats = snap.stats;
+                self.untracked_capped = snap.untracked_capped;
                 self.op_error = None;
             }
         } else {
             self.files.clear();
             self.stats.clear();
+            self.untracked_capped = false;
             self.sync.set_push_files(Vec::new());
             self.op_error = None;
         }
@@ -504,6 +540,9 @@ impl Kyde {
         // now that the status read has cleared `op_error`, so it survives the clear.
         if let Some(msg) = self.pending_error.take() {
             self.op_error = Some(msg);
+        }
+        if std::mem::take(&mut self.commit.exit_if_clean) {
+            self.exit_commit_if_clean();
         }
         // Feed external (out-of-Kyde) creates/edits into local history. Runs on every
         // refresh — window refocus, terminal output, the filesystem watcher — so a file
@@ -606,17 +645,19 @@ impl Kyde {
         self.watch_off = None;
         let Some(root) = root else { return };
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<()>();
+        let own = own_dirs_inside(&root);
         let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let Ok(ev) = res else { return };
             // Skip events that touch ONLY `.git`-internal paths — our own git commands
-            // churn the index/refs constantly. An empty path list (a backend rescan) still
-            // passes through, as do real worktree writes accompanying a checkout.
-            let only_git = !ev.paths.is_empty()
-                && ev
-                    .paths
-                    .iter()
-                    .all(|p| p.components().any(|c| c.as_os_str() == ".git"));
-            if !only_git {
+            // churn the index/refs constantly — or only Kyde's own folders (see
+            // `own_dirs_inside`). An empty path list (a backend rescan) still passes
+            // through, as do real worktree writes accompanying a checkout.
+            let only_ours = !ev.paths.is_empty()
+                && ev.paths.iter().all(|p| {
+                    p.components().any(|c| c.as_os_str() == ".git")
+                        || own.iter().any(|d| p.starts_with(d))
+                });
+            if !only_ours {
                 let _ = tx.unbounded_send(());
             }
         });

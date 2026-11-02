@@ -76,6 +76,9 @@ pub enum GitError {
 /// Result alias for every fallible `kyde-git` operation.
 pub type Result<T> = std::result::Result<T, GitError>;
 
+/// Most untracked files [`Repo::status`] lists (every tracked change is always listed).
+pub const UNTRACKED_CAP: usize = 10_000;
+
 /// Build an [`GitError::Io`] from an operation description + the underlying I/O error.
 pub(crate) fn io_err(operation: impl Into<String>) -> impl FnOnce(std::io::Error) -> GitError {
     move |source| GitError::Io {
@@ -291,44 +294,74 @@ impl Repo {
         hits
     }
 
-    /// `git status --porcelain=v1 -z` parsed into changed files.
+    /// `git status --porcelain=v1 -z` parsed into changed files, with at most
+    /// [`UNTRACKED_CAP`] untracked ones (see [`Repo::status_capped`]).
     pub fn status(&self) -> Result<Vec<ChangedFile>> {
-        let raw = git(
+        self.status_capped().map(|(files, _)| files)
+    }
+
+    /// [`Repo::status`], plus whether untracked files were left out: every tracked change
+    /// is listed, but only the first [`UNTRACKED_CAP`] untracked files. A folder full of
+    /// untracked files (a home folder, an un-ignored build or cache folder) lists one row
+    /// per file, and hundreds of thousands of rows would swamp everything that reads the
+    /// list.
+    pub fn status_capped(&self) -> Result<(Vec<ChangedFile>, bool)> {
+        self.status_limited(UNTRACKED_CAP)
+    }
+
+    fn status_limited(&self, cap: usize) -> Result<(Vec<ChangedFile>, bool)> {
+        let mut files = Vec::new();
+        let (mut untracked, mut capped) = (0, false);
+        // Rename records carry the "from" path as the next NUL field — skip it.
+        let mut skip_from = false;
+        // Git prints tracked changes before untracked files, so stopping at the cap never
+        // drops a tracked change.
+        git_records(
             &self.root,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            |rec| {
+                if std::mem::take(&mut skip_from) || rec.len() < 3 {
+                    return true;
+                }
+                let (x, y) = (rec[0] as char, rec[1] as char); // index, worktree columns
+                if x == 'R' || y == 'R' {
+                    skip_from = true;
+                }
+                let status = classify(x, y);
+                if status == FileStatus::Untracked {
+                    if untracked == cap {
+                        capped = true;
+                        return false;
+                    }
+                    untracked += 1;
+                }
+                // No quote/escape handling needed: `-z` makes git emit paths raw and
+                // NUL-terminated (quoting/C-escaping is the non-`-z` behavior).
+                files.push(ChangedFile {
+                    path: PathBuf::from(String::from_utf8_lossy(&rec[3..]).into_owned()),
+                    status,
+                });
+                true
+            },
         )?;
-        let mut files = Vec::new();
-        // Records are NUL-separated; rename records consume an extra field.
-        let mut parts = raw.split('\0').filter(|s| !s.is_empty());
-        while let Some(rec) = parts.next() {
-            if rec.len() < 3 {
-                continue;
-            }
-            let x = rec.as_bytes()[0] as char; // staged (index) column
-            let y = rec.as_bytes()[1] as char; // unstaged (worktree) column
-            let path = rec[3..].to_string();
-            if x == 'R' || y == 'R' {
-                // rename: the "from" path follows as the next NUL field
-                let _from = parts.next();
-            }
-            let status = classify(x, y);
-            // No quote/escape handling needed: `-z` makes git emit paths raw and
-            // NUL-terminated (quoting/C-escaping is the non-`-z` behavior).
-            files.push(ChangedFile {
-                path: PathBuf::from(path),
-                status,
-            });
-        }
         files.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(files)
+        Ok((files, capped))
     }
 
     /// Added/removed line counts per changed file — one `git diff --numstat` against HEAD
     /// (worktree + index, matching the working-vs-HEAD diff the commit view shows), plus a
-    /// line count for each untracked file (all additions). Binary files are omitted: numstat
-    /// reports `-` for them and `+0 −0` would be a lie. An unborn HEAD yields no diff, so a
-    /// brand-new repo just gets the untracked counts.
-    pub fn numstat(&self) -> Result<std::collections::HashMap<PathBuf, (usize, usize)>> {
+    /// line count for each untracked file in `changed` (all additions). Binary files are
+    /// omitted: numstat reports `-` for them and `+0 −0` would be a lie. So are untracked
+    /// files over 8 MiB, and any past the first 64 MiB read: counting means reading the
+    /// whole file, and a stray multi-GB log would otherwise be read on every refresh. An
+    /// unborn HEAD yields no diff, so a brand-new repo just gets the untracked counts.
+    #[must_use]
+    pub fn numstat(
+        &self,
+        changed: &[ChangedFile],
+    ) -> std::collections::HashMap<PathBuf, (usize, usize)> {
+        const FILE_MAX: u64 = 8 << 20;
+        let mut budget: u64 = 64 << 20;
         let mut stats = std::collections::HashMap::new();
         // Each `-z` record is `added TAB removed TAB path NUL` (`--no-renames` keeps the
         // single-path shape; renames would splice a second path field into the record).
@@ -347,17 +380,21 @@ impl Repo {
                 stats.insert(PathBuf::from(path), (a, r));
             }
         }
-        let untracked = git(
-            &self.root,
-            &["ls-files", "--others", "--exclude-standard", "-z"],
-        )?;
-        for path in untracked.split('\0').filter(|s| !s.is_empty()) {
+        for f in changed.iter().filter(|f| f.status == FileStatus::Untracked) {
+            // `is_file` also keeps a symlink to a device (`/dev/zero`) from being read.
+            let Ok(meta) = std::fs::metadata(self.root.join(&f.path)) else {
+                continue;
+            };
+            if !meta.is_file() || meta.len() > FILE_MAX || meta.len() > budget {
+                continue;
+            }
+            budget -= meta.len();
             // Binary/non-UTF-8 content errors here — omit it, same as tracked binaries.
-            if let Ok(content) = self.working_content(Path::new(path)) {
-                stats.insert(PathBuf::from(path), (content.lines().count(), 0));
+            if let Ok(content) = self.working_content(&f.path) {
+                stats.insert(f.path.clone(), (content.lines().count(), 0));
             }
         }
-        Ok(stats)
+        stats
     }
 
     /// HEAD version of a file = the "before" side of the commit diff. We compare the working
@@ -487,23 +524,22 @@ impl Repo {
         git_stdin(&self.root, &["commit", "-F", "-"], message).map(|_| ())
     }
 
-    /// All tracked + untracked-but-not-ignored files, for the folder-tree view.
-    /// Uses `git ls-files` so .gitignored noise stays out.
-    pub fn list_files(&self) -> Result<Vec<PathBuf>> {
-        let raw = git(
-            &self.root,
-            &[
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-        )?;
+    /// Every tracked file plus the untracked ones in `changed`, for the folder-tree view.
+    /// Taking the untracked files from [`Repo::status_capped`] keeps the tree under the
+    /// same cap and saves walking the folder a second time. `.gitignore`d files never
+    /// appear in either.
+    pub fn list_files(&self, changed: &[ChangedFile]) -> Result<Vec<PathBuf>> {
+        let raw = git(&self.root, &["ls-files", "-z", "--cached"])?;
         let mut files: Vec<PathBuf> = raw
             .split('\0')
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
+            .chain(
+                changed
+                    .iter()
+                    .filter(|f| f.status == FileStatus::Untracked)
+                    .map(|f| f.path.clone()),
+            )
             .collect();
         files.sort();
         files.dedup();
@@ -1298,6 +1334,69 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Run git and hand each NUL-terminated stdout record to `each` as it streams in, so a huge
+/// listing is never held whole. `each` returns `false` to stop early: git is killed and the
+/// run still counts as a success, since the caller has all it wanted.
+fn git_records(dir: &Path, args: &[&str], mut each: impl FnMut(&[u8]) -> bool) -> Result<()> {
+    use std::io::{BufRead, BufReader, Read};
+    let mut child = git_cmd(dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(io_err(format!("running git {args:?}")))?;
+    // Drain stderr on its own thread: walking a big folder can print a warning per
+    // unreadable directory, and a full stderr pipe would stall git before stdout ends.
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let mut stopped = false;
+    let mut read_err = None;
+    if let Some(stdout) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout);
+        let mut rec = Vec::new();
+        loop {
+            rec.clear();
+            match reader.read_until(0, &mut rec) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    read_err = Some(e);
+                    break;
+                }
+            }
+            if rec.last() == Some(&0) {
+                rec.pop();
+            }
+            if !rec.is_empty() && !each(&rec) {
+                stopped = true;
+                break;
+            }
+        }
+    }
+    if stopped || read_err.is_some() {
+        let _ = child.kill();
+    }
+    let status = child
+        .wait()
+        .map_err(io_err(format!("waiting for git {args:?}")))?;
+    let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
+    if let Some(e) = read_err {
+        return Err(io_err(format!("reading git {args:?}"))(e));
+    }
+    if !stopped && !status.success() {
+        return Err(GitError::Command {
+            command: format!("{args:?}"),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// Select the index mode for partially staged content from the working file's executable bit.
 // Infallible on Unix, but the signature must match the fallible Windows variant below.
 #[cfg(unix)]
@@ -1565,13 +1664,56 @@ mod tests {
         fs::remove_file(work.join("gone.txt")).unwrap();
         fs::write(work.join("new.txt"), "x\ny\nz\n").unwrap();
         fs::write(work.join("blob.bin"), [0u8, 9, 9, 9]).unwrap();
+        // An untracked file too big to read just to count its lines (a stray log).
+        fs::write(work.join("huge.log"), "line\n".repeat(2 << 20)).unwrap();
 
         let repo = Repo::discover(&work).unwrap();
-        let stats = repo.numstat().unwrap();
+        let stats = repo.numstat(&repo.status().unwrap());
         assert_eq!(stats.get(Path::new("kept.txt")), Some(&(3, 1)));
         assert_eq!(stats.get(Path::new("gone.txt")), Some(&(0, 2)));
         assert_eq!(stats.get(Path::new("new.txt")), Some(&(3, 0)));
         assert!(!stats.contains_key(Path::new("blob.bin")));
+        assert!(
+            !stats.contains_key(Path::new("huge.log")),
+            "not read to count lines"
+        );
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// A folder full of untracked files lists only the first `cap` of them and says so,
+    /// but never drops a tracked change — even one that sorts after them.
+    #[test]
+    fn status_caps_untracked_files_but_keeps_tracked_changes() {
+        use std::fs;
+        let g = |dir: &Path, args: &[&str]| {
+            git(dir, args).unwrap_or_else(|e| panic!("git {args:?} failed: {e}"))
+        };
+        let work = std::env::temp_dir().join(format!("kyde-status-cap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(work.join("cache")).unwrap();
+        g(&work, &["init", "-b", "main"]);
+        g(&work, &["config", "user.email", "t@example.com"]);
+        g(&work, &["config", "user.name", "Test"]);
+        g(&work, &["config", "commit.gpgsign", "false"]);
+        fs::write(work.join("z.txt"), "one\n").unwrap();
+        g(&work, &["add", "-A"]);
+        g(&work, &["commit", "-m", "init"]);
+        fs::write(work.join("z.txt"), "two\n").unwrap();
+        for i in 0..3 {
+            fs::write(work.join("cache").join(format!("{i}.bin")), "x").unwrap();
+        }
+
+        let repo = Repo::discover(&work).unwrap();
+        let (files, capped) = repo.status_limited(2).unwrap();
+        assert!(capped);
+        let untracked = files.iter().filter(|f| f.status == FileStatus::Untracked);
+        assert_eq!(untracked.count(), 2);
+        assert!(files.iter().any(|f| f.path == Path::new("z.txt")));
+        assert!(
+            !repo.status_limited(3).unwrap().1,
+            "exactly at the cap is complete"
+        );
 
         let _ = fs::remove_dir_all(&work);
     }

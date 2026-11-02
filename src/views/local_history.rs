@@ -28,6 +28,15 @@
 use crate::*;
 use kyde_local_history::{format_ts, relative_ts, EventKind};
 
+/// Largest file the external-change scan snapshots. Source files are far smaller; past
+/// this it's a log, a dump or a dataset, and copying it into history on every change
+/// costs more than it saves.
+const LH_SCAN_FILE_MAX: u64 = 4 << 20;
+/// Most bytes one external-change scan reads. Normally the changed files are a few KB; a
+/// folder of untracked files (say a home folder) would otherwise be read in full, and
+/// copied into history, on every refresh.
+const LH_SCAN_BUDGET: u64 = 32 << 20;
+
 /// Milliseconds since the Unix epoch, best effort (pre-1970 clocks read as 0).
 pub(crate) fn lh_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -227,9 +236,15 @@ impl Kyde {
     /// through `lh_note_save` and are excluded via `pending`). Cheap by construction: the
     /// candidate set is bounded to files git already flagged as changed, the reads happen off
     /// the UI thread, and the store dedups identical content — so a re-scanned unchanged file
-    /// writes nothing.
+    /// writes nothing. A folder full of untracked files still flags thousands, so a scan
+    /// also skips files over [`LH_SCAN_FILE_MAX`], stops reading after
+    /// [`LH_SCAN_BUDGET`], and never overlaps another scan.
     pub(crate) fn lh_scan_external(&mut self, cx: &mut Context<Self>) {
         if !self.lh.cfg.enabled || self.lh.store.is_none() {
+            return;
+        }
+        if self.lh.scanning {
+            self.lh.rescan = true;
             return;
         }
         let mut candidates: Vec<PathBuf> = self
@@ -264,35 +279,53 @@ impl Kyde {
         let Some(store) = self.lh.store.clone() else {
             return;
         };
-        cx.background_executor()
-            .spawn(async move {
-                let now = lh_now_ms();
-                for (rel, abs) in abs {
-                    // Gone mid-scan or non-UTF-8 (binary) → nothing to snapshot.
-                    let Ok(content) = std::fs::read_to_string(&abs) else {
-                        continue;
-                    };
-                    if let Ok(mut s) = store.lock() {
-                        // Everything this scan catches is a change Kyde did NOT make (our
-                        // own saves go through `lh_note_save` and are excluded via
-                        // `pending`), so it's always an External change — including the
-                        // first sighting of a file created/edited outside Kyde.
-                        match s.last_hash(&rel) {
-                            Some(h) if h == kyde_local_history::content_hash(&content) => continue,
-                            _ => {}
-                        }
-                        let _ = s.record(&rel, &content, EventKind::External, None, now);
-                    }
+        self.lh.scanning = true;
+        let scan = cx.background_executor().spawn(async move {
+            let now = lh_now_ms();
+            let mut budget = LH_SCAN_BUDGET;
+            for (rel, abs) in abs {
+                // Not a regular file, too big to snapshot, or past this scan's budget.
+                let Ok(meta) = std::fs::metadata(&abs) else {
+                    continue;
+                };
+                if !meta.is_file() || meta.len() > LH_SCAN_FILE_MAX || meta.len() > budget {
+                    continue;
                 }
-                for rel in deleted {
-                    if let Ok(mut s) = store.lock() {
-                        // Only tombstones a file the store already knows and hasn't already
-                        // marked gone (record_deletion dedups both).
-                        let _ = s.record_deletion(&rel, now);
+                budget -= meta.len();
+                // Gone mid-scan or non-UTF-8 (binary) → nothing to snapshot.
+                let Ok(content) = std::fs::read_to_string(&abs) else {
+                    continue;
+                };
+                if let Ok(mut s) = store.lock() {
+                    // Everything this scan catches is a change Kyde did NOT make (our
+                    // own saves go through `lh_note_save` and are excluded via
+                    // `pending`), so it's always an External change — including the
+                    // first sighting of a file created/edited outside Kyde.
+                    match s.last_hash(&rel) {
+                        Some(h) if h == kyde_local_history::content_hash(&content) => continue,
+                        _ => {}
                     }
+                    let _ = s.record(&rel, &content, EventKind::External, None, now);
                 }
-            })
-            .detach();
+            }
+            for rel in deleted {
+                if let Ok(mut s) = store.lock() {
+                    // Only tombstones a file the store already knows and hasn't already
+                    // marked gone (record_deletion dedups both).
+                    let _ = s.record_deletion(&rel, now);
+                }
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            scan.await;
+            let _ = this.update(cx, |this, cx| {
+                this.lh.scanning = false;
+                if std::mem::take(&mut this.lh.rescan) {
+                    this.lh_scan_external(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Immediately snapshot `paths`' CURRENT on-disk content under `label` — called by
