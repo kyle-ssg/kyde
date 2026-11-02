@@ -1659,6 +1659,9 @@ struct AgentTab {
     hook: Option<(agents::Hook, std::time::Instant)>,
     /// The state file's mtime when last read — it's re-read only when it changes.
     hook_seen: Option<std::time::SystemTime>,
+    /// The write file's mtime when last read, and the last file its agent wrote in this
+    /// repository — where it's at work (`agents::repo_write`).
+    wrote: Option<(std::time::SystemTime, Option<agents::WriteReport>)>,
     /// Last output, for the working dot.
     last_output: Option<std::time::Instant>,
     /// Last output OR last time on screen — what the idle cleanup measures.
@@ -7129,6 +7132,65 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// The project's own checkout is shared, so its row is always its branch: not its agent's
+    /// AI title, not the project's name, and a double-click doesn't rename it.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_checkout_row_is_always_its_branch(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into();
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.row.ai_title = true;
+                k.agents.cfg.names.insert(dir.clone(), "My project".into());
+                k.agents.contexts.insert(
+                    dir.clone(),
+                    agents::AgentContext {
+                        title: Some("Reframe the README".into()),
+                        ..Default::default()
+                    },
+                );
+                let branch = k.agents.branches.get(&dir).cloned().expect("branch read");
+                assert_eq!(k.agents_wt_title(&dir, &dir), branch);
+                cx.notify();
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let leaf = dir.file_name().unwrap().to_string_lossy().into_owned();
+        let sel: &'static str = Box::leak(format!("agents-wt-{leaf}").into_boxed_str());
+        let at = vcx.debug_bounds(sel).expect("the checkout's row").center();
+        for click_count in 1..=2 {
+            vcx.simulate_event(gpui::MouseDownEvent {
+                position: at,
+                button: gpui::MouseButton::Left,
+                modifiers: gpui::Modifiers::none(),
+                click_count,
+                first_mouse: false,
+            });
+            vcx.simulate_event(gpui::MouseUpEvent {
+                position: at,
+                button: gpui::MouseButton::Left,
+                modifiers: gpui::Modifiers::none(),
+                click_count,
+            });
+        }
+        handle
+            .update(&mut vcx, |k, _w, _cx| assert_eq!(k.agents.renaming, None))
+            .unwrap();
+    }
+
     /// Launching with no path reopens the most recent project that still exists.
     #[test]
     fn launch_reopens_the_last_project_that_still_exists() {
@@ -7365,21 +7427,22 @@ mod gpui_smoke_tests {
         assert!(out.status.success());
         let cwd = dir.join(".claude/worktrees/style");
         let transcript = agents::claude_project_dir(&cwd).unwrap().join("s1.jsonl");
-        let to = agents::moved_worktree(&dir, &cwd, &transcript).expect("EnterWorktree'd");
+        let report = agents::HookReport {
+            hook: agents::Hook::Working,
+            session: Some("s1".into()),
+            cwd: Some(cwd.clone()),
+            transcript: Some(transcript.clone()),
+        };
+        let to = agents::moved_worktree(&dir, Some(&report), None).expect("EnterWorktree'd");
         handle
             .update(cx, |k, _w, cx| {
-                let report = agents::HookReport {
-                    hook: agents::Hook::Working,
-                    session: Some("s1".into()),
-                    cwd: Some(cwd.clone()),
-                    transcript: Some(transcript.clone()),
-                };
                 let read = (
                     dir.clone(),
                     id.clone(),
                     std::time::SystemTime::now(),
                     Some(report),
                     Some(to.clone()),
+                    None,
                 );
                 k.agents_apply_hooks(vec![read], cx);
                 assert_eq!(k.agents.tabs[&dir].tabs.len(), 1, "the first tab stays");
@@ -7391,6 +7454,91 @@ mod gpui_smoke_tests {
                 assert_eq!(k.agents.selected.as_deref(), Some(to.as_path()));
             })
             .unwrap();
+    }
+
+    /// An agent that makes a worktree with `git worktree add` and edits it by path (its
+    /// session staying in the checkout): opening the new worktree starts no blank agent of its
+    /// own, and once the agent's edit there is reported, its tab follows — through the real
+    /// hook files and poll.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_follows_its_agent_into_a_worktree_it_edits(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let id = handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents.tabs[&dir].tabs.last().unwrap().id.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let wt = dir.with_extension("task");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "task"],
+        );
+        let wt = wt.canonicalize().unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents_select(wt.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(!k.agents.tabs.contains_key(&wt), "no blank agent");
+            })
+            .unwrap();
+        // What Claude Code's hooks write for an Edit there.
+        let transcript = agents::claude_project_dir(&dir).unwrap().join("s1.jsonl");
+        let edit = |file: std::path::PathBuf| {
+            let event = serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Edit",
+                "tool_input": { "file_path": file },
+                "cwd": dir,
+                "transcript_path": transcript,
+                "session_id": "s1",
+            })
+            .to_string();
+            std::fs::write(agents::write_path(&id), &event).unwrap();
+            std::fs::write(agents::state_path(&id), &event).unwrap();
+        };
+        let poll = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, _w, cx| k.agents_poll_hooks(cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        edit(wt.join("a.txt"));
+        poll(cx);
+        let tab_in = |k: &Kyde, w: &std::path::Path| {
+            k.agents
+                .tabs
+                .get(w)
+                .is_some_and(|g| g.tabs.iter().any(|t| t.id == id))
+        };
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    tab_in(k, &wt) && !tab_in(k, &dir),
+                    "{:?}",
+                    k.agents.tabs.keys()
+                );
+            })
+            .unwrap();
+        // A scratch file outside the repository doesn't send it back.
+        std::thread::sleep(std::time::Duration::from_millis(20)); // a new mtime
+        edit(std::env::temp_dir().join("kyde-scratch.md"));
+        poll(cx);
+        handle
+            .update(cx, |k, _w, _cx| assert!(tab_in(k, &wt), "stays"))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&wt);
     }
 
     /// Enter is also bound at the app root (`ConfirmKey`). The deeper Terminal binding must win

@@ -96,6 +96,31 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
     })
 }
 
+/// A file an agent wrote (`Edit` / `Write` / `NotebookEdit`), and where its session was then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WriteReport {
+    pub file: std::path::PathBuf,
+    pub cwd: Option<std::path::PathBuf>,
+    pub transcript: Option<std::path::PathBuf>,
+}
+
+/// Read the write hook's event (the JSON it recorded). `None` for unreadable text or one
+/// without a file.
+pub(crate) fn parse_write(json: &str) -> Option<WriteReport> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let s = |v: &serde_json::Value, k: &str| {
+        Some(v.get(k)?.as_str()?)
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+    };
+    let input = v.get("tool_input")?;
+    Some(WriteReport {
+        file: s(input, "file_path").or_else(|| s(input, "notebook_path"))?,
+        cwd: s(&v, "cwd"),
+        transcript: s(&v, "transcript_path"),
+    })
+}
+
 /// Everything a tab's dot is decided from.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Signals {
@@ -746,6 +771,12 @@ pub(crate) fn state_path(id: &str) -> std::path::PathBuf {
     kyde_config::agents::agents_dir().join(format!("{id}.state"))
 }
 
+/// Where tab `id`'s write hook records the latest file its agent wrote
+/// (`kyde_config::claude_hooks::write_command`).
+pub(crate) fn write_path(id: &str) -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join(format!("{id}.state.write"))
+}
+
 /// Kyde's note for tab `id`'s first prompt (`$KYDE_AGENT_STATE.brief` — the prompt hook
 /// hands it to Claude, then deletes it; see `kyde_config::claude_hooks::brief_command`).
 pub(crate) fn brief_path(id: &str) -> std::path::PathBuf {
@@ -768,8 +799,8 @@ pub(crate) struct Busy {
     pub last_task: Option<String>,
 }
 
-/// Every tab's note ends with this: only `EnterWorktree` moves the session — and so the tab
-/// (see [`moved_worktree`]) — to another worktree; a shell `cd` leaves both behind.
+/// Every tab's note ends with this: only `EnterWorktree` moves the session to another
+/// worktree (and the tab with it, see [`moved_worktree`]); a shell `cd` leaves both behind.
 const MOVE_HOW: &str = "To work in another worktree, call EnterWorktree — `name` for a new \
      one, `path` for one that exists (e.g. made with `git worktree add`) — so this session \
      moves there and Kyde moves this tab with it. A `cd` in the shell leaves both behind.";
@@ -836,14 +867,11 @@ pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> String
     )
 }
 
-/// Where a tab's agent has moved itself, from what its hook reported: the worktree holding
-/// `cwd` when that's ANOTHER worktree of `wt`'s repository and the session moved there too
-/// (`transcript` in that worktree's Claude Code project folder — Claude Code's
-/// `EnterWorktree`; a shell `cd` into another worktree leaves it behind) — canonical. `None`
-/// while it's in `wt` (or a folder inside it), or outside the repository. Stats a few
-/// folders, and runs git only when the worktree differs: call it off the UI thread.
-pub(crate) fn moved_worktree(
-    wt: &std::path::Path,
+/// The worktree a Claude Code session is in, canonical: the one holding `cwd`, when the
+/// session file `transcript` is in that worktree's Claude Code project folder (Claude Code's
+/// `EnterWorktree` moves both; a shell `cd` leaves the session behind — `None` then). Stats a
+/// few folders.
+pub(crate) fn session_worktree(
     cwd: &std::path::Path,
     transcript: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
@@ -853,13 +881,69 @@ pub(crate) fn moved_worktree(
     if transcript.parent().and_then(std::path::Path::file_name) != folder.file_name() {
         return None;
     }
+    Some(named.canonicalize().unwrap_or_else(|_| named.to_path_buf()))
+}
+
+/// Of an agent's writes, the one that says where it's at work: `fresh` (its latest) when it
+/// landed in a worktree of `wt`'s repository, else `kept` (the last one that did) — a
+/// scratch file or another project's says nothing. Runs git for a write outside `wt`: call
+/// it off the UI thread, once per new write.
+pub(crate) fn repo_write(
+    wt: &std::path::Path,
+    fresh: Option<WriteReport>,
+    kept: Option<WriteReport>,
+) -> Option<WriteReport> {
     let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let root = canon(named);
-    if root == canon(wt) {
-        return None;
-    }
     let common = |p: &std::path::Path| kyde_git::Repo::discover(p).ok()?.common_dir().ok();
-    (common(&root)? == common(wt)?).then_some(root)
+    let ours = |w: &WriteReport| {
+        let Some(at) = w.file.ancestors().find(|d| d.join(".git").exists()) else {
+            return false;
+        };
+        canon(at) == canon(wt) || common(at).is_some_and(|c| Some(c) == common(wt))
+    };
+    fresh.filter(ours).or(kept)
+}
+
+/// Where a tab's agent is at work, from its hook reports, when that's ANOTHER worktree of
+/// `wt`'s repository — canonical; `None` while it's at work in `wt` (or a folder inside it),
+/// or outside the repository. It's where its latest write (`wrote`) landed, if that's in the
+/// repository and its session hasn't moved since — an agent that made a worktree with
+/// `git worktree add` and edits it by path is at work there, not where its session started.
+/// Else it's where its session is (`report`'s, see [`session_worktree`]). Runs git only when
+/// that differs from `wt`: call it off the UI thread.
+pub(crate) fn moved_worktree(
+    wt: &std::path::Path,
+    report: Option<&HookReport>,
+    wrote: Option<&WriteReport>,
+) -> Option<std::path::PathBuf> {
+    let session = |cwd: &Option<std::path::PathBuf>, t: &Option<std::path::PathBuf>| {
+        session_worktree(cwd.as_deref()?, t.as_deref()?)
+    };
+    let now = report.and_then(|r| session(&r.cwd, &r.transcript));
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let wt = canon(wt);
+    let common = |p: &std::path::Path| kyde_git::Repo::discover(p).ok()?.common_dir().ok();
+    // Another worktree of this repository (git only runs for one that isn't `wt`).
+    let other = |p: std::path::PathBuf| {
+        if p == wt {
+            return Ok(None);
+        }
+        match (common(&p), common(&wt)) {
+            (Some(a), Some(b)) if a == b => Ok(Some(p)),
+            _ => Err(()),
+        }
+    };
+    let written = wrote
+        .filter(|w| session(&w.cwd, &w.transcript) == now)
+        .and_then(|w| {
+            let at = w.file.ancestors().find(|d| d.join(".git").exists())?;
+            Some(canon(at))
+        });
+    // A write outside the repository (a scratch file, another project) says nothing.
+    if let Some(Ok(to)) = written.map(other) {
+        return to;
+    }
+    other(now?).ok().flatten()
 }
 
 /// Keep Claude Code's worktrees (`.claude/worktrees/`, inside the checkout) out of git's
@@ -1068,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_that_enters_another_worktree_is_found_there() {
+    fn an_agent_is_found_in_the_worktree_it_enters_or_edits() {
         let base = std::env::temp_dir().join(format!("kyde-moved-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let repo = base.join("repo");
@@ -1109,14 +1193,16 @@ mod tests {
         let moved = repo.join(".claude/worktrees/style").canonicalize().unwrap();
         // The session file follows EnterWorktree into its project folder; a `cd` leaves it.
         let session = |wt: &std::path::Path| claude_project_dir(wt).unwrap().join("s1.jsonl");
-        let moved_to = |cwd: &std::path::Path, session: std::path::PathBuf| {
+        let at = |cwd: &std::path::Path, session: std::path::PathBuf| {
             let json = serde_json::json!({
                 "hook_event_name": "Stop",
                 "cwd": cwd,
                 "transcript_path": session,
             });
-            let r = parse_hook(&json.to_string()).unwrap();
-            moved_worktree(&repo, &r.cwd.unwrap(), &r.transcript.unwrap())
+            parse_hook(&json.to_string()).unwrap()
+        };
+        let moved_to = |cwd: &std::path::Path, session: std::path::PathBuf| {
+            moved_worktree(&repo, Some(&at(cwd, session)), None)
         };
         // Working in a folder of its own worktree isn't a move; entering the other one is.
         assert_eq!(moved_to(&repo.join("src"), session(&repo)), None);
@@ -1128,8 +1214,50 @@ mod tests {
         assert_eq!(moved_to(&moved, session(&repo)), None);
         // Another repository entirely isn't one of its worktrees.
         assert_eq!(
-            moved_worktree(&base.join("elsewhere"), &moved, &session(&moved)),
+            moved_worktree(
+                &base.join("elsewhere"),
+                Some(&at(&moved, session(&moved))),
+                None
+            ),
             None
+        );
+        // Made with `git worktree add` and edited by path, the session still in the checkout:
+        // it's at work there — and stays, rather than bouncing back to the session's folder.
+        let wrote = |file: std::path::PathBuf| {
+            let json = serde_json::json!({
+                "tool_name": "Edit",
+                "tool_input": { "file_path": file },
+                "cwd": repo,
+                "transcript_path": session(&repo),
+            });
+            parse_write(&json.to_string()).unwrap()
+        };
+        let home = at(&repo, session(&repo));
+        let edit = wrote(moved.join("src/a.rs"));
+        assert_eq!(
+            moved_worktree(&repo, Some(&home), Some(&edit)),
+            Some(moved.clone())
+        );
+        assert_eq!(moved_worktree(&moved, Some(&home), Some(&edit)), None);
+        // A scratch file outside the repository says nothing: the last write in it stands.
+        let scratch = wrote(base.join("notes.md"));
+        assert_eq!(
+            repo_write(&moved, Some(scratch), Some(edit.clone())),
+            Some(edit.clone())
+        );
+        // Its session entering yet another worktree after that write wins.
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/next",
+            "-b",
+            "next",
+        ]);
+        let next = repo.join(".claude/worktrees/next").canonicalize().unwrap();
+        assert_eq!(
+            moved_worktree(&moved, Some(&at(&next, session(&next))), Some(&edit)),
+            Some(next)
         );
         // The worktree left behind doesn't read as dirty for it.
         assert!(git(&["status", "--porcelain"]).contains(".claude/"));
