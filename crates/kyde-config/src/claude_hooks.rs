@@ -10,6 +10,11 @@
 //! what's already going on in the tab's worktree, so an unrelated task can move to a
 //! worktree of its own.
 //!
+//! Each file an agent writes (`Edit` / `Write` / `NotebookEdit`) also lands in its own file,
+//! `$KYDE_AGENT_STATE.write` ([`write_command`]), so the latest write survives the tool calls
+//! after it: an agent that edits another worktree by path is at work there, and its tab
+//! follows it.
+//!
 //! [`merge`] is the pure part (unit-tested): it adds or removes Kyde's entries in Claude
 //! Code's `settings.json`, leaving everything else — other tools' hooks included — as is.
 
@@ -31,13 +36,28 @@ pub const EVENTS: [&str; 8] = [
     "SessionEnd",
 ];
 
+/// The tools whose writes [`write_command`] records (a `PostToolUse` matcher).
+pub const WRITE_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
+
 /// The hook command: the event JSON (stdin) → `$KYDE_AGENT_STATE`, written atomically; always
 /// exits 0 so it can never block Claude.
 #[must_use]
 pub fn command() -> String {
+    save_to("$KYDE_AGENT_STATE")
+}
+
+/// The write hook: a file-writing tool's event JSON (stdin) → `$KYDE_AGENT_STATE.write`,
+/// written atomically; always exits 0.
+#[must_use]
+pub fn write_command() -> String {
+    save_to("$KYDE_AGENT_STATE.write")
+}
+
+/// stdin → `file` (a shell word), via a temp file and a rename, when `$KYDE_AGENT_STATE` is set.
+fn save_to(file: &str) -> String {
     format!(
-        "if [ -n \"$KYDE_AGENT_STATE\" ]; then cat > \"$KYDE_AGENT_STATE.$$\" && \
-         mv -f \"$KYDE_AGENT_STATE.$$\" \"$KYDE_AGENT_STATE\"; else cat > /dev/null; fi; \
+        "if [ -n \"$KYDE_AGENT_STATE\" ]; then cat > \"{file}.$$\" && \
+         mv -f \"{file}.$$\" \"{file}\"; else cat > /dev/null; fi; \
          exit 0 {MARKER}"
     )
 }
@@ -140,6 +160,10 @@ pub fn merge(settings: &str, on: bool) -> Result<Option<String>, serde_json::Err
                     .or_insert_with(|| Value::Array(Vec::new()));
                 if let Some(entries) = list.as_array_mut() {
                     entries.push(json!({ "matcher": "*", "hooks": cmds }));
+                    if event == "PostToolUse" {
+                        let write = vec![hook(write_command())];
+                        entries.push(json!({ "matcher": WRITE_TOOLS, "hooks": write }));
+                    }
                 }
             }
         }
@@ -229,6 +253,10 @@ mod tests {
             v["hooks"]["UserPromptSubmit"][0]["hooks"][1]["command"],
             brief_command()
         );
+        // A file-writing tool also records the write.
+        let post = v["hooks"]["PostToolUse"].as_array().unwrap();
+        assert_eq!(post[1]["matcher"], WRITE_TOOLS);
+        assert_eq!(post[1]["hooks"][0]["command"], write_command());
         // Removing leaves only herdr's.
         let off: Value = serde_json::from_str(&merge(&out, false).unwrap().unwrap()).unwrap();
         assert_eq!(off["hooks"].as_object().unwrap().len(), 1);

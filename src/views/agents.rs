@@ -845,8 +845,18 @@ impl Kyde {
                         }
                         this.agents_save(cx);
                         #[cfg(feature = "terminal")]
-                        if let Some(s) = start {
-                            this.agents_new_tab_as(path.clone(), Some(s.prompt), Some(s.tab), cx);
+                        match start {
+                            Some(s) => this.agents_new_tab_as(
+                                path.clone(),
+                                Some(s.prompt),
+                                Some(s.tab),
+                                cx,
+                            ),
+                            // Made for you to work in: its agent starts if you're still here.
+                            None if this.agents.selected.as_ref() == Some(&path) => {
+                                this.agents_new_tab(path.clone(), true, None, cx);
+                            }
+                            None => {}
                         }
                         #[cfg(not(feature = "terminal"))]
                         let _ = start;
@@ -1770,7 +1780,10 @@ impl Kyde {
                     }
                 }
             }
-            // Its latest Claude Code session, resumed — else a fresh agent.
+            // Its latest Claude Code session, resumed — else, in a project's own checkout, a
+            // fresh agent. A linked worktree with neither waits for you to start one: one an
+            // agent made (`git worktree add`) gets that agent's tab once it edits there, and a
+            // blank agent beside it would read as the one at work.
             None => match self
                 .agents
                 .contexts
@@ -1778,7 +1791,10 @@ impl Kyde {
                 .and_then(|c| c.session.clone())
             {
                 Some(id) => self.agents_resume_tab(wt, id, cx),
-                None => self.agents_new_tab(wt, true, None, cx),
+                None if self.agents.cfg.spaces.iter().any(|s| s.path == wt) => {
+                    self.agents_new_tab(wt, true, None, cx);
+                }
+                None => {}
             },
         }
     }
@@ -2058,6 +2074,7 @@ impl Kyde {
             name,
             hook: None,
             hook_seen: None,
+            wrote: None,
             last_output: None,
             last_active: Instant::now(),
             unseen: false,
@@ -2093,6 +2110,7 @@ impl Kyde {
         let files = [
             crate::agents::state_path(&gone.id),
             crate::agents::brief_path(&gone.id),
+            crate::agents::write_path(&gone.id),
         ];
         cx.background_executor()
             .spawn(async move {
@@ -2277,11 +2295,12 @@ impl Kyde {
     }
 
     /// Read the agents' hook state files that changed since last time — off the UI thread.
-    fn agents_poll_hooks(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn agents_poll_hooks(&mut self, cx: &mut Context<Self>) {
         if self.agents.hooks_polling {
             return;
         }
-        let probes: Vec<(PathBuf, String, Option<std::time::SystemTime>)> = self
+        type Wrote = Option<(std::time::SystemTime, Option<crate::agents::WriteReport>)>;
+        let probes: Vec<(PathBuf, String, Option<std::time::SystemTime>, Wrote)> = self
             .agents
             .tabs
             .iter()
@@ -2289,7 +2308,7 @@ impl Kyde {
                 g.tabs
                     .iter()
                     .filter(|t| t.agent)
-                    .map(|t| (wt.clone(), t.id.clone(), t.hook_seen))
+                    .map(|t| (wt.clone(), t.id.clone(), t.hook_seen, t.wrote.clone()))
             })
             .collect();
         if probes.is_empty() {
@@ -2302,23 +2321,33 @@ impl Kyde {
                 .spawn(async move {
                     probes
                         .into_iter()
-                        .filter_map(|(wt, id, seen)| {
+                        .filter_map(|(wt, id, seen, wrote)| {
+                            let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified());
                             let path = crate::agents::state_path(&id);
-                            let m = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+                            let m = mtime(&path).ok()?;
                             if Some(m) == seen {
                                 return None;
                             }
                             let report = std::fs::read_to_string(&path)
                                 .ok()
                                 .and_then(|s| crate::agents::parse_hook(&s));
-                            let moved = report.as_ref().and_then(|r| {
-                                crate::agents::moved_worktree(
-                                    &wt,
-                                    r.cwd.as_deref()?,
-                                    r.transcript.as_deref()?,
-                                )
-                            });
-                            Some((wt, id, m, report, moved))
+                            // Its latest write, read again only when there's a new one.
+                            let (write_seen, kept) = wrote.unzip();
+                            let kept = kept.flatten();
+                            let wpath = crate::agents::write_path(&id);
+                            let wrote = mtime(&wpath)
+                                .ok()
+                                .filter(|wm| Some(*wm) != write_seen)
+                                .map(|wm| {
+                                    let fresh = std::fs::read_to_string(&wpath)
+                                        .ok()
+                                        .and_then(|s| crate::agents::parse_write(&s));
+                                    (wm, crate::agents::repo_write(&wt, fresh, kept.clone()))
+                                });
+                            let last = wrote.as_ref().map_or(kept, |(_, w)| w.clone());
+                            let moved =
+                                crate::agents::moved_worktree(&wt, report.as_ref(), last.as_ref());
+                            Some((wt, id, m, report, moved, wrote))
                         })
                         .collect()
                 })
@@ -2339,7 +2368,7 @@ impl Kyde {
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let active = self.agents.window_active;
         let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
-        for (wt, id, mtime, report, moved) in found {
+        for (wt, id, mtime, report, moved, wrote) in found {
             if let Some(to) = moved {
                 moves.push((wt.clone(), id.clone(), to));
             }
@@ -2352,6 +2381,9 @@ impl Kyde {
             let on_screen = visible.as_ref().is_some_and(|(w, vi)| *w == wt && *vi == i);
             let t = &mut g.tabs[i];
             t.hook_seen = Some(mtime);
+            if wrote.is_some() {
+                t.wrote = wrote;
+            }
             let Some(r) = report else { continue };
             if let Some(s) = r.session.filter(|s| t.session.as_ref() != Some(s)) {
                 t.session = Some(s);
@@ -5350,17 +5382,10 @@ impl Kyde {
         let key = SharedString::from(format!("agents-wt-{id}"));
         let hovered = self.agents.hovered_row.as_ref() == Some(&key);
         let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
-        // The space's own folder: titled by its branch.
+        // The space's own folder: titled by its branch, behind a branch glyph.
         let is_default = wt == space;
         let fields = self.agents.cfg.row;
-        let title: SharedString = self
-            .agents
-            .cfg
-            .names
-            .get(wt)
-            .cloned()
-            .unwrap_or_else(|| self.agents_wt_auto_title(space, wt))
-            .into();
+        let title: SharedString = self.agents_wt_title(space, wt).into();
 
         let renaming = self.agents.renaming == Some(RenameTarget::Worktree(wt.to_path_buf()));
         let title_el = if renaming {
@@ -5405,6 +5430,15 @@ impl Kyde {
         let lines = div().flex().flex_col().flex_1().min_w_0().child(
             title_line()
                 .child(status_dot(state))
+                .when(is_default, |d| {
+                    d.child(
+                        svg()
+                            .flex_none()
+                            .path("icons/git-branch.svg")
+                            .size(px(13.0))
+                            .text_color(t.line_number),
+                    )
+                })
                 .child(title_el)
                 .children(status)
                 .children(activity)
@@ -5467,8 +5501,8 @@ impl Kyde {
                     if renaming {
                         return;
                     }
-                    // Double-click: rename it.
-                    if e.click_count >= 2 {
+                    // Double-click: rename it — not the checkout, which is always its branch.
+                    if e.click_count >= 2 && !is_default {
                         this.agents_start_rename(RenameTarget::Worktree(sel.clone()), window, cx);
                         return;
                     }
@@ -6407,8 +6441,9 @@ fn tab_auto_title(t: &AgentTab, cx: &gpui::App) -> String {
     }
 }
 
-/// One changed hook state file: worktree, tab id, its mtime, what it says, and the other
-/// worktree its agent has moved to (if it has).
+/// One changed hook state file: worktree, tab id, its mtime, what it says, the other
+/// worktree its agent is at work in (if it is), and its write file when that changed (mtime,
+/// the last write in the repository).
 #[cfg(feature = "terminal")]
 type HookRead = (
     PathBuf,
@@ -6416,6 +6451,7 @@ type HookRead = (
     std::time::SystemTime,
     Option<crate::agents::HookReport>,
     Option<PathBuf>,
+    Option<(std::time::SystemTime, Option<crate::agents::WriteReport>)>,
 );
 
 // ── keyboard navigation, renaming, scrollback ────────────────────────────────────────────
@@ -6587,9 +6623,32 @@ impl Kyde {
         }
     }
 
-    /// A worktree row's automatic title: its agent's AI title (per the row setting), else —
-    /// for a project's own checkout — its branch, else its folder name.
+    /// What a worktree row is called: the name you gave it, else its automatic title. A
+    /// project's own checkout is always its branch — it's shared, so it never takes a task's
+    /// name (its agent's AI title) or a rename (`names` holds the project's under that path).
+    pub(crate) fn agents_wt_title(&self, space: &Path, wt: &Path) -> String {
+        if wt == space {
+            return self.agents_wt_auto_title(space, wt);
+        }
+        self.agents
+            .cfg
+            .names
+            .get(wt)
+            .cloned()
+            .unwrap_or_else(|| self.agents_wt_auto_title(space, wt))
+    }
+
+    /// A worktree row's automatic title: a project's own checkout is its branch; any other,
+    /// its agent's AI title (per the row setting), else its origin, else its folder name.
     fn agents_wt_auto_title(&self, space: &Path, wt: &Path) -> String {
+        if wt == space {
+            return self
+                .agents
+                .branches
+                .get(wt)
+                .cloned()
+                .unwrap_or_else(|| "default".into());
+        }
         let ai = self
             .agents
             .cfg
@@ -6601,12 +6660,6 @@ impl Kyde {
             t
         } else if let Some(o) = self.agents.cfg.origins.get(wt) {
             o.clone()
-        } else if wt == space {
-            self.agents
-                .branches
-                .get(wt)
-                .cloned()
-                .unwrap_or_else(|| "default".into())
         } else {
             worktree_title(Some(space), wt)
         }
