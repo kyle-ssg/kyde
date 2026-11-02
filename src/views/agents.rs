@@ -871,7 +871,7 @@ impl Kyde {
     }
 
     /// Switch the sidebar list; Issues / Pull Requests load their project's list if needed.
-    fn agents_show_tab(&mut self, tab: SideTab, cx: &mut Context<Self>) {
+    pub(crate) fn agents_show_tab(&mut self, tab: SideTab, cx: &mut Context<Self>) {
         self.agents.side_tab = tab;
         let missing: Vec<PathBuf> = self
             .agents
@@ -3837,7 +3837,13 @@ impl Kyde {
 
     /// Show issue / PR `n` of `space` in the main panel, loading it in full with `gh` — and,
     /// for a PR, its reviews and inline review threads.
-    fn agents_select_gh(&mut self, space: PathBuf, tab: SideTab, n: u64, cx: &mut Context<Self>) {
+    pub(crate) fn agents_select_gh(
+        &mut self,
+        space: PathBuf,
+        tab: SideTab,
+        n: u64,
+        cx: &mut Context<Self>,
+    ) {
         let key = (space.clone(), tab, n);
         if self.agents.gh_selected.as_ref() == Some(&key) {
             return;
@@ -3847,23 +3853,31 @@ impl Kyde {
         self.agents.gh_cards.clear();
         self.agents.gh_diff = None;
         self.agents.gh_reply_to = None;
+        self.agents.merge_armed = false;
         if tab == SideTab::Prs && self.agents.gh_pr_tab == PrTab::Files {
             self.agents_fetch_pr_diff(space.clone(), n, cx);
         }
+        let need_merge = tab == SideTab::Prs && !self.agents.gh_merge.contains_key(&space);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let r = cx
+            let (r, merge) = cx
                 .background_executor()
                 .spawn(async move {
-                    if tab == SideTab::Prs {
-                        let reviews = kyde_git::github::reviews(&space, n).unwrap_or_default();
-                        kyde_git::github::pr_detail(&space, n).map(|d| (d, reviews))
+                    use kyde_git::github as gh;
+                    let merge = need_merge.then(|| gh::repo_merge(&space).ok()).flatten();
+                    let r = if tab == SideTab::Prs {
+                        let reviews = gh::reviews(&space, n).unwrap_or_default();
+                        gh::pr_detail(&space, n).map(|d| (d, reviews))
                     } else {
-                        kyde_git::github::issue_detail(&space, n).map(|d| (d, Default::default()))
-                    }
+                        gh::issue_detail(&space, n).map(|d| (d, Default::default()))
+                    };
+                    (r, merge)
                 })
                 .await;
             this.update(cx, |this, cx| {
+                if let Some(m) = merge {
+                    this.agents.gh_merge.insert(key.0.clone(), m);
+                }
                 // A newer pick supersedes this one.
                 if this.agents.gh_selected.as_ref() != Some(&key) {
                     return;
@@ -4040,7 +4054,8 @@ impl Kyde {
         cards
     }
 
-    /// Post the comment box (or a thread reply), or close / reopen the issue, then reload.
+    /// Post the comment box (or a thread reply), close / reopen the issue, or approve / merge
+    /// the PR, then reload.
     fn agents_gh_post(&mut self, post: GhPost, cx: &mut Context<Self>) {
         let Some((space, tab, n)) = self.agents.gh_selected.clone() else {
             return;
@@ -4052,6 +4067,17 @@ impl Kyde {
         if matches!(post, GhPost::Comment | GhPost::Reply(_)) && text.is_empty() {
             return;
         }
+        // The head the merge box showed — a commit pushed since then stops the merge.
+        let head = match &self.agents.gh_detail {
+            Some(Ok(d)) => {
+                d.pr.as_ref()
+                    .map(|p| p.head_oid.clone())
+                    .unwrap_or_default()
+            }
+            _ => String::new(),
+        };
+        // Merge stays armed while it's sent ("Merging…"); any other post disarms it.
+        self.agents.merge_armed = matches!(post, GhPost::Merge(_));
         self.agents.gh_posting = true;
         cx.notify();
         let pr = tab == SideTab::Prs;
@@ -4074,24 +4100,34 @@ impl Kyde {
                             }
                         }
                         GhPost::Reopen => gh::reopen_issue(&space, n),
+                        GhPost::Approve => gh::approve(&space, n, &text),
+                        GhPost::Merge(method) => gh::merge(&space, n, method, &head),
                     }
                 })
                 .await;
             this.update(cx, |this, cx| {
                 this.agents.gh_posting = false;
+                this.agents.merge_armed = false;
                 match res {
                     Ok(()) => {
                         let clear = |e: &mut CodeEditor, cx: &mut Context<CodeEditor>| {
                             e.set_content(String::new(), Lang::PlainText, cx);
                         };
-                        if matches!(post, GhPost::Reply(_)) {
-                            this.agents.gh_reply.update(cx, clear);
-                            this.agents.gh_reply_to = None;
-                        } else {
-                            this.agents.gh_comment.update(cx, clear);
+                        match post {
+                            GhPost::Reply(_) => {
+                                this.agents.gh_reply.update(cx, clear);
+                                this.agents.gh_reply_to = None;
+                            }
+                            // A merge leaves the comment box alone (it wasn't sent).
+                            GhPost::Merge(_) => {}
+                            _ => this.agents.gh_comment.update(cx, clear),
                         }
-                        if matches!(post, GhPost::Close | GhPost::Reopen) {
-                            this.agents_refresh_gh(SideTab::Issues, true, cx);
+                        match post {
+                            GhPost::Close | GhPost::Reopen => {
+                                this.agents_refresh_gh(SideTab::Issues, true, cx);
+                            }
+                            GhPost::Merge(_) => this.agents_refresh_gh(SideTab::Prs, true, cx),
+                            _ => {}
                         }
                         this.agents_reload_gh(cx);
                     }
@@ -4100,6 +4136,10 @@ impl Kyde {
                             "GitHub said no: {}",
                             crate::agents::git_reason(&e.to_string())
                         ));
+                        // A refused merge (a push since, a rule) — show where it stands now.
+                        if matches!(post, GhPost::Merge(_)) {
+                            this.agents_reload_gh(cx);
+                        }
                     }
                 }
                 cx.notify();
@@ -4401,14 +4441,7 @@ impl Kyde {
                     .iter()
                     .enumerate()
                     .map(|(i, (name, result, link))| {
-                        let r = result.to_uppercase();
-                        let (glyph, color) = match r.as_str() {
-                            "SUCCESS" | "NEUTRAL" | "SKIPPED" => ("✓", t.status_added),
-                            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" => {
-                                ("✗", t.status_conflict)
-                            }
-                            _ => ("●", t.status_modified),
-                        };
+                        let (glyph, color) = check_outcome(result).glyph();
                         let link = link.clone();
                         div()
                             .id(("gh-check", i))
@@ -4603,11 +4636,31 @@ impl Kyde {
                 }
             }
         }
+        let open = d.state.eq_ignore_ascii_case("open");
+        if let Some(merge_box) =
+            d.pr.as_ref()
+                .filter(|_| open)
+                .and_then(|pr| self.render_merge_box(pr, cx))
+        {
+            items.push(merge_box);
+        }
         // The comment box.
         let posting = self.agents.gh_posting;
         let is_issue = d.pr.is_none();
         let closed = d.state.eq_ignore_ascii_case("closed");
         let mut buttons = div().flex().flex_row().justify_end().gap_2();
+        if !is_issue && open {
+            // What's typed in the box goes with the approval, as its comment.
+            buttons = buttons.child(btn_secondary_state("gh-approve", "Approve", posting).when(
+                !posting,
+                |b| {
+                    b.on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.agents_gh_post(GhPost::Approve, cx)),
+                    )
+                },
+            ));
+        }
         if is_issue {
             buttons = buttons.child(
                 btn_secondary_state(
@@ -4693,6 +4746,173 @@ impl Kyde {
             // Each card keeps its full height — the column scrolls instead of squashing them.
             .children(items.into_iter().map(|e| div().flex_none().child(e)))
             .into_any_element()
+    }
+
+    /// An open PR's merge box, like GitHub's: where its review, checks and conflicts stand,
+    /// then the merge method and Merge — which asks to confirm before it merges. `None` when
+    /// you can't merge into the repo.
+    fn render_merge_box(
+        &self,
+        pr: &kyde_git::github::PrDetail,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        use kyde_git::github::MergeMethod;
+        let t = theme::get();
+        let space = &self.agents.gh_selected.as_ref()?.0;
+        // Settings gh couldn't read: offer every method and let GitHub say no.
+        let (methods, default) = match self.agents.gh_merge.get(space) {
+            Some(m) if !m.can_merge => return None,
+            Some(m) => (m.methods.clone(), m.default),
+            None => (
+                vec![MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase],
+                None,
+            ),
+        };
+        let method = self
+            .agents
+            .merge_method
+            .filter(|m| methods.contains(m))
+            .or(default)
+            .or_else(|| methods.first().copied())?;
+        let line = |(glyph, color): (&'static str, kyde_color::Color), text: SharedString| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().w(px(14.0)).flex_none().text_color(color).child(glyph))
+                .child(text)
+        };
+        let mut lines = Vec::new();
+        match pr.review_decision.as_str() {
+            "APPROVED" => lines.push(line(CheckOutcome::Pass.glyph(), "Changes approved".into())),
+            "CHANGES_REQUESTED" => {
+                lines.push(line(CheckOutcome::Fail.glyph(), "Changes requested".into()));
+            }
+            "REVIEW_REQUIRED" => {
+                lines.push(line(
+                    CheckOutcome::Pending.glyph(),
+                    "Review required".into(),
+                ));
+            }
+            _ => {}
+        }
+        if !pr.checks.is_empty() {
+            let count = |o: CheckOutcome| {
+                pr.checks
+                    .iter()
+                    .filter(|(_, r, _)| check_outcome(r) == o)
+                    .count()
+            };
+            let checks = |n: usize, what: &str| {
+                format!("{n} {what} check{}", if n == 1 { "" } else { "s" }).into()
+            };
+            let (failing, pending) = (count(CheckOutcome::Fail), count(CheckOutcome::Pending));
+            lines.push(if failing > 0 {
+                line(CheckOutcome::Fail.glyph(), checks(failing, "failing"))
+            } else if pending > 0 {
+                line(CheckOutcome::Pending.glyph(), checks(pending, "pending"))
+            } else {
+                line(CheckOutcome::Pass.glyph(), "All checks have passed".into())
+            });
+        }
+        let block = pr.merge_block();
+        if let Some(why) = block {
+            lines.push(line(CheckOutcome::Fail.glyph(), why.into()));
+        } else if pr.merge_state == "BEHIND" {
+            lines.push(line(
+                CheckOutcome::Pending.glyph(),
+                "This branch is out-of-date with the base branch".into(),
+            ));
+        } else if pr.mergeable == "MERGEABLE" {
+            lines.push(line(
+                CheckOutcome::Pass.glyph(),
+                "No conflicts with base branch".into(),
+            ));
+        }
+
+        let posting = self.agents.gh_posting;
+        let armed = self.agents.merge_armed && block.is_none();
+        let (option, verb) = merge_labels(method);
+        let mut controls = div().flex().flex_row().items_center().gap_2();
+        if methods.len() > 1 {
+            let options: Vec<&'static str> = methods.iter().map(|&m| merge_labels(m).0).collect();
+            let picked = methods.iter().position(|&m| m == method);
+            let pick = methods.clone();
+            controls = controls.child(ui::select(
+                cx,
+                "gh-merge-method",
+                190.0,
+                &options,
+                picked,
+                &self.agents.gh_merge_sel,
+                |k: &mut Kyde| &mut k.agents.gh_merge_sel,
+                |_this, _cx| {},
+                move |this, i, _cx| {
+                    this.agents.merge_method = pick.get(i).copied();
+                    this.agents.merge_armed = false;
+                },
+            ));
+        }
+        let label: SharedString = if posting && armed {
+            "Merging…".into()
+        } else if armed {
+            format!("Confirm {verb}").into()
+        } else if methods.len() > 1 {
+            "Merge".into()
+        } else {
+            option.into()
+        };
+        let disabled = posting || block.is_some();
+        controls = controls.child(btn_primary_state("gh-merge", label, disabled).when(
+            !disabled,
+            |b| {
+                b.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        // The first click arms it; the second merges (GitHub's Confirm merge).
+                        if this.agents.merge_armed {
+                            this.agents_gh_post(GhPost::Merge(method), cx);
+                        } else {
+                            this.agents.merge_armed = true;
+                            cx.notify();
+                        }
+                    }),
+                )
+            },
+        ));
+        if armed && !posting {
+            controls = controls.child(btn_secondary("gh-merge-cancel", "Cancel").on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.agents.merge_armed = false;
+                    cx.notify();
+                }),
+            ));
+        }
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .border_1()
+                .border_color(t.divider)
+                .rounded_md()
+                .when(!lines.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1p5()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(t.divider)
+                            .children(lines),
+                    )
+                })
+                .child(div().px_3().py_2().child(controls))
+                .into_any_element(),
+        )
     }
 
     /// An inline review thread: the file, the diff lines it's on, its comments, and a reply.
@@ -5964,6 +6184,45 @@ enum ReviewState {
     Done(PathBuf),
 }
 
+/// How a CI check came out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CheckOutcome {
+    Pass,
+    Fail,
+    Pending,
+}
+
+impl CheckOutcome {
+    /// Its glyph and colour.
+    fn glyph(self) -> (&'static str, kyde_color::Color) {
+        let t = theme::get();
+        match self {
+            Self::Pass => ("✓", t.status_added),
+            Self::Fail => ("✗", t.status_conflict),
+            Self::Pending => ("●", t.status_modified),
+        }
+    }
+}
+
+/// A check's status-or-conclusion (`SUCCESS`, `FAILURE`, `IN_PROGRESS`, …) as an outcome.
+fn check_outcome(result: &str) -> CheckOutcome {
+    match result.to_uppercase().as_str() {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => CheckOutcome::Pass,
+        "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" => CheckOutcome::Fail,
+        _ => CheckOutcome::Pending,
+    }
+}
+
+/// A merge method's name in the merge box's dropdown, and what Merge says to confirm it.
+fn merge_labels(m: kyde_git::github::MergeMethod) -> (&'static str, &'static str) {
+    use kyde_git::github::MergeMethod;
+    match m {
+        MergeMethod::Merge => ("Create a merge commit", "merge"),
+        MergeMethod::Squash => ("Squash and merge", "squash and merge"),
+        MergeMethod::Rebase => ("Rebase and merge", "rebase and merge"),
+    }
+}
+
 /// What a post from the issue / PR panel does.
 #[derive(Clone, Copy)]
 enum GhPost {
@@ -5971,6 +6230,10 @@ enum GhPost {
     Reply(u64),
     Close,
     Reopen,
+    /// Approve the PR (the comment box, if filled, is the review's comment).
+    Approve,
+    /// Merge the PR.
+    Merge(kyde_git::github::MergeMethod),
 }
 
 /// A small round avatar: the login's initial on a colour picked from the login.

@@ -263,7 +263,7 @@ pub struct ItemDetail {
 }
 
 /// What a pull request changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PrDetail {
     /// Head branch.
     pub head: String,
@@ -283,6 +283,43 @@ pub struct PrDetail {
     pub checks: Vec<(String, String, String)>,
     /// Reviewers asked for a review.
     pub review_requests: Vec<String>,
+    /// The head commit's hash (a merge is pinned to it).
+    pub head_oid: String,
+    /// `MERGEABLE` / `CONFLICTING` / `UNKNOWN` (still computing).
+    pub mergeable: String,
+    /// GitHub's `mergeStateStatus`: `CLEAN`, `BLOCKED` (branch protection), `BEHIND`,
+    /// `DIRTY` (conflicts), `DRAFT`, `UNSTABLE` (failing checks), `UNKNOWN`, …
+    pub merge_state: String,
+    /// `APPROVED` / `CHANGES_REQUESTED` / `REVIEW_REQUIRED`, or empty (no review needed).
+    pub review_decision: String,
+}
+
+impl PrDetail {
+    /// Why GitHub won't merge it as it stands, or `None` when it would.
+    ///
+    /// ```
+    /// let pr = |mergeable: &str, state: &str| kyde_git::github::PrDetail {
+    ///     mergeable: mergeable.into(),
+    ///     merge_state: state.into(),
+    ///     ..Default::default()
+    /// };
+    /// assert!(pr("CONFLICTING", "DIRTY").merge_block().is_some());
+    /// assert!(pr("MERGEABLE", "BLOCKED").merge_block().is_some());
+    /// assert_eq!(pr("MERGEABLE", "CLEAN").merge_block(), None);
+    /// assert_eq!(pr("UNKNOWN", "UNKNOWN").merge_block(), None); // still computing: let gh try
+    /// ```
+    #[must_use]
+    pub fn merge_block(&self) -> Option<&'static str> {
+        if self.draft || self.merge_state == "DRAFT" {
+            Some("This pull request is still a draft")
+        } else if self.mergeable == "CONFLICTING" || self.merge_state == "DIRTY" {
+            Some("This branch has conflicts that must be resolved")
+        } else if self.merge_state == "BLOCKED" {
+            Some("Merging is blocked by the base branch's rules")
+        } else {
+            None
+        }
+    }
 }
 
 /// One commit of a pull request.
@@ -398,6 +435,14 @@ struct RawDetail {
     #[serde(default)]
     review_requests: Vec<RawRequested>,
     #[serde(default)]
+    head_ref_oid: String,
+    #[serde(default)]
+    mergeable: String,
+    #[serde(default)]
+    merge_state_status: String,
+    #[serde(default)]
+    review_decision: String,
+    #[serde(default)]
     comments: Vec<RawComment>,
 }
 
@@ -422,7 +467,7 @@ pub fn pr_detail(dir: &Path, number: u64) -> Result<ItemDetail> {
         dir,
         &[
             "pr", "view", &number.to_string(), "--json",
-            "number,title,body,author,state,url,labels,headRefName,baseRefName,additions,deletions,isDraft,files,comments,assignees,createdAt,commits,statusCheckRollup,reviewRequests",
+            "number,title,body,author,state,url,labels,headRefName,baseRefName,additions,deletions,isDraft,files,comments,assignees,createdAt,commits,statusCheckRollup,reviewRequests,headRefOid,mergeable,mergeStateStatus,reviewDecision",
         ],
     )?;
     parse_detail(&raw, "gh pr view")
@@ -501,6 +546,10 @@ pub fn parse_detail(json: &str, what: &str) -> Result<ItemDetail> {
                 .into_iter()
                 .map(|q| if q.login.is_empty() { q.name } else { q.login })
                 .collect(),
+            head_oid: r.head_ref_oid,
+            mergeable: r.mergeable,
+            merge_state: r.merge_state_status,
+            review_decision: r.review_decision,
         }),
         comments: r
             .comments
@@ -653,6 +702,124 @@ pub fn close_issue(dir: &Path, number: u64) -> Result<()> {
 /// Reopen issue `number` (`gh issue reopen`).
 pub fn reopen_issue(dir: &Path, number: u64) -> Result<()> {
     gh(dir, &["issue", "reopen", &number.to_string()]).map(|_| ())
+}
+
+/// Approve pull request `number`, with `body` as the review's comment when it isn't empty
+/// (`gh pr review --approve`).
+pub fn approve(dir: &Path, number: u64, body: &str) -> Result<()> {
+    let n = number.to_string();
+    let mut args = vec!["pr", "review", &n, "--approve"];
+    if !body.is_empty() {
+        args.extend(["--body", body]);
+    }
+    gh(dir, &args).map(|_| ())
+}
+
+/// How a pull request goes into its base branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeMethod {
+    /// A merge commit.
+    Merge,
+    /// One squashed commit.
+    Squash,
+    /// Its commits, rebased onto the base.
+    Rebase,
+}
+
+/// What `dir`'s repo lets you merge with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMerge {
+    /// The methods the repo allows, in GitHub's order (merge, squash, rebase).
+    pub methods: Vec<MergeMethod>,
+    /// The one GitHub picks for you (your last used).
+    pub default: Option<MergeMethod>,
+    /// You have write access (merging needs it).
+    pub can_merge: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawRepoMerge {
+    #[serde(default)]
+    merge_commit_allowed: bool,
+    #[serde(default)]
+    squash_merge_allowed: bool,
+    #[serde(default)]
+    rebase_merge_allowed: bool,
+    #[serde(default)]
+    viewer_default_merge_method: String,
+    #[serde(default)]
+    viewer_permission: String,
+}
+
+/// `dir`'s repo's merge settings, as they apply to you (`gh repo view`).
+pub fn repo_merge(dir: &Path) -> Result<RepoMerge> {
+    let raw = gh(
+        dir,
+        &[
+            "repo",
+            "view",
+            "--json",
+            "mergeCommitAllowed,squashMergeAllowed,rebaseMergeAllowed,viewerDefaultMergeMethod,viewerPermission",
+        ],
+    )?;
+    parse_repo_merge(&raw)
+}
+
+/// Parse `gh repo view --json mergeCommitAllowed,…,viewerPermission`.
+///
+/// ```
+/// use kyde_git::github::{parse_repo_merge, MergeMethod};
+/// let m = parse_repo_merge(
+///     r#"{"mergeCommitAllowed":false,"squashMergeAllowed":true,"rebaseMergeAllowed":true,
+///        "viewerDefaultMergeMethod":"REBASE","viewerPermission":"WRITE"}"#,
+/// ).unwrap();
+/// assert_eq!(m.methods, [MergeMethod::Squash, MergeMethod::Rebase]);
+/// assert_eq!((m.default, m.can_merge), (Some(MergeMethod::Rebase), true));
+/// let read = parse_repo_merge(r#"{"squashMergeAllowed":true,"viewerPermission":"READ"}"#);
+/// assert!(!read.unwrap().can_merge);
+/// ```
+pub fn parse_repo_merge(json: &str) -> Result<RepoMerge> {
+    let r: RawRepoMerge = serde_json::from_str(json).map_err(|source| GitError::Json {
+        what: "gh repo view".into(),
+        source,
+    })?;
+    let methods: Vec<MergeMethod> = [
+        (r.merge_commit_allowed, MergeMethod::Merge),
+        (r.squash_merge_allowed, MergeMethod::Squash),
+        (r.rebase_merge_allowed, MergeMethod::Rebase),
+    ]
+    .into_iter()
+    .filter_map(|(on, m)| on.then_some(m))
+    .collect();
+    let default = match r.viewer_default_merge_method.as_str() {
+        "MERGE" => Some(MergeMethod::Merge),
+        "SQUASH" => Some(MergeMethod::Squash),
+        "REBASE" => Some(MergeMethod::Rebase),
+        _ => None,
+    }
+    .filter(|m| methods.contains(m));
+    Ok(RepoMerge {
+        methods,
+        default,
+        can_merge: matches!(r.viewer_permission.as_str(), "ADMIN" | "MAINTAIN" | "WRITE"),
+    })
+}
+
+/// Merge pull request `number` by `method` — only if its head is still `head` (the commit
+/// you looked at), so a push made meanwhile isn't merged unseen (`gh pr merge`).
+pub fn merge(dir: &Path, number: u64, method: MergeMethod, head: &str) -> Result<()> {
+    let flag = match method {
+        MergeMethod::Merge => "--merge",
+        MergeMethod::Squash => "--squash",
+        MergeMethod::Rebase => "--rebase",
+    };
+    let n = number.to_string();
+    let mut args = vec!["pr", "merge", &n, flag];
+    if !head.is_empty() {
+        args.extend(["--match-head-commit", head]);
+    }
+    gh(dir, &args).map(|_| ())
 }
 
 /// A submitted pull-request review.
