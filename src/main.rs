@@ -4097,14 +4097,12 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.focus_active_terminal(window, cx);
             cx.notify();
         }
-        // The Agents view: the open project as a space (plus a linked worktree from
-        // KYDE_SHOT_WORKTREE, if given — its tab finishes off screen, so it shows the unseen
-        // dot). The start command is a harmless `git log`, and nothing is saved (shots share
-        // one config dir).
-        #[cfg(feature = "terminal")]
         // The Agents view: KYDE_SHOT_REPO as the project, KYDE_SHOT_WORKTREES (`:`-separated)
-        // its worktrees, each running a harmless "agent" (a git log) — the first worktree on
-        // screen.
+        // its worktrees, each running KYDE_SHOT_AGENT_CMD (screenshots.sh passes
+        // scripts/shot-agent.sh; else a harmless git log) — the first worktree on screen and
+        // working, the second waiting on you, the third working, the fourth done. Nothing is
+        // saved (shots share one config dir).
+        #[cfg(feature = "terminal")]
         "agents" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
@@ -4130,6 +4128,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             }];
             for (wt, title) in wts.iter().zip([
                 "Ease the shimmer with smoothstep",
+                "Set upstream on first push",
+                "Review: tree rebuilds off the UI thread",
                 "Whole-word toggle in find",
             ]) {
                 view.agents
@@ -4138,20 +4138,37 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     .insert(wt.clone(), title.to_string());
             }
             view.open_project(root.clone(), cx);
+            // Only the fixture's tab: the repo Kyde was launched on would read as a second
+            // "kyde" project.
+            view.open_projects.retain(|p| *p == root);
             view.switch_mode(Mode::Agents, cx);
             view.agents_select(root, cx);
             for wt in wts.iter().rev() {
                 view.agents_select(wt.clone(), cx);
             }
-            // The second worktree's agent has finished while you were on the first: "done".
-            #[cfg(feature = "terminal")]
-            if let Some(t) = wts
-                .get(1)
-                .and_then(|wt| view.agents.tabs.get_mut(wt))
-                .and_then(|g| g.tabs.first_mut())
-            {
-                t.prompted = true;
-                t.unseen = true;
+            for (i, wt) in wts.iter().enumerate() {
+                let Some(t) = view
+                    .agents
+                    .tabs
+                    .get_mut(wt)
+                    .and_then(|g| g.tabs.first_mut())
+                else {
+                    continue;
+                };
+                match i {
+                    // The second worktree's agent asks to run a command, as the Claude Code
+                    // hook would report it: "needs input".
+                    1 => {
+                        let ask = crate::agents::Hook::Blocked("Bash permission".into());
+                        t.hook = Some((ask, std::time::Instant::now()));
+                    }
+                    // The fourth's has finished while you were on the first: "done".
+                    3 => {
+                        t.prompted = true;
+                        t.unseen = true;
+                    }
+                    _ => {}
+                }
             }
             cx.notify();
         }

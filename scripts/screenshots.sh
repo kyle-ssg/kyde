@@ -209,11 +209,13 @@ all | history)
     ;;
 esac
 
-# agents fixture: a clone of this repo as the project, with two linked worktrees — one with
-# uncommitted changes, one with a commit not yet pushed — so the rows carry real git badges.
+# agents fixture: a clone of this repo as the project, with four linked worktrees — two with
+# uncommitted changes, one with a commit not yet pushed, one clean — so the rows carry real
+# git badges. Their agents are scripts/shot-agent.sh, whose scene each folder name picks; the
+# order here is the order apply_shot gives them their titles and dots.
 case "${1:-all}" in
 all | agents)
-    echo "==> generating agents fixture (clone + two worktrees)"
+    echo "==> generating agents fixture (clone + four worktrees)"
     AG="$FIX/kyde-agents"
     rm -rf "$AG"
     mkdir -p "$AG"
@@ -225,13 +227,25 @@ all | agents)
     # On `main`: the rows and the agent's git log read like a normal checkout.
     git -C "$AGENTS_REPO" checkout -qB main
     WT1="$AG/kyde-ease-lerp"
-    WT2="$AG/kyde-find-word"
+    WT2="$AG/kyde-push-upstream"
+    WT3="$AG/kyde-tree-review"
+    WT4="$AG/kyde-find-word"
     git -C "$AGENTS_REPO" worktree add -q -b feat/ease-lerp "$WT1"
-    git -C "$AGENTS_REPO" worktree add -q -b feat/find-whole-word "$WT2"
-    perl -0pi -e 's/Linearly interpolate/Smoothly interpolate/' "$WT1/crates/kyde-ui/src/color.rs"
-    printf '\n// whole-word matching\n' >> "$WT2/crates/kyde-ui/src/select.rs"
-    git -C "$WT2" commit -qam "feat(find): whole-word toggle"
-    AGENTS_WTS="$WT1:$WT2"
+    git -C "$AGENTS_REPO" worktree add -q -b fix/push-upstream "$WT2"
+    git -C "$AGENTS_REPO" worktree add -q -b review/tree-rebuilds "$WT3"
+    git -C "$AGENTS_REPO" worktree add -q -b feat/find-whole-word "$WT4"
+    # The edit the on-screen agent's transcript shows (scripts/shot-agent.sh).
+    perl -0pi -e 's/(    let t = t\.clamp\(0\.0, 1\.0\);\n)/$1    \/\/ Smoothstep: ease in and out instead of a constant rate.\n    let t = t * t * (3.0 - 2.0 * t);\n/' \
+        "$WT1/crates/kyde-ui/src/color.rs"
+    if git -C "$WT1" diff --quiet; then
+        echo "    !! agents fixture edit did not apply (anchors moved?) — fix screenshots.sh" >&2
+        exit 1
+    fi
+    printf '\n// upstream on first push\n' >> "$WT2/src/views/push.rs"
+    printf '\n// upstream on first push\n' >> "$WT2/crates/kyde-git/src/lib.rs"
+    printf '\n// whole-word matching\n' >> "$WT4/crates/kyde-ui/src/select.rs"
+    git -C "$WT4" commit -qam "feat(find): whole-word toggle"
+    AGENTS_WTS="$WT1:$WT2:$WT3:$WT4"
     ;;
 esac
 
@@ -392,7 +406,7 @@ run_one() {
         merge)            shoot_until merge            merge.png            region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         merge-conflicts)  shoot_until merge-conflicts  merge-conflicts.png  region KYDE_SHOT_REPO="$MERGE_REPO" ;;
         terminal)         shoot_until terminal         terminal.png         window ;;
-        agents)           shoot_until agents           agents.png           window KYDE_SHOT_REPO="$AGENTS_REPO" KYDE_SHOT_WORKTREES="$AGENTS_WTS" ;;
+        agents)           shoot_until agents           agents.png           window KYDE_SHOT_REPO="$AGENTS_REPO" KYDE_SHOT_WORKTREES="$AGENTS_WTS" KYDE_SHOT_AGENT_CMD="bash $ROOT/scripts/shot-agent.sh" ;;
         changelog)        shoot_until changelog        changelog.png        region ;;
         fps)              shoot_until fps              fps.png              window KYDE_SHOT_FILE="$LOCK_REL" ;;
         welcome-gif)      shoot_welcome_gif ;;
