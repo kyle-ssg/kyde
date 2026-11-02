@@ -2061,6 +2061,9 @@ struct CommitView {
     collapsed: bool,
     /// True while a `git commit` is in flight (disables the button, shows "Committing…").
     committing: bool,
+    /// A hunk revert may have left nothing to commit: the next status read
+    /// (`apply_snapshot`) leaves the Commit view if so.
+    exit_if_clean: bool,
     /// Keyboard focus of the changed-files tree (arrows, space ticks, ⏎ — issue #81).
     tree_focus: FocusHandle,
     /// The tree's keyboard cursor when it's on a FOLDER (`None` = on the selected file).
@@ -2101,6 +2104,7 @@ impl CommitView {
             search,
             collapsed: false,
             committing: false,
+            exit_if_clean: false,
             tree_focus: cx.focus_handle(),
             dir_cursor: None,
             tree_scroll: ScrollHandle::new(),
@@ -2441,6 +2445,9 @@ struct Kyde {
     /// Per-file `(added, removed)` line counts (numstat), refreshed with `files`. Files
     /// absent here (binaries) just render without the count.
     stats: std::collections::HashMap<PathBuf, (usize, usize)>,
+    /// `files` lists only the first `git::UNTRACKED_CAP` untracked files — more exist
+    /// (the status bar says so).
+    untracked_capped: bool,
     selected: Option<usize>,
     /// Commit view (checkbox tree, message editor, chrome) — grouped into one sub-struct
     /// (see `CommitView`).
@@ -2738,6 +2745,10 @@ struct LocalHistoryView {
     pending: std::collections::HashSet<PathBuf>,
     /// Whether a throttle flush timer is already armed.
     flush_scheduled: bool,
+    /// An external-change scan is running (`lh_scan_external`) — scans never overlap.
+    scanning: bool,
+    /// A refresh asked for a scan while one ran; it runs again when that one finishes.
+    rescan: bool,
     /// The file the Local History window is showing.
     path: Option<PathBuf>,
     /// Its timeline, newest first.
@@ -2783,6 +2794,8 @@ impl LocalHistoryView {
             store_root: None,
             pending: std::collections::HashSet::new(),
             flush_scheduled: false,
+            scanning: false,
+            rescan: false,
             path: None,
             events: Vec::new(),
             selected: 0,
@@ -5545,6 +5558,27 @@ mod gpui_smoke_tests {
                     "const a = 99; // external\n",
                     "refocus must reload the externally-changed file"
                 );
+            })
+            .unwrap();
+    }
+
+    /// A huge changed file (a stray multi-GB log) is never read into the Commit view's
+    /// diff: selecting it shows a note, and its pane can't autosave over the file.
+    #[gpui::test]
+    fn commit_view_does_not_diff_a_huge_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        // Sparse: past the limit without writing the bytes.
+        let log = std::fs::File::create(dir.join("huge.log")).unwrap();
+        log.set_len(21 << 20).unwrap();
+        handle.update(cx, |k, _w, cx| k.refresh(cx)).unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.enter_commit(cx);
+                let i = k.files.iter().position(|f| f.path.ends_with("huge.log"));
+                k.select_with(i.expect("huge.log is a change"), Some(cx));
+                assert!(k.diff.right.read(cx).text().starts_with("File too large"));
+                assert!(k.diff.path.is_none(), "autosave stays off");
             })
             .unwrap();
     }

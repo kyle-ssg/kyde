@@ -3,6 +3,10 @@
 
 use crate::*;
 
+/// Largest working file the Commit view reads and diffs. Past this it's a log or a dump,
+/// and reading + diffing it on the UI thread would stall (or, at GBs, exhaust) the app.
+const DIFF_MAX_BYTES: u64 = 20 << 20;
+
 impl Kyde {
     pub(crate) fn render_commit(
         &mut self,
@@ -424,12 +428,21 @@ impl Kyde {
             } else {
                 // A binary / unreadable working file errors here — don't feed an empty
                 // string through the diff (it would render as "all deleted" and, worse,
-                // the right pane's autosave would truncate the file to empty).
-                let Ok(a) = repo.working_content(&file.path) else {
+                // the right pane's autosave would truncate the file to empty). A huge one
+                // (a stray log or dump) isn't read at all.
+                let size = std::fs::metadata(repo.root().join(&file.path)).map_or(0, |m| m.len());
+                let read = (size <= DIFF_MAX_BYTES)
+                    .then(|| repo.working_content(&file.path).ok())
+                    .flatten();
+                let Some(a) = read else {
                     self.diff.current = None;
                     if let Some(cx) = cx {
                         self.diff.path = None; // disables diff_autosave for this file
-                        let msg = String::from("Binary or non-text file — no diff.");
+                        let msg = if size > DIFF_MAX_BYTES {
+                            format!("File too large to diff ({} MB).", size / 1_000_000)
+                        } else {
+                            String::from("Binary or non-text file — no diff.")
+                        };
                         self.diff
                             .left
                             .update(cx, |e, cx| e.set_content(msg.clone(), Lang::PlainText, cx));
@@ -707,7 +720,14 @@ impl Kyde {
         // this once the input element is in the tree).
         self.commit.focus_msg = true;
         if let Some(repo) = self.repo() {
-            self.files = repo.status().unwrap_or_default();
+            // Re-read so a Browse edit from a moment ago is listed. Not when the last read
+            // hit the untracked cap: then git walks a huge folder for seconds, so keep the
+            // list the background refresh read and refresh it off the UI thread instead.
+            if self.untracked_capped {
+                self.refresh(cx);
+            } else {
+                self.files = repo.status().unwrap_or_default();
+            }
             // One push-base resolution feeds both (`push_files()` would resolve it again).
             let base = repo.push_base();
             self.sync

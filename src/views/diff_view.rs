@@ -674,7 +674,8 @@ impl Kyde {
             if let Err(e) = repo.save_file(&rel, &text) {
                 self.fail("Saving file", e);
             }
-            self.files = repo.status().unwrap_or_default();
+            // Re-read status off the UI thread (an edit can make the file clean again).
+            self.schedule_status_refresh(cx);
         }
         self.recompute_diff(&text, cx);
     }
@@ -724,10 +725,12 @@ impl Kyde {
             if let Err(e) = repo.save_file(&rel, &content) {
                 self.fail("Reverting hunk", e);
             }
-            self.files = repo.status().unwrap_or_default();
+            // Re-read status off the UI thread; if that was the last change, leave the
+            // Commit view once it lands.
+            self.commit.exit_if_clean = true;
+            self.schedule_status_refresh(cx);
         }
         self.recompute_diff(&content, cx);
-        self.exit_commit_if_clean();
     }
 
     /// Alt+↓ — jump to the next changed region in the diff.

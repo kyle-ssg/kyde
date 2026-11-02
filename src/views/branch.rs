@@ -220,6 +220,23 @@ impl Kyde {
                                 .child("Live refresh off"),
                         )
                     })
+                    // Git listed only the first `UNTRACKED_CAP` untracked files.
+                    .when(self.untracked_capped, |d| {
+                        d.child(
+                            div()
+                                .id("untracked-capped")
+                                .flex_none()
+                                .px_2()
+                                .text_color(bar_text)
+                                .tooltip(ui::tip(format!(
+                                    "Only the first {} untracked files are listed. Add the \
+                                     folders they're in (build output, caches) to .gitignore \
+                                     to see the rest.",
+                                    grouped(git::UNTRACKED_CAP)
+                                )))
+                                .child("Too many untracked files"),
+                        )
+                    })
                     // Only show Pull when we know we're behind (or one's in flight).
                     .when(
                         self.sync.behind.unwrap_or(0) > 0 || self.sync.pulling,
@@ -897,4 +914,17 @@ impl Kyde {
         })
         .detach();
     }
+}
+
+/// `10000` → `"10,000"`.
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
