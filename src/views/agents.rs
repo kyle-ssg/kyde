@@ -827,9 +827,12 @@ impl Kyde {
                 this.agents.creating.retain(|c| c.path != path);
                 match res {
                     Ok(()) => {
+                        // A refresh while git was at it may have listed it already.
                         if let Some(s) = this.agents.cfg.spaces.iter_mut().find(|s| s.path == space)
                         {
-                            s.worktrees.push(path.clone());
+                            if !s.worktrees.contains(&path) {
+                                s.worktrees.push(path.clone());
+                            }
                         }
                         if let WtSource::NewBranch(b) = source {
                             this.agents.branches.insert(path.clone(), b);
