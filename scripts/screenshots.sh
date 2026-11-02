@@ -7,6 +7,9 @@
 #   ./scripts/screenshots.sh git-diff   # one shot by name
 #   PROFILE=debug ./scripts/screenshots.sh
 #
+# The README / site hero is a collage of agents.png, git-diff.png and merge.png: after
+# retaking any of them, rebuild it with `python3 scripts/hero.py`.
+#
 # How it works: the app reads KYDE_SHOT=<name> at launch (see apply_shot in src/main.rs) and
 # drives itself straight into the right view. We run it against THIS repo under a throwaway
 # XDG_CONFIG_HOME (so the user's real ~/.config/kyde is untouched), find its window via
