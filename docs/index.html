@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <title>Kyde — a native home for coding agents, with a light IDE and Git client</title>
-  <meta name="description" content="Run many Claude Code agents side by side, each in its own git worktree with live status. Start them from GitHub issues and PRs, then review, stage, merge and commit their work in a fast native app. Free and open source; prebuilt for macOS and Linux.">
+  <title>Kyde — a fast native IDE and Git client built around your coding agents</title>
+  <meta name="description" content="Run many Claude Code agents side by side, each in its own git worktree with live status, then review their work in a side-by-side diff, stage it hunk by hunk, resolve conflicts in a 3-way merge and commit. Free and open source; prebuilt for macOS and Linux.">
   <link rel="canonical" href="https://kyle-ssg.github.io/kyde/">
 
   <!-- Open Graph / social card -->
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Kyde — a native home for coding agents, with a light IDE and Git client">
-  <meta property="og:description" content="Run many Claude Code agents in their own git worktrees with live status, then review, stage and commit their work. Native, GPU-rendered, written in Rust.">
+  <meta property="og:title" content="Kyde — a fast native IDE and Git client built around your coding agents">
+  <meta property="og:description" content="Claude Code agents in their own git worktrees with live status, and a side-by-side diff, hunk staging and 3-way merge to land their work. Native, GPU-rendered, written in Rust.">
   <meta property="og:url" content="https://kyle-ssg.github.io/kyde/">
   <meta property="og:image" content="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/agents.png">
   <meta property="og:image:width" content="2560">
@@ -19,8 +19,8 @@
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kyde — a native home for coding agents, with a light IDE and Git client">
-  <meta name="twitter:description" content="Run many Claude Code agents in their own git worktrees with live status, then review, stage and commit their work. Native, GPU-rendered, written in Rust.">
+  <meta name="twitter:title" content="Kyde — a fast native IDE and Git client built around your coding agents">
+  <meta name="twitter:description" content="Claude Code agents in their own git worktrees with live status, and a side-by-side diff, hunk staging and 3-way merge to land their work. Native, GPU-rendered, written in Rust.">
   <meta name="twitter:image" content="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/agents.png">
 
   <meta name="theme-color" content="#0D0E10">
@@ -31,7 +31,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "Kyde",
-    "description": "A native home for coding agents: many Claude Code agents in their own git worktrees with live status and GitHub issues and PRs, plus a light IDE and Git client with hunk staging, a 3-way merge tool and a commit graph to land their work.",
+    "description": "A fast native IDE and Git client built around coding agents: many Claude Code agents in their own git worktrees with live status and GitHub issues and PRs, plus a side-by-side diff with hunk staging, a 3-way merge tool and a commit graph to land their work.",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "macOS, Linux",
     "url": "https://kyle-ssg.github.io/kyde/",
@@ -68,7 +68,8 @@
       overflow-x: hidden;
     }
     a { color: inherit; }
-    .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+    /* side padding only: header / section / footer set their own top + bottom */
+    .wrap { max-width: 1040px; margin: 0 auto; padding-left: 24px; padding-right: 24px; }
 
     /* hero */
     header { padding: 96px 0 56px; text-align: center; }
@@ -97,6 +98,8 @@
       box-shadow: 0 30px 80px -30px rgba(0,0,0,.8);
     }
     .shot-wrap { margin: 8px 0 96px; }
+    /* the hero collage carries its own rounded windows + shadows on transparency */
+    .collage { display: block; width: 100%; height: auto; }
     section .shot { margin-top: 32px; }
 
     section { padding: 0 0 96px; }
@@ -132,8 +135,8 @@
   <header class="wrap">
     <img class="logo" src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/logo.png" alt="Kyde logo">
     <h1>Kyde</h1>
-    <p class="tagline">A fast, native home for your coding agents, with a light IDE and Git client to land their work.</p>
-    <p class="sub">Claude Code agents in parallel worktrees · live status · GitHub issues &amp; PRs · hunk staging · 3-way merge · GPU-rendered · written in Rust</p>
+    <p class="tagline">A fast, native IDE and Git client built around your coding agents.</p>
+    <p class="sub">Claude Code agents in parallel worktrees · live status · side-by-side diff · hunk staging · 3-way merge · GPU-rendered · written in Rust</p>
     <div class="cta">
       <a class="btn btn-primary" href="https://github.com/kyle-ssg/kyde/releases">Download</a>
       <a class="btn btn-secondary" href="https://github.com/kyle-ssg/kyde">View on GitHub</a>
@@ -141,9 +144,9 @@
   </header>
 
   <div class="wrap shot-wrap">
-    <img class="shot" loading="lazy"
-      src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/agents.png"
-      alt="Kyde's Agents view: a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's Claude Code agent running in its tab">
+    <img class="collage"
+      src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/hero.png"
+      alt="Kyde's Agents view in front, with a Claude Code agent at work and its worktrees' status dots, between the commit view's side-by-side diff with hunk checkboxes and the 3-way merge resolver">
   </div>
 
   <section class="wrap">
@@ -181,11 +184,14 @@
         <p><code>ky agent …</code> drives agents from the shell, so agents can start, brief and check on each other.</p>
       </div>
     </div>
+    <img class="shot" loading="lazy"
+      src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/agents.png"
+      alt="Kyde's Agents view: a project's worktrees in the sidebar with status dots and git badges, and the selected worktree's Claude Code agent running in its tab">
   </section>
 
   <section class="wrap">
-    <h2>Review and land their work</h2>
-    <p class="lead">An IDE's git tools without the IDE: check what the agent wrote, keep the good hunks, ship it.</p>
+    <h2>Side-by-side diff &amp; 3-way merge</h2>
+    <p class="lead">IDE-grade git tools to check what the agents wrote, keep the good hunks, settle the conflicts and ship it.</p>
     <div class="grid">
       <div class="card">
         <span class="ic">⇄</span>
@@ -194,22 +200,25 @@
       </div>
       <div class="card">
         <span class="ic">⑂</span>
-        <h3>Merge, history &amp; rollback</h3>
-        <p>A 3-pane conflict resolver, a git log with a commit graph and branches sidebar, push / pull / fetch from the toolbar, and a rollback window with a checkbox tree of changes.</p>
+        <h3>3-way merge</h3>
+        <p>Yours, result and theirs side by side. Apply every non-conflicting change in one click, then settle each conflict from the gutter.</p>
       </div>
       <div class="card">
         <span class="ic">🕘</span>
-        <h3>Local history</h3>
-        <p>Per-file snapshots independent of git, taken on save and before every destructive action, with per-hunk or whole-file restore.</p>
+        <h3>History &amp; safety nets</h3>
+        <p>A git log with a commit graph and branches sidebar, push / pull / fetch from the toolbar, rollback, and local history that snapshots your files on save and before anything destructive.</p>
       </div>
     </div>
     <img class="shot" loading="lazy"
       src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/git-diff.png"
       alt="Kyde commit view: side-by-side diff with word-level highlighting and a center gutter to stage and revert hunks">
+    <img class="shot" loading="lazy"
+      src="https://raw.githubusercontent.com/kyle-ssg/kyde/main/assets/screenshots/merge.png"
+      alt="3-pane merge view: yours, result and theirs aligned side by side, with unresolved conflicts in red, applied changes in blue, and apply-non-conflicting and whitespace options in the toolbar">
   </section>
 
   <section class="wrap">
-    <h2>A light IDE when you need one</h2>
+    <h2>The IDE, when you need it</h2>
     <p class="lead">For the fix you'd rather make yourself. No JVM, no Electron, no waiting.</p>
     <div class="grid">
       <div class="card">
