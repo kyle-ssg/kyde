@@ -45,6 +45,19 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.11.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.10.0...kyde-v2.11.0) (2026-11-02)
+
+
+### Features
+
+* **agents:** approve and merge pull requests from the PR page ([#140](https://github.com/kyle-ssg/kyde/issues/140)) ([3807b8f](https://github.com/kyle-ssg/kyde/commit/3807b8f8c2fb54ac597763e06bd31f7dd1bfa254))
+
+
+### Bug Fixes
+
+* a folder full of untracked files no longer freezes Kyde or eats all its memory ([#139](https://github.com/kyle-ssg/kyde/issues/139)) ([5f4860e](https://github.com/kyle-ssg/kyde/commit/5f4860e15f4c7ee08884dbf87258e3434fdd2b2a))
+* **agents:** agent tabs draw at the panel's width without a window resize ([#143](https://github.com/kyle-ssg/kyde/issues/143)) ([76de8d2](https://github.com/kyle-ssg/kyde/commit/76de8d234776640f94913fa0f3acec86414b269a))
+
 ## [2.10.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.9.1...kyde-v2.10.0) (2026-11-01)
 
 
