@@ -729,13 +729,20 @@ impl TerminalView {
     /// Re-size the grid + PTY when the panel geometry changes. No-op if unchanged.
     fn resize(&mut self, cols: u16, rows: u16, cell_w: f32, cell_h: f32) {
         self.cell = (cell_w, cell_h);
-        if (cols, rows) == self.last_size || cols == 0 || rows == 0 {
+        if cols == 0 || rows == 0 {
+            return;
+        }
+        let mut term = self.term.lock();
+        // The grid is checked too, not just `last_size`: an agent host's HELLO resizes it back
+        // to the host's size from the reader thread, and when that lands after the first paint
+        // the grid stays narrower than the PTY — the agent's lines wrap — until a resize.
+        let grid = (term.columns(), term.screen_lines());
+        if (cols, rows) == self.last_size && grid == (cols as usize, rows as usize) {
             return;
         }
         self.last_size = (cols, rows);
-        self.term
-            .lock()
-            .resize(TermSize::new(cols as usize, rows as usize));
+        term.resize(TermSize::new(cols as usize, rows as usize));
+        drop(term);
         self.backend.resize(WindowSize {
             num_lines: rows,
             num_cols: cols,
@@ -2639,6 +2646,39 @@ mod tests {
         assert_eq!(shell_from(None, none), "/bin/sh");
         // The real lookup: this user's entry, when the system has one, is an absolute path.
         assert!(passwd_shell().is_none_or(|s| s.starts_with('/')));
+    }
+
+    /// A host's HELLO that lands after the first paint puts the grid back at the host's size;
+    /// the next paint must restore the panel's size, or the agent's lines wrap until a resize.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn late_host_hello_does_not_strand_the_grid(cx: &mut gpui::TestAppContext) {
+        use crate::agent_host as host;
+        let (mut fake_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = ours.try_clone().unwrap();
+        let view = cx.new(|cx| TerminalView::attach((ours, reader), cx));
+        let grid = |cx: &mut gpui::TestAppContext| {
+            view.read_with(cx, |v, _| {
+                let t = v.term.lock();
+                (t.columns(), t.screen_lines())
+            })
+        };
+        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0));
+        let hello = host::HostHello {
+            version: host::VERSION,
+            pid: 1,
+            cols: 120,
+            rows: 32,
+        };
+        let hello = serde_json::to_vec(&hello).unwrap();
+        host::write_frame(&mut fake_host, host::HELLO, &hello).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while grid(cx) != (120, 32) {
+            assert!(Instant::now() < deadline, "HELLO never applied");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0));
+        assert_eq!(grid(cx), (150, 40));
     }
 
     #[test]
