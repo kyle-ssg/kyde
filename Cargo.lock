@@ -2245,7 +2245,7 @@ dependencies = [
  "windows-registry 0.5.3",
  "x11-clipboard",
  "x11rb",
- "xkbcommon",
+ "xkbcommon 0.8.0",
  "zed-font-kit",
  "zed-scap",
  "zed-xim",
@@ -3035,7 +3035,7 @@ dependencies = [
  "winresource",
  "x11-clipboard",
  "x11rb",
- "xkbcommon",
+ "xkbcommon 0.9.0",
 ]
 
 [[package]]
@@ -7446,6 +7446,16 @@ dependencies = [
  "as-raw-xcb-connection",
  "libc",
  "memmap2",
+ "xkeysym",
+]
+
+[[package]]
+name = "xkbcommon"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
+dependencies = [
+ "libc",
  "xkeysym",
 ]
 
