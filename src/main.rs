@@ -1401,8 +1401,16 @@ struct AgentsView {
     gh_comment_scroll: ScrollHandle,
     gh_reply: Entity<CodeEditor>,
     gh_reply_to: Option<u64>,
-    /// A comment / reply / close is being sent.
+    /// A comment / reply / close / approve / merge is being sent.
     gh_posting: bool,
+    /// Each project's merge settings (allowed methods, your default, your access), fetched
+    /// with the first PR shown from it.
+    gh_merge: std::collections::HashMap<PathBuf, kyde_git::github::RepoMerge>,
+    /// The merge method picked in the merge box (`None` = the repo's default for you), its
+    /// dropdown, and whether Merge was clicked once and now asks to confirm.
+    merge_method: Option<kyde_git::github::MergeMethod>,
+    gh_merge_sel: ui::SelectState,
+    merge_armed: bool,
     /// Kyde's window is frontmost (alerts fire for on-screen tabs too when it isn't).
     window_active: bool,
     /// When the last alert sound played — a burst of agents finishing plays one.
@@ -1820,6 +1828,10 @@ impl AgentsView {
             gh_reply: cx.new(|cx| CodeEditor::single_line(cx, "Reply…")),
             gh_reply_to: None,
             gh_posting: false,
+            gh_merge: std::collections::HashMap::new(),
+            merge_method: None,
+            gh_merge_sel: ui::SelectState::new(cx),
+            merge_armed: false,
             window_active: true,
             last_sound: None,
 
@@ -4169,6 +4181,25 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     }
                     _ => {}
                 }
+            }
+            cx.notify();
+        }
+        // (manual: needs `gh` + network) The Pull Requests tab on the open project's PR
+        // KYDE_SHOT_PR — its conversation, merge box and Approve.
+        "agents-pr" => {
+            let root = view.repo_root.clone().unwrap_or_default();
+            view.agents.cfg.setup_done = true;
+            view.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                path: root.clone(),
+                ..Default::default()
+            }];
+            view.switch_mode(Mode::Agents, cx);
+            view.agents_show_tab(SideTab::Prs, cx);
+            if let Some(n) = std::env::var("KYDE_SHOT_PR")
+                .ok()
+                .and_then(|n| n.parse().ok())
+            {
+                view.agents_select_gh(root, SideTab::Prs, n, cx);
             }
             cx.notify();
         }
