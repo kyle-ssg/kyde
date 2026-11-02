@@ -898,19 +898,16 @@ pub(crate) fn exclude_claude_worktrees(wt: &std::path::Path) {
 }
 
 /// A project's worktrees after git lists `listed`: the ones still there keep `current`'s
-/// order (you may have dragged them), new ones follow in git's order.
+/// order (you may have dragged them), new ones follow in git's order. Each appears once, so
+/// a row a race saved twice heals on the next refresh.
 pub(crate) fn keep_order(
     current: &[std::path::PathBuf],
     listed: Vec<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
-    let mut out: Vec<std::path::PathBuf> = current
-        .iter()
-        .filter(|w| listed.contains(w))
-        .cloned()
-        .collect();
-    for w in listed {
-        if !out.contains(&w) {
-            out.push(w);
+    let mut out: Vec<std::path::PathBuf> = Vec::with_capacity(listed.len());
+    for w in current.iter().chain(&listed) {
+        if listed.contains(w) && !out.contains(w) {
+            out.push(w.clone());
         }
     }
     out
@@ -1153,6 +1150,8 @@ mod tests {
             keep_order(&mine, vec![p("a"), p("c"), p("d")]),
             [p("c"), p("a"), p("d")]
         );
+        // A row saved twice (create racing a refresh) comes back once.
+        assert_eq!(keep_order(&[p("a"), p("a")], vec![p("a")]), [p("a")]);
     }
 
     #[test]
