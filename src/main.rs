@@ -33,8 +33,8 @@ pub(crate) use divider::{full_island_w, hist_split_w, Divider, DIFF_GUTTER_W, HI
 // Reusable, app-agnostic UI toolkit (its own crate). Aliased to `ui` (so `ui::tree::item`
 // resolves) and glob-re-exported so call sites use `btn_primary`/`file_badge`/… unqualified.
 pub(crate) use app::{
-    CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, FINDER_RESULT_CAP, SCROLL_CONTEXT_ROWS,
-    STATUS_REFRESH_DEBOUNCE,
+    CONTENT_MIN_QUERY, CONTENT_SEARCH_DEBOUNCE, DIR_WALK_CAP, FINDER_RESULT_CAP,
+    SCROLL_CONTEXT_ROWS, STATUS_REFRESH_DEBOUNCE,
 };
 pub(crate) use kyde_ui as ui;
 pub(crate) use kyde_ui::{
@@ -2064,6 +2064,8 @@ struct CommitView {
     /// A hunk revert may have left nothing to commit: the next status read
     /// (`apply_snapshot`) leaves the Commit view if so.
     exit_if_clean: bool,
+    /// Why "Initialize Git Repository" asked first: the confirmation's (title, text).
+    init_warning: Option<(&'static str, &'static str)>,
     /// Keyboard focus of the changed-files tree (arrows, space ticks, ⏎ — issue #81).
     tree_focus: FocusHandle,
     /// The tree's keyboard cursor when it's on a FOLDER (`None` = on the selected file).
@@ -2105,6 +2107,7 @@ impl CommitView {
             collapsed: false,
             committing: false,
             exit_if_clean: false,
+            init_warning: None,
             tree_focus: cx.focus_handle(),
             dir_cursor: None,
             tree_scroll: ScrollHandle::new(),
@@ -2496,6 +2499,8 @@ struct Kyde {
     clear_data_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "Clear Local History" confirmation — wipes the open project's snapshot store.
     clear_lh_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// "Initialize Git Repository" confirmation, for a home folder or a huge one.
+    git_init_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Agents view: the "Remove worktree?" confirmation window.
     remove_wt_win: Option<gpui::WindowHandle<ModalWindow>>,
     scrollback_win: Option<gpui::WindowHandle<ModalWindow>>,
@@ -2651,6 +2656,8 @@ enum ModalKind {
     LocalHistory,
     /// "Clear Local History" confirmation (destructive — wipes the project's store).
     ClearLocalHistory,
+    /// "Initialize Git Repository" in a home folder or a huge one — asks first.
+    ConfirmGitInit,
     /// "What's New": the published releases + their notes (issue #71).
     Changelog,
     /// "Remove worktree?" confirmation (Agents view) — says what would be lost.
@@ -2905,6 +2912,7 @@ impl Render for ModalWindow {
             ModalKind::Compare => k.render_compare_body(kcx),
             ModalKind::LocalHistory => k.render_local_history_body(kcx),
             ModalKind::ClearLocalHistory => k.render_clear_local_history_body(kcx),
+            ModalKind::ConfirmGitInit => k.render_confirm_git_init_body(kcx),
             ModalKind::Changelog => k.render_changelog_body(kcx),
             ModalKind::RemoveWorktree => k.render_remove_worktree_body(kcx),
             ModalKind::Cleanup => k.render_cleanup_body(kcx),
@@ -2981,6 +2989,9 @@ impl Render for ModalWindow {
                         }
                         "enter" if kind == ModalKind::ClearLocalHistory => {
                             this.kyde.update(cx, Kyde::do_clear_local_history);
+                        }
+                        "enter" if kind == ModalKind::ConfirmGitInit => {
+                            this.kyde.update(cx, Kyde::confirm_git_init);
                         }
                         _ => {}
                     }
@@ -4968,6 +4979,37 @@ mod gpui_smoke_tests {
                 assert!(k.is_git, "is_git flips true after init");
             })
             .unwrap();
+    }
+
+    /// "Initialize Git Repository" on a folder with more files than the Browse walk lists
+    /// asks first — git would list each one as an untracked change (#137).
+    #[gpui::test]
+    fn git_init_on_a_huge_folder_asks_first(cx: &mut TestAppContext) {
+        isolate_history();
+        let dir = std::env::temp_dir().join(format!("kyde-bigdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let km = Keymap::default();
+        let root = Some(dir.clone());
+        let handle = cx.add_window(move |_w, cx| Kyde::new(root.clone(), km.clone(), false, cx));
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // What the walk reports when it hits its cap (cheaper than 20k real files).
+                k.browse.all_files = vec![PathBuf::from("f"); DIR_WALK_CAP];
+                k.request_git_init(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.git_init_win.is_some(), "confirmation window opens");
+                assert!(!dir.join(".git").exists(), "nothing initialized yet");
+                k.confirm_git_init(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(dir.join(".git").is_dir(), "Initialize Anyway runs git init");
     }
 
     /// The Create-New-Branch dialog (type a name → Create) must create + switch to the branch,

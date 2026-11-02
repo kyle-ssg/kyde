@@ -22,6 +22,8 @@ pub(crate) const CONTENT_SEARCH_DEBOUNCE: std::time::Duration =
 pub(crate) const CONTENT_MIN_QUERY: usize = 2;
 /// Max fuzzy-finder results rendered at once.
 pub(crate) const FINDER_RESULT_CAP: usize = 50;
+/// Most files the Browse tree lists for a folder that isn't a git repo (`list_dir_files`).
+pub(crate) const DIR_WALK_CAP: usize = 20_000;
 
 /// The folders Kyde itself writes to (config, local history, agent state) that sit inside
 /// `root`, as given and canonicalized (`FSEvents` reports canonical paths). Only a project
@@ -52,7 +54,6 @@ fn own_dirs_inside(root: &std::path::Path) -> Vec<PathBuf> {
 /// tree (e.g. a `target/` that wasn't ignored) can't hang the walk. Symlinks are not followed
 /// (their `file_type` is neither file nor dir here), so the walk can't cycle.
 fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
-    const CAP: usize = 20_000;
     let mut skip_dirs: std::collections::HashSet<String> =
         [".git", "target", "dist", "node_modules"]
             .iter()
@@ -71,7 +72,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if out.len() >= CAP {
+        if out.len() >= DIR_WALK_CAP {
             break;
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -92,7 +93,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
         }
     }
     out.sort();
-    out.truncate(CAP);
+    out.truncate(DIR_WALK_CAP);
     out
 }
 
@@ -268,6 +269,7 @@ impl Kyde {
             fonts_win: None,
             clear_data_win: None,
             clear_lh_win: None,
+            git_init_win: None,
             remove_wt_win: None,
             scrollback_win: None,
             cleanup_win: None,
