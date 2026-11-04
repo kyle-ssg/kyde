@@ -15,6 +15,11 @@
 //! after it: an agent that edits another worktree by path is at work there, and its tab
 //! follows it.
 //!
+//! A subagent (Claude Code's Agent tool) runs inside its parent's session, with its env, so
+//! its events reach the same hook — tagged with an `agent_id`. Those go to a file per subagent
+//! instead, `$KYDE_AGENT_STATE.sub/<agent_id>` (and `<agent_id>.write`): they never overwrite
+//! the tab's own state, and Kyde shows each subagent in the worktree it works in.
+//!
 //! [`merge`] is the pure part (unit-tested): it adds or removes Kyde's entries in Claude
 //! Code's `settings.json`, leaving everything else — other tools' hooks included — as is.
 
@@ -25,7 +30,7 @@ use std::path::{Path, PathBuf};
 pub const MARKER: &str = "# kyde-agent-state";
 
 /// The Claude Code events Kyde listens to.
-pub const EVENTS: [&str; 8] = [
+pub const EVENTS: [&str; 10] = [
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -33,31 +38,45 @@ pub const EVENTS: [&str; 8] = [
     "PermissionRequest",
     "Notification",
     "Stop",
+    "SubagentStart",
+    "SubagentStop",
     "SessionEnd",
 ];
 
 /// The tools whose writes [`write_command`] records (a `PostToolUse` matcher).
 pub const WRITE_TOOLS: &str = "Edit|Write|MultiEdit|NotebookEdit";
 
-/// The hook command: the event JSON (stdin) → `$KYDE_AGENT_STATE`, written atomically; always
-/// exits 0 so it can never block Claude.
+/// The hook command: the event JSON (stdin) → `$KYDE_AGENT_STATE` (a subagent's →
+/// `$KYDE_AGENT_STATE.sub/<agent_id>`), written atomically; always exits 0 so it can never
+/// block Claude.
 #[must_use]
 pub fn command() -> String {
-    save_to("$KYDE_AGENT_STATE")
+    save_to("")
 }
 
-/// The write hook: a file-writing tool's event JSON (stdin) → `$KYDE_AGENT_STATE.write`,
-/// written atomically; always exits 0.
+/// The write hook: a file-writing tool's event JSON (stdin) → `$KYDE_AGENT_STATE.write` (a
+/// subagent's → `$KYDE_AGENT_STATE.sub/<agent_id>.write`), written atomically; always exits 0.
 #[must_use]
 pub fn write_command() -> String {
-    save_to("$KYDE_AGENT_STATE.write")
+    save_to(".write")
 }
 
-/// stdin → `file` (a shell word), via a temp file and a rename, when `$KYDE_AGENT_STATE` is set.
-fn save_to(file: &str) -> String {
+/// stdin → `$KYDE_AGENT_STATE<suffix>` via a temp file and a rename, when `$KYDE_AGENT_STATE`
+/// is set. An event from a subagent goes to `$KYDE_AGENT_STATE.sub/<agent_id><suffix>`
+/// instead: its `agent_id` is a top-level key ahead of any nested object (Claude Code writes
+/// it right after `cwd`), so only the text before the first inner `{` is searched — an
+/// `agent_id` inside a tool's input never counts.
+fn save_to(suffix: &str) -> String {
     format!(
-        "if [ -n \"$KYDE_AGENT_STATE\" ]; then cat > \"{file}.$$\" && \
-         mv -f \"{file}.$$\" \"{file}\"; else cat > /dev/null; fi; \
+        "if [ -n \"$KYDE_AGENT_STATE\" ]; then f=\"$KYDE_AGENT_STATE{suffix}\"; \
+         if cat > \"$f.$$\"; then \
+         a=$(head -c 8192 \"$f.$$\" | \
+         sed -n 's/^{{[^{{]*\"agent_id\" *: *\"\\([A-Za-z0-9_-]*\\)\".*/\\1/p'); \
+         if [ -z \"$a\" ]; then mv -f \"$f.$$\" \"$f\"; \
+         else d=\"$KYDE_AGENT_STATE.sub\"; \
+         mkdir -p \"$d\" && mv -f \"$f.$$\" \"$d/$a{suffix}\" || rm -f \"$f.$$\"; fi; \
+         else rm -f \"$f.$$\"; fi; \
+         else cat > /dev/null; fi; \
          exit 0 {MARKER}"
     )
 }
@@ -261,6 +280,59 @@ mod tests {
         let off: Value = serde_json::from_str(&merge(&out, false).unwrap().unwrap()).unwrap();
         assert_eq!(off["hooks"].as_object().unwrap().len(), 1);
         assert!(merge("not json", true).is_err());
+    }
+
+    /// An install from before the subagent events is repaired in place: every event gets the
+    /// current command, the subagent ones are added, nothing is doubled.
+    #[test]
+    fn an_older_install_gains_the_subagent_events() {
+        let old = json!([{ "matcher": "*", "hooks": [{ "type": "command",
+            "command": format!("cat > \"$KYDE_AGENT_STATE\" {MARKER}") }] }]);
+        let events = EVENTS.iter().filter(|e| !e.starts_with("Subagent"));
+        let hooks: Map<_, _> = events.map(|e| (e.to_string(), old.clone())).collect();
+        let before = json!({ "hooks": hooks }).to_string();
+        assert!(!is_installed(&before));
+        let after: Value = serde_json::from_str(&merge(&before, true).unwrap().unwrap()).unwrap();
+        for e in ["SubagentStart", "SubagentStop", "Stop"] {
+            let entries = after["hooks"][e].as_array().unwrap();
+            assert_eq!(entries.len(), 1, "{e}");
+            assert_eq!(entries[0]["hooks"][0]["command"], command());
+        }
+        assert!(is_installed(&after.to_string()));
+    }
+
+    /// A subagent's events (they carry an `agent_id`) land in a file of their own, never the
+    /// tab's; an `agent_id` inside a tool's input doesn't count.
+    #[cfg(unix)]
+    #[test]
+    fn subagent_events_go_to_their_own_files() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("kyde-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = dir.join("t.state");
+        let run = |cmd: &str, json: &str| {
+            let mut sh = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .env("KYDE_AGENT_STATE", &state)
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            sh.stdin.take().unwrap().write_all(json.as_bytes()).unwrap();
+            assert!(sh.wait().unwrap().success());
+        };
+        let read = |p: std::path::PathBuf| std::fs::read_to_string(p).unwrap();
+        // In Claude Code's key order: `agent_id` follows `cwd`, ahead of `tool_input`.
+        let sub = r#"{"session_id":"s","cwd":"/w","agent_id":"a1f","agent_type":"Explore","hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"/w/x.rs"}}"#;
+        let parent = r#"{"session_id":"s","cwd":"/w","hook_event_name":"PreToolUse","tool_name":"SendMessage","tool_input":{"agent_id":"a1f"}}"#;
+        run(&command(), parent);
+        run(&command(), sub);
+        run(&write_command(), sub);
+        assert_eq!(read(state.clone()), parent);
+        assert_eq!(read(dir.join("t.state.sub/a1f")), sub);
+        assert_eq!(read(dir.join("t.state.sub/a1f.write")), sub);
+        assert!(!dir.join("t.state.write").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Kyde's note reaches the first real prompt once; a slash command leaves it waiting.
