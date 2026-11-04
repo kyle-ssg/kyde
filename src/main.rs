@@ -1834,7 +1834,12 @@ impl AgentsView {
                 .selected
                 .clone()
                 .filter(|w| cfg.space_of(w).is_some())
-                .or_else(|| cfg.spaces.first().map(|s| s.path.clone())),
+                .or_else(|| {
+                    cfg.spaces
+                        .iter()
+                        .find(|s| !s.scratch)
+                        .map(|s| s.path.clone())
+                }),
             cfg,
             branches: std::collections::HashMap::new(),
             git_spaces: std::collections::HashSet::new(),
@@ -4200,6 +4205,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 worktrees: wts.clone(),
                 ..Default::default()
             }];
+            view.agents.cfg.ensure_scratch();
             for (wt, title) in wts.iter().zip([
                 "Ease the shimmer with smoothstep",
                 "Set upstream on first push",
@@ -7367,6 +7373,34 @@ mod gpui_smoke_tests {
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
             })
             .unwrap();
+    }
+
+    /// Scratch: a new scratch tab gets a folder of its own — a row under Scratch, its agent
+    /// started; closing that tab drops the row and the (empty) folder. Real PTYs.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_scratch_row_lives_as_long_as_its_tab(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_new_scratch(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let wt = handle
+            .update(cx, |k, _w, cx| {
+                let wt = k.agents.selected.clone().unwrap();
+                assert!(k.agents.cfg.is_scratch(&wt) && wt.is_dir());
+                assert_eq!(k.agents.tabs[&wt].tabs.len(), 1, "its agent starts");
+                k.agents_close_tab(&wt, 0, cx);
+                assert!(!k.agents.cfg.is_scratch(&wt), "the row goes with its tab");
+                wt
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!wt.exists(), "and so does its empty folder");
     }
 
     /// The Clean Up window's pass ticks a tab it finds finished — in the main checkout too,

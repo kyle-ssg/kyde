@@ -27,21 +27,29 @@ pub struct Space {
     /// Where the space's own checkout sits among its worktrees in the sidebar (0 = first).
     #[serde(default)]
     pub main_pos: usize,
+    /// The built-in Scratch space ([`scratch_dir`]): its rows are throwaway folders, one per
+    /// ad-hoc agent, and its own folder is never a row.
+    #[serde(default)]
+    pub scratch: bool,
 }
 
 impl Space {
     /// The sidebar's rows for this space, in order: its linked worktrees with its own
-    /// checkout at [`Self::main_pos`].
+    /// checkout at [`Self::main_pos`] — Scratch's are just its folders.
     ///
     /// ```
     /// use kyde_config::agents::Space;
     /// let s = Space { path: "/r".into(), worktrees: vec!["/a".into(), "/b".into()], main_pos: 1, ..Space::default() };
     /// assert_eq!(s.rows(), ["/a", "/r", "/b"].map(std::path::PathBuf::from));
+    /// let scratch = Space { scratch: true, ..s };
+    /// assert_eq!(scratch.rows(), ["/a", "/b"].map(std::path::PathBuf::from));
     /// ```
     #[must_use]
     pub fn rows(&self) -> Vec<PathBuf> {
         let mut rows = self.worktrees.clone();
-        rows.insert(self.main_pos.min(rows.len()), self.path.clone());
+        if !self.scratch {
+            rows.insert(self.main_pos.min(rows.len()), self.path.clone());
+        }
         rows
     }
 
@@ -336,7 +344,34 @@ impl AgentsCfg {
         let mut c = crate::store::load_or_default::<Self>("agents.json");
         c.idle_hours = c.idle_hours.clamp(1, 720);
         c.cleanup.quiet_mins = c.cleanup.quiet_mins.clamp(1, 240);
+        c.ensure_scratch();
         c
+    }
+
+    /// Add the Scratch space (last) when there isn't one — every layout has it.
+    pub fn ensure_scratch(&mut self) {
+        if !self.spaces.iter().any(|s| s.scratch) {
+            self.spaces.push(Space {
+                path: scratch_dir(),
+                scratch: true,
+                ..Space::default()
+            });
+        }
+    }
+
+    /// Where a newly added project goes: after the last project, so Scratch stays below them.
+    #[must_use]
+    pub fn new_space_index(&self) -> usize {
+        self.spaces
+            .iter()
+            .rposition(|s| !s.scratch)
+            .map_or(0, |i| i + 1)
+    }
+
+    /// Whether `wt` is one of Scratch's rows.
+    #[must_use]
+    pub fn is_scratch(&self, wt: &Path) -> bool {
+        self.space_of(wt).is_some_and(|s| s.scratch)
     }
 
     /// Persist to `agents.json`.
@@ -389,12 +424,12 @@ impl AgentsCfg {
     }
 
     /// The space a worktree belongs to — the space whose folder IS `wt`, or whose linked
-    /// worktrees include it.
+    /// worktrees include it. Scratch's own folder isn't a worktree (`None`).
     #[must_use]
     pub fn space_of(&self, wt: &Path) -> Option<&Space> {
         self.spaces
             .iter()
-            .find(|s| s.path == wt || s.worktrees.iter().any(|w| w == wt))
+            .find(|s| (s.path == wt && !s.scratch) || s.worktrees.iter().any(|w| w == wt))
     }
 }
 
@@ -416,6 +451,13 @@ pub fn agents_dir() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".kyde").join("agents")
+}
+
+/// Scratch's folder, `~/.kyde/scratch` — beside [`agents_dir`] (so tests' throwaway
+/// `$KYDE_AGENTS_DIR` moves it too). Each scratch row is a folder in it.
+#[must_use]
+pub fn scratch_dir() -> PathBuf {
+    agents_dir().with_file_name("scratch")
 }
 
 /// Where a new linked worktree named `name` for `space` is checked out:
