@@ -32,10 +32,10 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor,
 use futures::channel::mpsc::{unbounded, UnboundedSender};
 use futures::StreamExt;
 use gpui::{
-    div, fill, point, prelude::*, px, relative, svg, App, Bounds, Context, DispatchPhase,
-    ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla, KeyDownEvent,
-    LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, ScrollWheelEvent,
-    ShapedLine, Style, TextRun, Window,
+    div, fill, point, prelude::*, px, relative, svg, App, Bounds, ContentMask, Context,
+    DispatchPhase, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
+    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    ScrollWheelEvent, ShapedLine, Style, TextRun, Window,
 };
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -45,6 +45,12 @@ use std::time::{Duration, Instant};
 /// Default grid until the first paint measures the real cell size and resizes.
 const INIT_COLS: u16 = 80;
 const INIT_ROWS: u16 = 24;
+/// How long a pane size must hold, mid-burst, before the grid + PTY follow it. A live window
+/// drag changes the size every frame; resizing on each one has the app (Claude Code) redraw
+/// for a width the grid has already left — its absolute-column moves clamp at the narrower
+/// edge and the text lands scrambled in history. One resize when the drag settles, like
+/// kitty's `resize_debounce_time`.
+const RESIZE_SETTLE: Duration = Duration::from_millis(100);
 
 /// Scrollbar gutter width, thumb thickness and end inset — the editor panes' (`with_scrollbars`).
 const SB_BAR: f32 = 12.0;
@@ -201,6 +207,10 @@ pub struct TerminalView {
     pub exited: bool,
     /// Last grid size pushed to the PTY (cols, rows), so we only resize on a real change.
     last_size: (u16, u16),
+    /// A pane size waiting out [`RESIZE_SETTLE`], and since when (see `resize`).
+    pending_size: Option<((u16, u16), Instant)>,
+    /// When the grid + PTY last changed size (`None` = never; the first size doesn't wait).
+    resized_at: Option<Instant>,
     /// Measured cell size in px, cached from the most recent paint (for wheel/mouse math).
     cell: (f32, f32),
     bounds: Option<Bounds<Pixels>>,
@@ -462,6 +472,8 @@ impl TerminalView {
             title: "Local".into(),
             exited: false,
             last_size: (INIT_COLS, INIT_ROWS),
+            pending_size: None,
+            resized_at: None,
             cell: (8.0, 16.0),
             bounds: None,
             selecting: false,
@@ -726,20 +738,41 @@ impl TerminalView {
         self.write(bytes);
     }
 
-    /// Re-size the grid + PTY when the panel geometry changes. No-op if unchanged.
-    fn resize(&mut self, cols: u16, rows: u16, cell_w: f32, cell_h: f32) {
+    /// Re-size the grid + PTY when the panel geometry changes, always together. A change after
+    /// a quiet spell applies at once (a sidebar toggle stays instant); one that follows within
+    /// [`RESIZE_SETTLE`] — a live window drag — waits until the size holds that long. Returns
+    /// whether a size is still settling, so the caller paints again to apply it.
+    fn resize(&mut self, cols: u16, rows: u16, cell_w: f32, cell_h: f32, now: Instant) -> bool {
         self.cell = (cell_w, cell_h);
         if cols == 0 || rows == 0 {
-            return;
+            return false;
         }
         let mut term = self.term.lock();
-        // The grid is checked too, not just `last_size`: an agent host's HELLO resizes it back
-        // to the host's size from the reader thread, and when that lands after the first paint
-        // the grid stays narrower than the PTY — the agent's lines wrap — until a resize.
-        let grid = (term.columns(), term.screen_lines());
-        if (cols, rows) == self.last_size && grid == (cols as usize, rows as usize) {
-            return;
+        if (cols, rows) == self.last_size {
+            self.pending_size = None;
+            // The grid is checked too: an agent host's HELLO resizes it back to the host's
+            // size from the reader thread, and when that lands after the first paint the grid
+            // stays narrower than the PTY — the agent's lines wrap — until a resize.
+            if (term.columns(), term.screen_lines()) == (cols as usize, rows as usize) {
+                return false;
+            }
+        } else {
+            let quiet = self
+                .resized_at
+                .is_none_or(|t| now.duration_since(t) >= RESIZE_SETTLE);
+            match self.pending_size {
+                None if quiet => {}
+                Some((size, since))
+                    if size == (cols, rows) && now.duration_since(since) >= RESIZE_SETTLE => {}
+                Some((size, _)) if size == (cols, rows) => return true,
+                _ => {
+                    self.pending_size = Some(((cols, rows), now));
+                    return true;
+                }
+            }
         }
+        self.pending_size = None;
+        self.resized_at = Some(now);
         self.last_size = (cols, rows);
         term.resize(TermSize::new(cols as usize, rows as usize));
         drop(term);
@@ -749,6 +782,7 @@ impl TerminalView {
             cell_width: cell_w as u16,
             cell_height: cell_h as u16,
         });
+        false
     }
 
     /// Translate a key event to PTY bytes. Returns whether it was handled.
@@ -1962,9 +1996,14 @@ impl Element for TerminalElement {
         let cols = (f32::from(bounds.size.width) / cell_w_f).floor().max(1.0) as u16;
         let rows = (f32::from(bounds.size.height) / cell_h_f).floor().max(1.0) as u16;
 
-        // Push geometry changes back to the grid/PTY before reading the content.
-        self.view
-            .update(cx, |v, _| v.resize(cols, rows, cell_w_f, cell_h_f));
+        // Push geometry changes back to the grid/PTY before reading the content. While a new
+        // size settles the old grid is drawn, clipped to the pane (see `paint`).
+        let settling = self.view.update(cx, |v, _| {
+            v.resize(cols, rows, cell_w_f, cell_h_f, Instant::now())
+        });
+        if settling {
+            window.request_animation_frame();
+        }
         let (found, current) = self.view.update(cx, |v, _| v.visible_matches());
 
         let view = self.view.read(cx);
@@ -2228,18 +2267,22 @@ impl Element for TerminalElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        for q in pre.bg_quads.drain(..).chain(pre.find_quads.drain(..)) {
-            window.paint_quad(q);
-        }
-        // Cursor under the glyph so an inverse block still shows the character.
-        if let Some(c) = pre.cursor.take() {
-            window.paint_quad(c);
-        }
-        let lh = pre.line_height;
-        for (i, line) in pre.lines.iter().enumerate() {
-            let origin = point(bounds.left(), bounds.top() + lh * (i as f32 + pre.shift));
-            let _ = line.paint(origin, lh, window, cx);
-        }
+        // Clipped: while a new pane size settles (see `resize`) the grid can be the old,
+        // larger one.
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            for q in pre.bg_quads.drain(..).chain(pre.find_quads.drain(..)) {
+                window.paint_quad(q);
+            }
+            // Cursor under the glyph so an inverse block still shows the character.
+            if let Some(c) = pre.cursor.take() {
+                window.paint_quad(c);
+            }
+            let lh = pre.line_height;
+            for (i, line) in pre.lines.iter().enumerate() {
+                let origin = point(bounds.left(), bounds.top() + lh * (i as f32 + pre.shift));
+                let _ = line.paint(origin, lh, window, cx);
+            }
+        });
         self.view.update(cx, |v, _| v.bounds = Some(bounds));
         // A scrollbar drag follows the cursor anywhere in the window, until the button's up.
         if self.view.read(cx).sb_drag.is_some() {
@@ -2663,7 +2706,7 @@ mod tests {
                 (t.columns(), t.screen_lines())
             })
         };
-        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0));
+        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0, Instant::now()));
         let hello = host::HostHello {
             version: host::VERSION,
             pid: 1,
@@ -2677,8 +2720,52 @@ mod tests {
             assert!(Instant::now() < deadline, "HELLO never applied");
             std::thread::sleep(Duration::from_millis(5));
         }
-        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0));
+        view.update(cx, |v, _| v.resize(150, 40, 8.0, 16.0, Instant::now()));
         assert_eq!(grid(cx), (150, 40));
+    }
+
+    /// A window drag changes the pane size every frame. The grid and the agent's PTY follow
+    /// only once a size holds still — together — so the agent never draws for a width the
+    /// grid has already left (its column moves clamp and the text lands scrambled). A lone
+    /// change, like a sidebar toggle, still applies at once.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_live_resize_waits_for_the_size_to_settle(cx: &mut gpui::TestAppContext) {
+        use crate::agent_host as host;
+        let (mut fake_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = ours.try_clone().unwrap();
+        let view = cx.new(|cx| TerminalView::attach((ours, reader), cx));
+        let cols =
+            |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.term.lock().columns());
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let resize = |c, ms, cx: &mut gpui::TestAppContext| {
+            view.update(cx, |v, _| v.resize(c, 40, 8.0, 16.0, at(ms)))
+        };
+
+        assert!(!resize(150, 0, cx), "the first size applies at once");
+        assert_eq!(cols(cx), 150);
+        for (c, ms) in [(140, 16), (120, 32), (100, 48), (100, 140)] {
+            assert!(resize(c, ms, cx), "{c} cols at {ms}ms is still settling");
+            assert_eq!(cols(cx), 150);
+        }
+        assert!(!resize(100, 148, cx));
+        assert_eq!(cols(cx), 100);
+        assert!(!resize(90, 400, cx), "a lone change doesn't wait");
+        assert_eq!(cols(cx), 90);
+
+        // The PTY heard each applied size — none of the drag in between.
+        fake_host
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut frames = host::FrameReader::default();
+        let mut heard = Vec::new();
+        while let Ok(Some((kind, p))) = frames.next(&mut fake_host) {
+            if kind == host::RESIZE {
+                heard.push(u16::from_le_bytes([p[0], p[1]]));
+            }
+        }
+        assert_eq!(heard, [150, 100, 90]);
     }
 
     #[test]
