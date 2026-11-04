@@ -11,6 +11,8 @@
 pub mod agents;
 /// The Claude Code hook that reports agent state to Kyde ([`claude_hooks::install`]).
 pub mod claude_hooks;
+/// Folder trust in Claude Code's own config, for Scratch ([`claude_trust::apply`]).
+pub mod claude_trust;
 /// Local-history settings ([`history::HistoryCfg`]).
 pub mod history;
 /// Keybinding preset + overrides ([`keymap::Keymap`]).

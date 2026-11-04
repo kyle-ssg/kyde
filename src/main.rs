@@ -1395,6 +1395,12 @@ struct AgentsView {
     gh_pr_tab: PrTab,
     /// The selected issue / PR's conversation, ready to render.
     gh_cards: Vec<GhCard>,
+    /// Its unresolved review threads, ready to hand to an agent (Action comments).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    gh_unresolved: Vec<agents::Feedback>,
+    /// Review feedback queued per PR worktree until its agent can take it.
+    #[cfg(feature = "terminal")]
+    feedback: std::collections::HashMap<PathBuf, PrFeedback>,
     /// The comment box under it (scrolled by `gh_comment_scroll` once it outgrows the box),
     /// and the inline-thread reply box (with the thread it's for).
     gh_comment: Entity<CodeEditor>,
@@ -1624,6 +1630,9 @@ enum GhCard {
         at: String,
         verb: &'static str,
         body: Entity<mdview::MarkdownView>,
+        /// Its markdown, to hand to an agent (`None`: the description, which isn't feedback).
+        #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+        raw: Option<String>,
     },
     /// A submitted review, its summary and its inline threads.
     Review {
@@ -1631,6 +1640,9 @@ enum GhCard {
         at: String,
         state: String,
         body: Option<Entity<mdview::MarkdownView>>,
+        /// The summary's markdown, to hand to an agent.
+        #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+        raw: String,
         threads: Vec<GhThread>,
     },
     /// A pushed commit.
@@ -1647,8 +1659,28 @@ struct GhThread {
     /// Its first comment's id — replies go to it.
     root: u64,
     path: String,
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    line: Option<u64>,
+    /// Marked resolved on GitHub (`None`: unknown).
+    resolved: Option<bool>,
     hunk: Vec<kyde_git::github::DiffRow>,
-    comments: Vec<(String, String, Entity<mdview::MarkdownView>)>,
+    /// `(author, at, rendered body, its markdown)`.
+    comments: Vec<(String, String, Entity<mdview::MarkdownView>, String)>,
+}
+
+/// Review feedback on a PR waiting for the agent in its worktree, and where handing it over
+/// stands.
+#[cfg(feature = "terminal")]
+struct PrFeedback {
+    space: PathBuf,
+    pr: kyde_git::github::PullRequest,
+    /// Not handed over yet, oldest first.
+    items: Vec<agents::Feedback>,
+    /// A fresh agent is being set up for them (its worktree made, or brought up to the PR's
+    /// latest commits): it starts on every item queued by then.
+    preparing: bool,
+    /// A check that its agent still runs is in flight.
+    checking: bool,
 }
 
 /// One worktree's live tabs, left→right, and which one is shown.
@@ -1842,7 +1874,12 @@ impl AgentsView {
                 .selected
                 .clone()
                 .filter(|w| cfg.space_of(w).is_some())
-                .or_else(|| cfg.spaces.first().map(|s| s.path.clone())),
+                .or_else(|| {
+                    cfg.spaces
+                        .iter()
+                        .find(|s| !s.scratch)
+                        .map(|s| s.path.clone())
+                }),
             cfg,
             branches: std::collections::HashMap::new(),
             git_spaces: std::collections::HashSet::new(),
@@ -1861,6 +1898,9 @@ impl AgentsView {
             gh_body: cx.new(|cx| mdview::MarkdownView::new("", None, cx)),
             gh_pr_tab: PrTab::Conversation,
             gh_cards: Vec::new(),
+            gh_unresolved: Vec::new(),
+            #[cfg(feature = "terminal")]
+            feedback: std::collections::HashMap::new(),
             gh_comment: cx.new(|cx| {
                 let mut e = CodeEditor::new(cx, String::new(), Lang::PlainText, "Leave a comment");
                 e.soft_wrap = true;
@@ -4210,6 +4250,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 worktrees: wts.clone(),
                 ..Default::default()
             }];
+            view.agents.cfg.ensure_scratch();
             for (wt, title) in wts.iter().zip([
                 "Ease the shimmer with smoothstep",
                 "Set upstream on first push",
@@ -7436,6 +7477,34 @@ mod gpui_smoke_tests {
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
             })
             .unwrap();
+    }
+
+    /// Scratch: a new scratch tab gets a folder of its own — a row under Scratch, its agent
+    /// started; closing that tab drops the row and the (empty) folder. Real PTYs.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_scratch_row_lives_as_long_as_its_tab(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_new_scratch(cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let wt = handle
+            .update(cx, |k, _w, cx| {
+                let wt = k.agents.selected.clone().unwrap();
+                assert!(k.agents.cfg.is_scratch(&wt) && wt.is_dir());
+                assert_eq!(k.agents.tabs[&wt].tabs.len(), 1, "its agent starts");
+                k.agents_close_tab(&wt, 0, cx);
+                assert!(!k.agents.cfg.is_scratch(&wt), "the row goes with its tab");
+                wt
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!wt.exists(), "and so does its empty folder");
     }
 
     /// The Clean Up window's pass ticks a tab it finds finished — in the main checkout too,

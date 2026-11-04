@@ -44,6 +44,9 @@ const CONTEXT_EVERY_TICKS: u32 = 5 * 60;
 /// …and once this long after a tab's first prompt (time for Claude Code to title it).
 #[cfg(feature = "terminal")]
 const TITLE_AFTER_PROMPT: Duration = Duration::from_secs(15);
+/// An agent tab this new, with no hook report yet, counts as alive: its agent is starting.
+#[cfg(feature = "terminal")]
+const FEEDBACK_STARTING: Duration = Duration::from_mins(1);
 /// One tab for the cleanup's background probe: worktree, spawn time, shell pid, last output,
 /// and the AI question to ask about it (if any).
 #[cfg(feature = "terminal")]
@@ -107,6 +110,7 @@ impl Kyde {
             .cfg
             .spaces
             .iter()
+            .filter(|s| !s.scratch)
             .map(|s| s.path.clone())
             .collect();
         cx.spawn(async move |this, cx| {
@@ -437,6 +441,7 @@ impl Kyde {
             .cfg
             .spaces
             .iter()
+            .filter(|s| !s.scratch)
             .map(|s| s.path.clone())
             .collect();
         cx.spawn(async move |this, cx| {
@@ -479,6 +484,7 @@ impl Kyde {
                     .cfg
                     .spaces
                     .iter()
+                    .filter(|s| !s.scratch)
                     .flat_map(|s| std::iter::once(&s.path).chain(&s.worktrees))
                     .cloned()
                     .collect::<Vec<_>>()
@@ -701,10 +707,14 @@ impl Kyde {
     /// the default worktree, so selecting it starts the first agent tab.
     pub(crate) fn agents_add_space(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.agents.cfg.spaces.iter().any(|s| s.path == path) {
-            self.agents.cfg.spaces.push(Space {
-                path: path.clone(),
-                ..Space::default()
-            });
+            let at = self.agents.cfg.new_space_index();
+            self.agents.cfg.spaces.insert(
+                at,
+                Space {
+                    path: path.clone(),
+                    ..Space::default()
+                },
+            );
             self.agents_save(cx);
             self.agents_refresh_branches(cx);
         }
@@ -758,6 +768,47 @@ impl Kyde {
         let name = crate::agents::worktree_name(crate::agents::random_seed());
         let branch = format!("worktree/{name}");
         self.agents_create_worktree(space, name, WtSource::NewBranch(branch), None, cx);
+    }
+
+    /// A new Scratch row: a fresh folder under `~/.kyde/scratch` (made — and trusted in Claude
+    /// Code, so its agent doesn't open on the trust question — in the background), then
+    /// opened, which starts its agent.
+    pub(crate) fn agents_new_scratch(&mut self, cx: &mut Context<Self>) {
+        let root = kyde_config::agents::scratch_dir();
+        let path = root.join(crate::agents::worktree_name(crate::agents::random_seed()));
+        // Tests and screenshot runs never touch Claude Code's config.
+        let trust = !cfg!(test) && std::env::var_os("KYDE_SHOT").is_none();
+        cx.spawn(async move |this, cx| {
+            let dir = path.clone();
+            let made = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(&dir)?;
+                    if trust {
+                        let root = root.canonicalize().unwrap_or(root);
+                        let path = kyde_config::claude_trust::config_path();
+                        // Untrusted, its agent just asks first — not worth a note.
+                        let _ = kyde_config::claude_trust::apply(&path, &root);
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(e) = made {
+                    this.agents.note = Some(format!("Couldn't make a scratch folder: {e}"));
+                    cx.notify();
+                    return;
+                }
+                this.agents.cfg.ensure_scratch();
+                if let Some(s) = this.agents.cfg.spaces.iter_mut().find(|s| s.scratch) {
+                    s.worktrees.push(path.clone());
+                }
+                this.agents_save(cx);
+                this.agents_select(path, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Create worktree `name` for `space` (`~/.kyde/worktrees/<space>/<name>`) from `source`
@@ -852,12 +903,11 @@ impl Kyde {
                         this.agents_save(cx);
                         #[cfg(feature = "terminal")]
                         match start {
-                            Some(s) => this.agents_new_tab_as(
-                                path.clone(),
-                                Some(s.prompt),
-                                Some(s.tab),
-                                cx,
-                            ),
+                            Some(s) => {
+                                // Made to act on review comments: on every one queued by now.
+                                let prompt = this.agents_feedback_take(&path).unwrap_or(s.prompt);
+                                this.agents_new_tab_as(path.clone(), Some(prompt), Some(s.tab), cx);
+                            }
                             // Made for you to work in: its agent starts if you're still here.
                             None if this.agents.selected.as_ref() == Some(&path) => {
                                 this.agents_new_tab(path.clone(), true, None, cx);
@@ -877,6 +927,9 @@ impl Kyde {
                             "Couldn't create worktree: {}",
                             crate::agents::git_reason(&e)
                         ));
+                        // Review comments waiting for it have nowhere to go.
+                        #[cfg(feature = "terminal")]
+                        this.agents.feedback.remove(&path);
                         if this.agents.selected.as_ref() == Some(&path) {
                             this.agents.selected = Some(space.clone());
                         }
@@ -1472,13 +1525,25 @@ impl Kyde {
         .detach();
     }
 
-    /// Drop a (removed) worktree from its space, closing its tabs.
+    /// Drop a (removed) worktree from its space, closing its tabs. A scratch row's folder
+    /// goes too, unless its agent left files there.
     fn agents_forget_worktree(&mut self, wt: &Path, cx: &mut Context<Self>) {
         let mut owner = None;
         for s in &mut self.agents.cfg.spaces {
-            if s.worktrees.iter().any(|w| w == wt) {
-                s.worktrees.retain(|w| w != wt);
-                owner = Some(s.path.clone());
+            if let Some(i) = s.worktrees.iter().position(|w| w == wt) {
+                s.worktrees.remove(i);
+                owner = if s.scratch {
+                    // Scratch's own folder isn't a row: its neighbour is shown instead.
+                    s.worktrees.get(i.saturating_sub(1)).cloned()
+                } else {
+                    Some(s.path.clone())
+                };
+                if s.scratch {
+                    let dir = wt.to_path_buf();
+                    cx.background_executor()
+                        .spawn(async move { crate::agents::remove_scratch_dir(&dir) })
+                        .detach();
+                }
             }
         }
         #[cfg(feature = "terminal")]
@@ -1492,6 +1557,19 @@ impl Kyde {
         }
         self.agents_save(cx);
         cx.notify();
+    }
+
+    /// A scratch row's ×: close its tabs — the row (and its folder, if empty) goes with the
+    /// last one.
+    fn agents_close_scratch(&mut self, wt: &Path, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        while self.agents_has_tabs(wt) {
+            self.agents_close_tab(wt, 0, cx);
+        }
+        // Closing its last tab forgot it already; a row without tabs goes now.
+        if self.agents.cfg.is_scratch(wt) {
+            self.agents_forget_worktree(wt, cx);
+        }
     }
 
     /// The window is Agents-only: the IDE chrome (rail, toolbars, status bar, bottom terminal,
@@ -1828,10 +1906,10 @@ impl Kyde {
             // A background agent is at work here: no agent of its own beside it (two on the
             // same files) — the empty state says whose it is.
             None if self.agents_subs_in(&wt).next().is_some() => {}
-            // Its latest Claude Code session, resumed — else, in a project's own checkout, a
-            // fresh agent. A linked worktree with neither waits for you to start one: one an
-            // agent made (`git worktree add`) gets that agent's tab once it edits there, and a
-            // blank agent beside it would read as the one at work.
+            // Its latest Claude Code session, resumed — else, in a project's own checkout (or a
+            // scratch row), a fresh agent. A linked worktree with neither waits for you to
+            // start one: one an agent made (`git worktree add`) gets that agent's tab once it
+            // edits there, and a blank agent beside it would read as the one at work.
             None => match self
                 .agents
                 .contexts
@@ -1839,7 +1917,9 @@ impl Kyde {
                 .and_then(|c| c.session.clone())
             {
                 Some(id) => self.agents_resume_tab(wt, id, cx),
-                None if self.agents.cfg.spaces.iter().any(|s| s.path == wt) => {
+                None if self.agents.cfg.spaces.iter().any(|s| s.path == wt)
+                    || self.agents.cfg.is_scratch(&wt) =>
+                {
                     self.agents_new_tab(wt, true, None, cx);
                 }
                 None => {}
@@ -1878,8 +1958,9 @@ impl Kyde {
     /// work already there when `blank` (a seeded tab's worktree was made for its task) — see
     /// `agents::task_brief`. `None` without the hook.
     fn agents_task_brief(&self, wt: &Path, blank: bool, cx: &gpui::App) -> Option<String> {
-        if !self.agents.cfg.claude_hooks {
-            return None; // the hook is what hands it over
+        // The hook is what hands it over; a scratch folder has no worktrees to move to.
+        if !self.agents.cfg.claude_hooks || self.agents.cfg.is_scratch(wt) {
+            return None;
         }
         let mode = self.agents.cfg.new_task;
         if !blank {
@@ -2194,10 +2275,13 @@ impl Kyde {
                 let _ = std::fs::remove_dir_all(subs);
             })
             .detach();
-        match crate::term_panel::active_after_close(len, idx, g.active) {
-            Some(a) => g.active = a,
-            None => {
-                self.agents.tabs.remove(wt);
+        if let Some(a) = crate::term_panel::active_after_close(len, idx, g.active) {
+            g.active = a;
+        } else {
+            self.agents.tabs.remove(wt);
+            // A scratch row lives as long as its tabs.
+            if self.agents.cfg.is_scratch(wt) {
+                self.agents_forget_worktree(wt, cx);
             }
         }
         self.agents_keep_done(stopped, &[], cx);
@@ -2595,6 +2679,16 @@ impl Kyde {
         let active = self.agents.window_active;
         let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
         let (mut subs_changed, mut stopped, mut live) = (false, Vec::new(), Vec::new());
+        // Worktrees with review feedback waiting, whose agents just reported: each may be free
+        // for it now. (Only these — a busy check for every queue each tick would spawn `pgrep`s.)
+        let mut waiting: Vec<PathBuf> = found
+            .iter()
+            .map(|f| &f.wt)
+            .filter(|wt| self.agents.feedback.contains_key(*wt))
+            .cloned()
+            .collect();
+        waiting.sort();
+        waiting.dedup();
         for HookRead {
             wt,
             id,
@@ -2707,6 +2801,9 @@ impl Kyde {
             cx.notify();
         }
         self.agents_refresh_states(cx);
+        for wt in waiting {
+            self.agents_flush_feedback(&wt, false, cx);
+        }
     }
 
     /// The worktree tab `v` is in now.
@@ -2776,6 +2873,384 @@ impl Kyde {
         self.agents_save(cx);
         self.agents_refresh_branches(cx);
         cx.notify();
+    }
+
+    /// The PR the detail shows: (project, PR).
+    fn agents_selected_pr(&self) -> Option<(PathBuf, kyde_git::github::PullRequest)> {
+        let (space, tab, _) = self.agents.gh_selected.clone()?;
+        let Some(Ok(d)) = self
+            .agents
+            .gh_detail
+            .as_ref()
+            .filter(|_| tab == SideTab::Prs)
+        else {
+            return None;
+        };
+        let p = d.pr.as_ref()?;
+        let pr = kyde_git::github::PullRequest {
+            number: d.number,
+            title: d.title.clone(),
+            url: d.url.clone(),
+            author: d.author.clone(),
+            head: p.head.clone(),
+            draft: p.draft,
+        };
+        Some((space, pr))
+    }
+
+    /// Action comments: hand every unresolved review thread to the PR's agent.
+    fn agents_action_unresolved(&mut self, cx: &mut Context<Self>) {
+        let items = self.agents.gh_unresolved.clone();
+        if let Some((space, pr)) = self.agents_selected_pr() {
+            self.agents_action_feedback(space, pr, items, cx);
+        }
+    }
+
+    /// Action comment: hand the comment at `at` to the PR's agent.
+    fn agents_action_comment(&mut self, at: FeedbackAt, cx: &mut Context<Self>) {
+        let one = |author: &str, body: &str| crate::agents::Feedback {
+            path: None,
+            line: None,
+            context: Vec::new(),
+            comments: vec![(author.to_string(), body.to_string())],
+        };
+        let pair =
+            |c: &(String, String, Entity<mdview::MarkdownView>, String)| (c.0.clone(), c.3.clone());
+        let item = match at {
+            FeedbackAt::Card(ci) => match self.agents.gh_cards.get(ci) {
+                Some(GhCard::Comment {
+                    author,
+                    raw: Some(raw),
+                    ..
+                }) => Some(one(author, raw)),
+                Some(GhCard::Review { author, raw, .. }) if !raw.trim().is_empty() => {
+                    Some(one(author, raw))
+                }
+                _ => None,
+            },
+            // The thread's earlier comments go along, for what it's answering.
+            FeedbackAt::Thread(ci, ti, k) => match self.agents.gh_cards.get(ci) {
+                Some(GhCard::Review { threads, .. }) => threads.get(ti).and_then(|th| {
+                    Some(crate::agents::Feedback {
+                        path: Some(th.path.clone()),
+                        line: th.line,
+                        context: th.comments.get(..k)?.iter().map(pair).collect(),
+                        comments: vec![pair(th.comments.get(k)?)],
+                    })
+                }),
+                _ => None,
+            },
+        };
+        if let (Some(item), Some((space, pr))) = (item, self.agents_selected_pr()) {
+            self.agents_action_feedback(space, pr, vec![item], cx);
+        }
+    }
+
+    /// Hand `items` on `pr` to the agent in its worktree — one per PR (`pr-<n>`, or the one on
+    /// its branch), so every hand-off on it goes to the same place. They wait while that
+    /// worktree is set up or its agent is busy, and go to it once it finishes its turn; with
+    /// no agent alive there, a fresh one starts on them.
+    fn agents_action_feedback(
+        &mut self,
+        space: PathBuf,
+        pr: kyde_git::github::PullRequest,
+        items: Vec<crate::agents::Feedback>,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let wt = self.agents_pr_worktree(&space, &pr).unwrap_or_else(|| {
+            kyde_config::agents::worktree_path(&space, &format!("pr-{}", pr.number))
+        });
+        let fb = self
+            .agents
+            .feedback
+            .entry(wt.clone())
+            .or_insert_with(|| PrFeedback {
+                space,
+                pr: pr.clone(),
+                items: Vec::new(),
+                preparing: false,
+                checking: false,
+            });
+        fb.pr = pr;
+        // A second click on the same comment before it's gone over adds nothing.
+        for f in items {
+            if !fb.items.contains(&f) {
+                fb.items.push(f);
+            }
+        }
+        self.agents_flush_feedback(&wt, true, cx);
+    }
+
+    /// Hand worktree `wt`'s queued feedback over if its agent can take it now: one that's
+    /// finished its turn (or never been prompted) — checked off the UI thread to still be
+    /// running first — gets it typed in; with none alive a fresh one starts on it; a busy one
+    /// (working, or asking you something, where Enter would answer) is left until its next
+    /// hook report. `clicked`: from a button, so show the agent; else (a hook report) just say
+    /// so in the note.
+    fn agents_flush_feedback(&mut self, wt: &Path, clicked: bool, cx: &mut Context<Self>) {
+        use crate::agents::Hook;
+        let hooks = self.agents.cfg.claude_hooks;
+        let creating = self.agents.creating.iter().any(|c| c.path == wt);
+        let Some(fb) = self.agents.feedback.get(wt) else {
+            return;
+        };
+        let n = fb.pr.number;
+        if fb.items.is_empty() {
+            self.agents.feedback.remove(wt);
+            return;
+        }
+        if fb.preparing || fb.checking || creating {
+            if creating && !fb.preparing && !hooks {
+                // A review is setting it up, and without the hook nothing tells when its agent
+                // is free.
+                self.agents.feedback.remove(wt);
+                self.agents.note = Some(format!(
+                    "#{n}'s worktree is still being set up — try again once it's ready"
+                ));
+            } else if clicked {
+                self.agents.note = Some(format!(
+                    "Queued for #{n} — its agent gets it as soon as it's ready"
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        // Without the hook there's no telling whether an agent is free: a fresh one each time.
+        if !hooks {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        let tabs = self.agents.tabs.get(wt).map_or(&[][..], |g| &g.tabs[..]);
+        let starting = |t: &AgentTab| {
+            t.hook.is_none() && t.spawned_at.elapsed().is_ok_and(|d| d < FEEDBACK_STARTING)
+        };
+        let live: Vec<&AgentTab> = tabs
+            .iter()
+            .filter(|t| {
+                t.agent && (t.hook.as_ref().is_some_and(|(h, _)| *h != Hook::Ended) || starting(t))
+            })
+            .collect();
+        if live.is_empty() {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        // A seeded tab reports Ready just before its first prompt lands — only a never-prompted
+        // one is really waiting.
+        let free = live.iter().rev().find(|t| match &t.hook {
+            Some((Hook::Done, _)) => true,
+            Some((Hook::Ready, _)) => !t.prompted,
+            _ => false,
+        });
+        let Some(tab) = free else {
+            if clicked {
+                self.agents.note = Some(format!(
+                    "Queued for #{n} — its agent gets it once it finishes its turn"
+                ));
+                cx.notify();
+            }
+            return;
+        };
+        // Its shell still runs the agent (else zsh would run the pasted lines), and its state
+        // file still says it's free — both read off the UI thread.
+        let (id, pid) = (tab.id.clone(), tab.view.read(cx).shell_pid());
+        if let Some(fb) = self.agents.feedback.get_mut(wt) {
+            fb.checking = true;
+        }
+        let wt = wt.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let state = crate::agents::state_path(&id);
+            let (alive, hook) = cx
+                .background_executor()
+                .spawn(async move {
+                    let alive = pid != 0 && !crate::agents::shell_is_idle(pid);
+                    let hook = std::fs::read_to_string(state)
+                        .ok()
+                        .and_then(|s| crate::agents::parse_hook(&s))
+                        .map(|r| r.hook);
+                    (alive, hook)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.agents_feedback_checked(&wt, &id, alive, hook, clicked, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The check on tab `id` (in `wt`) is back: type the feedback in if its agent is still
+    /// running and free; start a fresh one if it has quit.
+    fn agents_feedback_checked(
+        &mut self,
+        wt: &Path,
+        id: &str,
+        alive: bool,
+        hook: Option<crate::agents::Hook>,
+        clicked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::agents::Hook;
+        let Some(fb) = self.agents.feedback.get_mut(wt) else {
+            return;
+        };
+        fb.checking = false;
+        let n = fb.pr.number;
+        let Some((i, tab)) = self
+            .agents
+            .tabs
+            .get(wt)
+            .and_then(|g| g.tabs.iter().enumerate().find(|(_, t)| t.id == id))
+        else {
+            // Closed or moved meanwhile: decide again.
+            self.agents_flush_feedback(wt, clicked, cx);
+            return;
+        };
+        if !alive || hook == Some(Hook::Ended) {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        let free = match hook {
+            Some(Hook::Done) => true,
+            Some(Hook::Ready) => !tab.prompted,
+            _ => false,
+        };
+        if free {
+            self.agents_feedback_submit(wt, i, clicked, cx);
+        } else if clicked {
+            // Its next hook report tries again.
+            self.agents.note = Some(format!(
+                "Queued for #{n} — its agent gets it once it finishes its turn"
+            ));
+            cx.notify();
+        }
+    }
+
+    /// Type `wt`'s queued feedback into its tab `i` as one prompt, and send it — unless you've
+    /// typed there since its agent last reported (your unsent text may be in its box: the
+    /// prompt joins it, for you to send).
+    fn agents_feedback_submit(
+        &mut self,
+        wt: &Path,
+        i: usize,
+        clicked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(t) = self.agents.tabs.get_mut(wt).and_then(|g| g.tabs.get_mut(i)) else {
+            return;
+        };
+        let Some(fb) = self.agents.feedback.remove(wt) else {
+            return;
+        };
+        let prompt = crate::agents::feedback_prompt(&fb.pr, &fb.items);
+        let at = t.hook.as_ref().map(|(_, at)| *at);
+        let enter = t
+            .view
+            .read(cx)
+            .last_input
+            .is_none_or(|typed| at.is_some_and(|at| typed <= at));
+        t.view
+            .update(cx, |v, cx| v.submit_prompt(&prompt, enter, cx));
+        if enter {
+            // Working at once, so a second click before its hook says so doesn't type it twice.
+            t.hook = Some((crate::agents::Hook::Working, Instant::now()));
+            t.view.update(cx, |v, cx| v.set_claude_done(false, cx));
+        }
+        let (n, count) = (fb.pr.number, fb.items.len());
+        let what = if count == 1 {
+            "a review comment".to_string()
+        } else {
+            format!("{count} review comments")
+        };
+        self.agents.note = Some(if enter {
+            format!("Handed {what} on #{n} to its agent")
+        } else {
+            format!("Typed {what} on #{n} into its agent — press Enter there to send")
+        });
+        if clicked {
+            self.agents.side_tab = SideTab::Code;
+            if let Some(g) = self.agents.tabs.get_mut(wt) {
+                g.active = i;
+            }
+            self.agents_select(wt.to_path_buf(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Start a fresh agent on `wt`'s queued feedback, named "Comments #n": in a new `pr-<n>`
+    /// worktree when there's none (as Review makes it), else after bringing the worktree up to
+    /// the PR's latest commits (as Re-review does) — unless an agent there might still be at
+    /// work. It starts on everything queued by then.
+    fn agents_feedback_fresh(&mut self, wt: &Path, clicked: bool, cx: &mut Context<Self>) {
+        let existing = match self.agents.feedback.get(wt) {
+            Some(fb) => self.agents_pr_worktree(&fb.space, &fb.pr).as_deref() == Some(wt),
+            None => return,
+        };
+        // With the hook on, no agent here is alive (see `agents_flush_feedback`).
+        let update = self.agents.cfg.claude_hooks || !self.agents_has_tabs(wt);
+        let Some(fb) = self.agents.feedback.get_mut(wt) else {
+            return;
+        };
+        fb.preparing = true;
+        let (space, pr) = (fb.space.clone(), fb.pr.clone());
+        let n = pr.number;
+        let tab = format!("Comments #{n}");
+        if !existing {
+            // The prompt is made again once the worktree is ready (`agents_feedback_take`).
+            let start = WtStart {
+                prompt: crate::agents::feedback_prompt(&pr, &fb.items),
+                tab,
+                origin: format!("Comments on #{n}: {}", pr.title),
+                doing: format!("Setting up #{n} to act on its review comments"),
+            };
+            self.agents_create_worktree(space, format!("pr-{n}"), WtSource::Pr(n), Some(start), cx);
+            return;
+        }
+        if clicked {
+            self.agents.side_tab = SideTab::Code;
+        }
+        self.agents.note = Some(format!("Updating #{n} for its review comments…"));
+        cx.notify();
+        let wt = wt.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let dir = wt.clone();
+            let res = cx
+                .background_executor()
+                .spawn(async move { update.then(|| kyde_git::github::pr_checkout(&dir, n)) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.agents.note = Some(match res {
+                    Some(Err(e)) => format!(
+                        "Couldn't update #{n}: {} — acting on what's there",
+                        crate::agents::git_reason(&e.to_string())
+                    ),
+                    _ => format!("Started an agent on #{n}'s review comments"),
+                });
+                let Some(prompt) = this.agents_feedback_take(&wt) else {
+                    return;
+                };
+                // New tab first: selecting first would resume an old session in an empty strip.
+                this.agents_new_tab_as(wt.clone(), Some(prompt), Some(tab), cx);
+                if clicked {
+                    this.agents_select(wt, cx);
+                }
+                this.agents_refresh_branches(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The first prompt for the fresh agent set up for `wt`'s feedback: everything queued by
+    /// now, handed over with it. `None` if no agent was being set up for it.
+    fn agents_feedback_take(&mut self, wt: &Path) -> Option<String> {
+        if !self.agents.feedback.get(wt).is_some_and(|f| f.preparing) {
+            return None;
+        }
+        let fb = self.agents.feedback.remove(wt)?;
+        Some(crate::agents::feedback_prompt(&fb.pr, &fb.items))
     }
 
     /// An agent finished or needs you: a sound (one per burst), and a Dock bounce (Linux: a
@@ -3200,17 +3675,18 @@ impl Kyde {
             );
         }
         rows.append(&mut tab_rows);
+        // Scratch rows aren't worktrees: they go with their last tab.
         if self
             .agents
             .cfg
             .spaces
             .iter()
-            .any(|s| !s.worktrees.is_empty())
+            .any(|s| !s.scratch && !s.worktrees.is_empty())
         {
             rows.push(section("Worktrees"));
         }
         for space in &self.agents.cfg.spaces {
-            if space.worktrees.is_empty() {
+            if space.scratch || space.worktrees.is_empty() {
                 continue;
             }
             rows.push(
@@ -3402,7 +3878,13 @@ impl Kyde {
     ) -> gpui::AnyElement {
         #[cfg(feature = "terminal")]
         self.agents_mark_seen();
-        if self.agents.cfg.spaces.is_empty() {
+        if self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .all(|s| s.scratch && s.worktrees.is_empty())
+        {
             return self.render_agents_welcome(ui, cx);
         }
         let divider = div()
@@ -3439,9 +3921,11 @@ impl Kyde {
                     .selected
                     .as_deref()
                     .and_then(|w| this.agents.cfg.space_of(w))
-                    .map(|s| s.path.clone());
-                if let Some(space) = space {
-                    this.agents_new_worktree(space, cx);
+                    .map(|s| (s.path.clone(), s.scratch));
+                match space {
+                    Some((_, true)) => this.agents_new_scratch(cx),
+                    Some((space, false)) => this.agents_new_worktree(space, cx),
+                    None => {}
                 }
             }))
             .on_action(cx.listener(|this, _: &crate::AgentRename, window, cx| {
@@ -3559,6 +4043,16 @@ impl Kyde {
                             MouseButton::Left,
                             cx.listener(|this, _e, _w, cx| this.agents_add_space_prompt(cx)),
                         ),
+                    )
+                    .child(
+                        btn_secondary("agents-new-scratch-welcome", "New Scratch Tab")
+                            .tooltip(ui::tip(
+                                "An agent in a throwaway folder, for anything ad hoc",
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _e, _w, cx| this.agents_new_scratch(cx)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -3841,8 +4335,11 @@ impl Kyde {
                 continue;
             }
             // The space's own folder (its default worktree) among its linked ones.
-            let n = 1 + space.worktrees.len() + pending.len();
             let ordered = space.rows();
+            let n = ordered.len() + pending.len();
+            if space.scratch && ordered.is_empty() {
+                rows.push(self.agents_scratch_hint(cx));
+            }
             let mut wts: Vec<(usize, &PathBuf)> = ordered.iter().enumerate().collect();
             if sort {
                 wts.sort_by_key(|(_, w)| std::cmp::Reverse(urgency(w)));
@@ -3856,7 +4353,7 @@ impl Kyde {
                     rows.push(drop_line());
                 }
             }
-            let shown = 1 + space.worktrees.len();
+            let shown = ordered.len();
             for (k, c) in pending.into_iter().enumerate() {
                 let selected = self.agents.selected.as_ref() == Some(&c.path);
                 let path = c.path.clone();
@@ -3885,6 +4382,40 @@ impl Kyde {
             }
         }
         rows
+    }
+
+    /// Scratch's only row while it has none: start one.
+    fn agents_scratch_hint(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        div()
+            .id("agents-scratch-new")
+            .relative()
+            .flex()
+            .flex_col()
+            .pl(px(WT_DOT_X))
+            .pr_2()
+            .py(px(ROW_PAD_Y))
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(t.line_number)
+            .hover(|d| d.bg(t.bg_mid).text_color(t.secondary_text))
+            .children(tree_connector(true))
+            .child(
+                title_line()
+                    .child(
+                        svg()
+                            .flex_none()
+                            .path("icons/plus.svg")
+                            .size(px(DOT))
+                            .text_color(t.line_number),
+                    )
+                    .child("New scratch tab"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.agents_new_scratch(cx)),
+            )
+            .into_any_element()
     }
 
     /// The Issues / Pull Requests tabs: the same project tree as Code, with each project's
@@ -4176,6 +4707,7 @@ impl Kyde {
         self.agents.gh_selected = Some(key.clone());
         self.agents.gh_detail = None;
         self.agents.gh_cards.clear();
+        self.agents.gh_unresolved.clear();
         self.agents.gh_diff = None;
         self.agents.gh_reply_to = None;
         self.agents.merge_armed = false;
@@ -4283,9 +4815,25 @@ impl Kyde {
                     at: at.clone(),
                     verb: "commented",
                     body: md(body, cx),
+                    raw: Some(body.clone()),
                 },
             ));
         }
+        // What Action comments hands over: every thread still open on GitHub.
+        self.agents.gh_unresolved = threads
+            .iter()
+            .filter(|t| t.resolved == Some(false))
+            .map(|t| crate::agents::Feedback {
+                path: Some(t.path.clone()),
+                line: t.line,
+                context: Vec::new(),
+                comments: t
+                    .comments
+                    .iter()
+                    .map(|(a, _, b)| (a.clone(), b.clone()))
+                    .collect(),
+            })
+            .collect();
         let mut threads: Vec<Option<kyde_git::github::ReviewThread>> =
             threads.into_iter().map(Some).collect();
         let thread_view = |t: kyde_git::github::ReviewThread, cx: &mut Context<Self>| {
@@ -4297,13 +4845,15 @@ impl Kyde {
             GhThread {
                 root: t.root,
                 path: t.path,
+                line: t.line,
+                resolved: t.resolved,
                 hunk: rows[tail..].to_vec(),
                 comments: t
                     .comments
                     .into_iter()
                     .map(|(a, at, b)| {
                         let view = md(&b, cx);
-                        (a, at, view)
+                        (a, at, view, b)
                     })
                     .collect(),
             }
@@ -4327,6 +4877,7 @@ impl Kyde {
                     at: r.at,
                     state: r.state,
                     body,
+                    raw: r.body,
                     threads: mine,
                 },
             ));
@@ -4346,6 +4897,7 @@ impl Kyde {
                     at,
                     state: "COMMENTED".into(),
                     body: None,
+                    raw: String::new(),
                     threads: vec![view],
                 },
             ));
@@ -4374,6 +4926,7 @@ impl Kyde {
                 "opened"
             },
             body: self.agents.gh_body.clone(),
+            raw: None,
         }];
         cards.extend(timeline.into_iter().map(|(_, c)| c));
         cards
@@ -4556,6 +5109,27 @@ impl Kyde {
                     .into_any_element()
                 })
         };
+        // Every unresolved review thread, to the agent in the PR's worktree.
+        #[cfg(feature = "terminal")]
+        let action_all = (is_pr
+            && d.state.eq_ignore_ascii_case("open")
+            && !self.agents.gh_unresolved.is_empty())
+        .then(|| {
+            let count = self.agents.gh_unresolved.len();
+            btn_secondary("agents-gh-action-all", "Action comments")
+                .tooltip(ui::tip(format!(
+                    "Hand the {count} unresolved review thread{} to an agent in this PR's \
+                     worktree",
+                    if count == 1 { "" } else { "s" }
+                )))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.agents_action_unresolved(cx)),
+                )
+                .into_any_element()
+        });
+        #[cfg(not(feature = "terminal"))]
+        let action_all: Option<gpui::AnyElement> = None;
         let url = d.url.clone();
         let state = d.state.to_uppercase();
         let (pill_label, pill_color) = match (is_pr, state.as_str()) {
@@ -4681,6 +5255,7 @@ impl Kyde {
                         .gap_2()
                         .pt_1()
                         .children(action)
+                        .children(action_all)
                         .child(
                             btn_secondary("agents-gh-web", "Open on GitHub").on_mouse_down(
                                 MouseButton::Left,
@@ -4867,6 +5442,9 @@ impl Kyde {
                 .rounded_md()
                 .overflow_hidden()
         };
+        let open = d.state.eq_ignore_ascii_case("open");
+        // An open PR's comments can each go to an agent (Action comment).
+        let actionable = cfg!(feature = "terminal") && d.pr.is_some() && open;
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         for (ci, c) in self.agents.gh_cards.iter().enumerate() {
             match c {
@@ -4875,15 +5453,26 @@ impl Kyde {
                     at,
                     verb,
                     body,
-                } => items.push(
-                    card()
-                        .child(card_head(
-                            author,
-                            format!("{verb} {}", crate::agents::iso_ago(at)),
+                    raw,
+                } => {
+                    let head = card_head(author, format!("{verb} {}", crate::agents::iso_ago(at)));
+                    #[cfg(feature = "terminal")]
+                    let head = head.when(actionable && raw.is_some(), |h| {
+                        h.child(div().flex_1()).child(action_comment_btn(
+                            ("gh-act-c", ci),
+                            FeedbackAt::Card(ci),
+                            cx,
                         ))
-                        .child(div().px_1().py_2().child(body.clone()))
-                        .into_any_element(),
-                ),
+                    });
+                    #[cfg(not(feature = "terminal"))]
+                    let _ = raw;
+                    items.push(
+                        card()
+                            .child(head)
+                            .child(div().px_1().py_2().child(body.clone()))
+                            .into_any_element(),
+                    );
+                }
                 GhCard::Commit {
                     oid,
                     headline,
@@ -4922,6 +5511,7 @@ impl Kyde {
                     state,
                     body,
                     threads,
+                    ..
                 } => {
                     let (verb, color) = match state.as_str() {
                         "APPROVED" => ("approved these changes", t.status_added),
@@ -4948,20 +5538,28 @@ impl Kyde {
                             ))),
                     );
                     if let Some(b) = body {
+                        let head = card_head(author, "left a comment".into());
+                        #[cfg(feature = "terminal")]
+                        let head = head.when(actionable, |h| {
+                            h.child(div().flex_1()).child(action_comment_btn(
+                                ("gh-act-r", ci),
+                                FeedbackAt::Card(ci),
+                                cx,
+                            ))
+                        });
                         review = review.child(
                             card()
-                                .child(card_head(author, "left a comment".into()))
+                                .child(head)
                                 .child(div().px_1().py_2().child(b.clone())),
                         );
                     }
                     for (ti, th) in threads.iter().enumerate() {
-                        review = review.child(self.render_gh_thread(ci * 1000 + ti, th, cx));
+                        review = review.child(self.render_gh_thread(ci, ti, th, actionable, cx));
                     }
                     items.push(review.pl_4().into_any_element());
                 }
             }
         }
-        let open = d.state.eq_ignore_ascii_case("open");
         if let Some(merge_box) =
             d.pr.as_ref()
                 .filter(|_| open)
@@ -5240,14 +5838,18 @@ impl Kyde {
         )
     }
 
-    /// An inline review thread: the file, the diff lines it's on, its comments, and a reply.
+    /// An inline review thread (card `ci`'s thread `ti`): the file, the diff lines it's on, its
+    /// comments — each with Action comment when `actionable` — and a reply.
     fn render_gh_thread(
         &self,
-        id: usize,
+        ci: usize,
+        ti: usize,
         th: &GhThread,
+        actionable: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use kyde_git::github::DiffRow;
+        let id = ci * 1000 + ti;
         let t = theme::get();
         let fs = t.ui_font_size;
         let lines = th.hunk.iter().map(|r| {
@@ -5268,32 +5870,44 @@ impl Kyde {
                         .child(SharedString::from(text.replace('\t', "    "))),
                 )
         });
-        let comments = th.comments.iter().map(|(author, at, body)| {
-            div()
+        let mut comments = Vec::with_capacity(th.comments.len());
+        for (k, (author, at, body, _)) in th.comments.iter().enumerate() {
+            let head = div()
                 .flex()
-                .flex_col()
-                .px_3()
-                .pt_2()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(avatar(author))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(avatar(author))
-                        .child(
-                            div()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(SharedString::from(author.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_color(t.line_number)
-                                .child(SharedString::from(crate::agents::iso_ago(at))),
-                        ),
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(SharedString::from(author.clone())),
                 )
-                .child(body.clone())
-        });
+                .child(
+                    div()
+                        .text_color(t.line_number)
+                        .child(SharedString::from(crate::agents::iso_ago(at))),
+                );
+            #[cfg(feature = "terminal")]
+            let head = head.when(actionable, |h| {
+                h.child(div().flex_1()).child(action_comment_btn(
+                    ("gh-act-t", id * 1000 + k),
+                    FeedbackAt::Thread(ci, ti, k),
+                    cx,
+                ))
+            });
+            #[cfg(not(feature = "terminal"))]
+            let _ = (actionable, k);
+            comments.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .pt_2()
+                    .child(head)
+                    .child(body.clone()),
+            );
+        }
         let root = th.root;
         let replying = self.agents.gh_reply_to == Some(root);
         let reply = if replying {
@@ -5372,14 +5986,36 @@ impl Kyde {
             .overflow_hidden()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .px_3()
                     .py_1p5()
                     .bg(t.bg_mid)
                     .border_b_1()
                     .border_color(t.divider)
-                    .font_family(theme::font::family())
                     .text_size(px(fs - 1.0))
-                    .child(SharedString::from(th.path.clone())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme::font::family())
+                            .child(SharedString::from(th.path.clone())),
+                    )
+                    .when(th.resolved == Some(true), |h| {
+                        h.child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(t.divider)
+                                .text_color(t.line_number)
+                                .child("Resolved"),
+                        )
+                    }),
             )
             .children(lines)
             .children(comments)
@@ -5497,7 +6133,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let is_git = self.agents.git_spaces.contains(&space.path);
-        let n = 1 + space.worktrees.len();
+        let n = space.rows().len();
         let grp = SharedString::from(format!("agents-space-{si}"));
         let renaming = self.agents.renaming == Some(RenameTarget::Space(space.path.clone()));
         let (toggle, new_wt, rm) = (space.path.clone(), space.path.clone(), space.path.clone());
@@ -5514,6 +6150,25 @@ impl Kyde {
             .flex_none()
             .opacity(0.0)
             .group_hover(grp.clone(), |s| s.opacity(1.0))
+            .when(space.scratch, |d| {
+                d.child(
+                    ui::icon_btn(("agents-new-scratch", si), 20.0)
+                        .tooltip(ui::tip("New scratch tab (in a folder of its own)"))
+                        .child(
+                            svg()
+                                .path("icons/plus.svg")
+                                .size(px(13.0))
+                                .text_color(t.secondary_text),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.agents_new_scratch(cx);
+                            }),
+                        ),
+                )
+            })
             .when(is_git, |d| {
                 d.child(
                     ui::icon_btn(("agents-new-wt", si), 20.0)
@@ -5533,36 +6188,42 @@ impl Kyde {
                         ),
                 )
             })
-            .child(
-                ui::icon_btn(("agents-rm-space", si), 20.0)
-                    .tooltip(ui::tip("Remove project (the folder stays on disk)"))
-                    .child(
-                        svg()
-                            .path("icons/x.svg")
-                            .size(px(13.0))
-                            .text_color(t.secondary_text),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.agents_remove_space(&rm, cx);
-                        }),
-                    ),
-            );
+            // Scratch is always there.
+            .when(!space.scratch, |d| {
+                d.child(
+                    ui::icon_btn(("agents-rm-space", si), 20.0)
+                        .tooltip(ui::tip("Remove project (the folder stays on disk)"))
+                        .child(
+                            svg()
+                                .path("icons/x.svg")
+                                .size(px(13.0))
+                                .text_color(t.secondary_text),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.agents_remove_space(&rm, cx);
+                            }),
+                        ),
+                )
+            });
         // Folded: how many items hide under it — its issues / PRs on those tabs, else its
         // worktrees with their rolled-up status dot.
-        let folded = space.collapsed.then(|| match items {
-            Some(k) => (None, k),
-            None => (
-                Some(AgentState::rollup(
-                    std::iter::once(&space.path)
-                        .chain(&space.worktrees)
-                        .map(|w| self.agents_state(w)),
-                )),
-                n,
-            ),
-        });
+        let folded = space
+            .collapsed
+            .then(|| match items {
+                Some(k) => (None, k),
+                None => (
+                    Some(AgentState::rollup(
+                        std::iter::once(&space.path)
+                            .chain(&space.worktrees)
+                            .map(|w| self.agents_state(w)),
+                    )),
+                    n,
+                ),
+            })
+            .filter(|(_, k)| *k > 0);
         div()
             .id(("agents-space", si))
             .group(grp)
@@ -5615,14 +6276,7 @@ impl Kyde {
                             .min_w_0()
                             .truncate()
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(
-                                self.agents
-                                    .cfg
-                                    .names
-                                    .get(&space.path)
-                                    .cloned()
-                                    .unwrap_or_else(|| leaf_name(&space.path)),
-                            )
+                            .child(self.agents_space_name(space))
                             .into_any_element()
                     })
                     .when_some(folded, |d, (state, n)| {
@@ -5674,6 +6328,7 @@ impl Kyde {
         let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
         // The space's own folder: titled by its branch, behind a branch glyph.
         let is_default = wt == space;
+        let scratch = self.agents.cfg.is_scratch(wt);
         let fields = self.agents.cfg.row;
         let title: SharedString = self.agents_wt_title(space, wt).into();
 
@@ -5769,7 +6424,11 @@ impl Kyde {
             .when(!is_default && hovered, |d| {
                 d.child(
                     ui::icon_btn(("agents-rm-wt", id), 18.0)
-                        .tooltip(ui::tip("Remove worktree…"))
+                        .tooltip(ui::tip(if scratch {
+                            "Close (ends its agent)"
+                        } else {
+                            "Remove worktree…"
+                        }))
                         .child(
                             svg()
                                 .path("icons/x.svg")
@@ -5780,7 +6439,12 @@ impl Kyde {
                             MouseButton::Left,
                             cx.listener(move |this, _e, _w, cx| {
                                 cx.stop_propagation();
-                                this.agents_confirm_remove(rm_space.clone(), rm_wt.clone(), cx);
+                                // Nothing to lose in scratch: no git, and saved files stay.
+                                if scratch {
+                                    this.agents_close_scratch(&rm_wt, cx);
+                                } else {
+                                    this.agents_confirm_remove(rm_space.clone(), rm_wt.clone(), cx);
+                                }
                             }),
                         ),
                 )
@@ -5989,8 +6653,10 @@ impl Kyde {
                     .text_color(t.line_number)
                     .child(SharedString::from(wt.display().to_string())),
             )
-            .child(label("GIT"))
-            .child(body(git_line))
+            // A scratch folder has no git.
+            .when(!self.agents.cfg.is_scratch(wt), |d| {
+                d.child(label("GIT")).child(body(git_line))
+            })
             .children(sync_line.map(body))
             .child(label("TASK"))
             .child(body(ctx.and_then(|c| c.first_prompt.clone()).map_or_else(
@@ -6810,6 +7476,7 @@ impl Kyde {
                 .cfg
                 .spaces
                 .iter()
+                .filter(|s| !s.scratch)
                 .flat_map(|s| s.worktrees.iter().map(move |w| (s.path.clone(), w.clone())))
                 .filter(|(space, wt)| self.agents_wt_cleanup(space, wt).1)
                 .map(|(_, wt)| wt)
@@ -6920,6 +7587,17 @@ enum GhPost {
     Approve,
     /// Merge the PR.
     Merge(kyde_git::github::MergeMethod),
+}
+
+/// The PR conversation comment an Action comment button hands over, by position in
+/// `gh_cards` (read when clicked, so the button keeps nothing of its own).
+#[cfg(feature = "terminal")]
+#[derive(Clone, Copy)]
+enum FeedbackAt {
+    /// Card `ci`: a comment, or a review's summary.
+    Card(usize),
+    /// Card `ci`'s thread `ti`, its comment `k` (the ones before it go along, for context).
+    Thread(usize, usize, usize),
 }
 
 /// A small round avatar: the login's initial on a colour picked from the login.
@@ -7111,6 +7789,31 @@ impl Bg<'_> {
     }
 }
 
+/// The small Action comment button at the right of a comment's header: hands the comment at
+/// `at` to an agent in the PR's worktree.
+#[cfg(feature = "terminal")]
+fn action_comment_btn(
+    id: impl Into<gpui::ElementId>,
+    at: FeedbackAt,
+    cx: &mut Context<Kyde>,
+) -> gpui::Stateful<gpui::Div> {
+    btn_secondary(id, "Action comment")
+        .px_2()
+        .py_0()
+        .flex_none()
+        .text_size(px(theme::get().ui_font_size - 2.0))
+        .tooltip(ui::tip(
+            "Hand this comment to an agent in the PR's worktree",
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _e, _w, cx| {
+                cx.stop_propagation();
+                this.agents_action_comment(at, cx);
+            }),
+        )
+}
+
 /// A tab's inputs to its status dot.
 #[cfg(feature = "terminal")]
 fn tab_signals(t: &AgentTab, cx: &gpui::App) -> crate::agents::Signals {
@@ -7278,6 +7981,7 @@ impl Kyde {
     /// What `target` is called when you haven't named it.
     fn agents_auto_name(&self, target: &RenameTarget, cx: &App) -> String {
         match target {
+            RenameTarget::Space(p) if *p == kyde_config::agents::scratch_dir() => "Scratch".into(),
             RenameTarget::Space(p) => leaf_name(p),
             RenameTarget::Worktree(wt) => {
                 let space = self
@@ -7301,6 +8005,22 @@ impl Kyde {
                 String::new()
             }
         }
+    }
+
+    /// What a space is called: the name you gave it, else its folder's (Scratch's is fixed).
+    fn agents_space_name(&self, space: &Space) -> String {
+        self.agents
+            .cfg
+            .names
+            .get(&space.path)
+            .cloned()
+            .unwrap_or_else(|| {
+                if space.scratch {
+                    "Scratch".into()
+                } else {
+                    leaf_name(&space.path)
+                }
+            })
     }
 
     /// What a worktree row is called: the name you gave it, else its automatic title. A
