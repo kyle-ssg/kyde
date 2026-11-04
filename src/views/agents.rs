@@ -103,6 +103,7 @@ impl Kyde {
             .cfg
             .spaces
             .iter()
+            .filter(|s| !s.scratch)
             .map(|s| s.path.clone())
             .collect();
         cx.spawn(async move |this, cx| {
@@ -431,6 +432,7 @@ impl Kyde {
             .cfg
             .spaces
             .iter()
+            .filter(|s| !s.scratch)
             .map(|s| s.path.clone())
             .collect();
         cx.spawn(async move |this, cx| {
@@ -473,6 +475,7 @@ impl Kyde {
                     .cfg
                     .spaces
                     .iter()
+                    .filter(|s| !s.scratch)
                     .flat_map(|s| std::iter::once(&s.path).chain(&s.worktrees))
                     .cloned()
                     .collect::<Vec<_>>()
@@ -695,10 +698,14 @@ impl Kyde {
     /// the default worktree, so selecting it starts the first agent tab.
     pub(crate) fn agents_add_space(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         if !self.agents.cfg.spaces.iter().any(|s| s.path == path) {
-            self.agents.cfg.spaces.push(Space {
-                path: path.clone(),
-                ..Space::default()
-            });
+            let at = self.agents.cfg.new_space_index();
+            self.agents.cfg.spaces.insert(
+                at,
+                Space {
+                    path: path.clone(),
+                    ..Space::default()
+                },
+            );
             self.agents_save(cx);
             self.agents_refresh_branches(cx);
         }
@@ -752,6 +759,47 @@ impl Kyde {
         let name = crate::agents::worktree_name(crate::agents::random_seed());
         let branch = format!("worktree/{name}");
         self.agents_create_worktree(space, name, WtSource::NewBranch(branch), None, cx);
+    }
+
+    /// A new Scratch row: a fresh folder under `~/.kyde/scratch` (made — and trusted in Claude
+    /// Code, so its agent doesn't open on the trust question — in the background), then
+    /// opened, which starts its agent.
+    pub(crate) fn agents_new_scratch(&mut self, cx: &mut Context<Self>) {
+        let root = kyde_config::agents::scratch_dir();
+        let path = root.join(crate::agents::worktree_name(crate::agents::random_seed()));
+        // Tests and screenshot runs never touch Claude Code's config.
+        let trust = !cfg!(test) && std::env::var_os("KYDE_SHOT").is_none();
+        cx.spawn(async move |this, cx| {
+            let dir = path.clone();
+            let made = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::create_dir_all(&dir)?;
+                    if trust {
+                        let root = root.canonicalize().unwrap_or(root);
+                        let path = kyde_config::claude_trust::config_path();
+                        // Untrusted, its agent just asks first — not worth a note.
+                        let _ = kyde_config::claude_trust::apply(&path, &root);
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(e) = made {
+                    this.agents.note = Some(format!("Couldn't make a scratch folder: {e}"));
+                    cx.notify();
+                    return;
+                }
+                this.agents.cfg.ensure_scratch();
+                if let Some(s) = this.agents.cfg.spaces.iter_mut().find(|s| s.scratch) {
+                    s.worktrees.push(path.clone());
+                }
+                this.agents_save(cx);
+                this.agents_select(path, cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Create worktree `name` for `space` (`~/.kyde/worktrees/<space>/<name>`) from `source`
@@ -1466,13 +1514,25 @@ impl Kyde {
         .detach();
     }
 
-    /// Drop a (removed) worktree from its space, closing its tabs.
+    /// Drop a (removed) worktree from its space, closing its tabs. A scratch row's folder
+    /// goes too, unless its agent left files there.
     fn agents_forget_worktree(&mut self, wt: &Path, cx: &mut Context<Self>) {
         let mut owner = None;
         for s in &mut self.agents.cfg.spaces {
-            if s.worktrees.iter().any(|w| w == wt) {
-                s.worktrees.retain(|w| w != wt);
-                owner = Some(s.path.clone());
+            if let Some(i) = s.worktrees.iter().position(|w| w == wt) {
+                s.worktrees.remove(i);
+                owner = if s.scratch {
+                    // Scratch's own folder isn't a row: its neighbour is shown instead.
+                    s.worktrees.get(i.saturating_sub(1)).cloned()
+                } else {
+                    Some(s.path.clone())
+                };
+                if s.scratch {
+                    let dir = wt.to_path_buf();
+                    cx.background_executor()
+                        .spawn(async move { crate::agents::remove_scratch_dir(&dir) })
+                        .detach();
+                }
             }
         }
         #[cfg(feature = "terminal")]
@@ -1486,6 +1546,19 @@ impl Kyde {
         }
         self.agents_save(cx);
         cx.notify();
+    }
+
+    /// A scratch row's ×: close its tabs — the row (and its folder, if empty) goes with the
+    /// last one.
+    fn agents_close_scratch(&mut self, wt: &Path, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        while self.agents_has_tabs(wt) {
+            self.agents_close_tab(wt, 0, cx);
+        }
+        // Closing its last tab forgot it already; a row without tabs goes now.
+        if self.agents.cfg.is_scratch(wt) {
+            self.agents_forget_worktree(wt, cx);
+        }
     }
 
     /// The window is Agents-only: the IDE chrome (rail, toolbars, status bar, bottom terminal,
@@ -1780,10 +1853,10 @@ impl Kyde {
                     }
                 }
             }
-            // Its latest Claude Code session, resumed — else, in a project's own checkout, a
-            // fresh agent. A linked worktree with neither waits for you to start one: one an
-            // agent made (`git worktree add`) gets that agent's tab once it edits there, and a
-            // blank agent beside it would read as the one at work.
+            // Its latest Claude Code session, resumed — else, in a project's own checkout (or a
+            // scratch row), a fresh agent. A linked worktree with neither waits for you to
+            // start one: one an agent made (`git worktree add`) gets that agent's tab once it
+            // edits there, and a blank agent beside it would read as the one at work.
             None => match self
                 .agents
                 .contexts
@@ -1791,7 +1864,9 @@ impl Kyde {
                 .and_then(|c| c.session.clone())
             {
                 Some(id) => self.agents_resume_tab(wt, id, cx),
-                None if self.agents.cfg.spaces.iter().any(|s| s.path == wt) => {
+                None if self.agents.cfg.spaces.iter().any(|s| s.path == wt)
+                    || self.agents.cfg.is_scratch(&wt) =>
+                {
                     self.agents_new_tab(wt, true, None, cx);
                 }
                 None => {}
@@ -1830,8 +1905,9 @@ impl Kyde {
     /// work already there when `blank` (a seeded tab's worktree was made for its task) — see
     /// `agents::task_brief`. `None` without the hook.
     fn agents_task_brief(&self, wt: &Path, blank: bool, cx: &gpui::App) -> Option<String> {
-        if !self.agents.cfg.claude_hooks {
-            return None; // the hook is what hands it over
+        // The hook is what hands it over; a scratch folder has no worktrees to move to.
+        if !self.agents.cfg.claude_hooks || self.agents.cfg.is_scratch(wt) {
+            return None;
         }
         let mode = self.agents.cfg.new_task;
         if !blank {
@@ -2119,10 +2195,13 @@ impl Kyde {
                 }
             })
             .detach();
-        match crate::term_panel::active_after_close(len, idx, g.active) {
-            Some(a) => g.active = a,
-            None => {
-                self.agents.tabs.remove(wt);
+        if let Some(a) = crate::term_panel::active_after_close(len, idx, g.active) {
+            g.active = a;
+        } else {
+            self.agents.tabs.remove(wt);
+            // A scratch row lives as long as its tabs.
+            if self.agents.cfg.is_scratch(wt) {
+                self.agents_forget_worktree(wt, cx);
             }
         }
         self.agents.focus_pending = true;
@@ -2911,17 +2990,18 @@ impl Kyde {
             );
         }
         rows.append(&mut tab_rows);
+        // Scratch rows aren't worktrees: they go with their last tab.
         if self
             .agents
             .cfg
             .spaces
             .iter()
-            .any(|s| !s.worktrees.is_empty())
+            .any(|s| !s.scratch && !s.worktrees.is_empty())
         {
             rows.push(section("Worktrees"));
         }
         for space in &self.agents.cfg.spaces {
-            if space.worktrees.is_empty() {
+            if space.scratch || space.worktrees.is_empty() {
                 continue;
             }
             rows.push(
@@ -3113,7 +3193,13 @@ impl Kyde {
     ) -> gpui::AnyElement {
         #[cfg(feature = "terminal")]
         self.agents_mark_seen();
-        if self.agents.cfg.spaces.is_empty() {
+        if self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .all(|s| s.scratch && s.worktrees.is_empty())
+        {
             return self.render_agents_welcome(ui, cx);
         }
         let divider = div()
@@ -3150,9 +3236,11 @@ impl Kyde {
                     .selected
                     .as_deref()
                     .and_then(|w| this.agents.cfg.space_of(w))
-                    .map(|s| s.path.clone());
-                if let Some(space) = space {
-                    this.agents_new_worktree(space, cx);
+                    .map(|s| (s.path.clone(), s.scratch));
+                match space {
+                    Some((_, true)) => this.agents_new_scratch(cx),
+                    Some((space, false)) => this.agents_new_worktree(space, cx),
+                    None => {}
                 }
             }))
             .on_action(cx.listener(|this, _: &crate::AgentRename, window, cx| {
@@ -3269,6 +3357,16 @@ impl Kyde {
                             MouseButton::Left,
                             cx.listener(|this, _e, _w, cx| this.agents_add_space_prompt(cx)),
                         ),
+                    )
+                    .child(
+                        btn_secondary("agents-new-scratch-welcome", "New Scratch Tab")
+                            .tooltip(ui::tip(
+                                "An agent in a throwaway folder, for anything ad hoc",
+                            ))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _e, _w, cx| this.agents_new_scratch(cx)),
+                            ),
                     ),
             )
             .into_any_element()
@@ -3551,8 +3649,11 @@ impl Kyde {
                 continue;
             }
             // The space's own folder (its default worktree) among its linked ones.
-            let n = 1 + space.worktrees.len() + pending.len();
             let ordered = space.rows();
+            let n = ordered.len() + pending.len();
+            if space.scratch && ordered.is_empty() {
+                rows.push(self.agents_scratch_hint(cx));
+            }
             let mut wts: Vec<(usize, &PathBuf)> = ordered.iter().enumerate().collect();
             if sort {
                 wts.sort_by_key(|(_, w)| std::cmp::Reverse(urgency(w)));
@@ -3566,7 +3667,7 @@ impl Kyde {
                     rows.push(drop_line());
                 }
             }
-            let shown = 1 + space.worktrees.len();
+            let shown = ordered.len();
             for (k, c) in pending.into_iter().enumerate() {
                 let selected = self.agents.selected.as_ref() == Some(&c.path);
                 let path = c.path.clone();
@@ -3595,6 +3696,40 @@ impl Kyde {
             }
         }
         rows
+    }
+
+    /// Scratch's only row while it has none: start one.
+    fn agents_scratch_hint(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        div()
+            .id("agents-scratch-new")
+            .relative()
+            .flex()
+            .flex_col()
+            .pl(px(WT_DOT_X))
+            .pr_2()
+            .py(px(ROW_PAD_Y))
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(t.line_number)
+            .hover(|d| d.bg(t.bg_mid).text_color(t.secondary_text))
+            .children(tree_connector(true))
+            .child(
+                title_line()
+                    .child(
+                        svg()
+                            .flex_none()
+                            .path("icons/plus.svg")
+                            .size(px(DOT))
+                            .text_color(t.line_number),
+                    )
+                    .child("New scratch tab"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| this.agents_new_scratch(cx)),
+            )
+            .into_any_element()
     }
 
     /// The Issues / Pull Requests tabs: the same project tree as Code, with each project's
@@ -5207,7 +5342,7 @@ impl Kyde {
     ) -> gpui::AnyElement {
         let t = theme::get();
         let is_git = self.agents.git_spaces.contains(&space.path);
-        let n = 1 + space.worktrees.len();
+        let n = space.rows().len();
         let grp = SharedString::from(format!("agents-space-{si}"));
         let renaming = self.agents.renaming == Some(RenameTarget::Space(space.path.clone()));
         let (toggle, new_wt, rm) = (space.path.clone(), space.path.clone(), space.path.clone());
@@ -5224,6 +5359,25 @@ impl Kyde {
             .flex_none()
             .opacity(0.0)
             .group_hover(grp.clone(), |s| s.opacity(1.0))
+            .when(space.scratch, |d| {
+                d.child(
+                    ui::icon_btn(("agents-new-scratch", si), 20.0)
+                        .tooltip(ui::tip("New scratch tab (in a folder of its own)"))
+                        .child(
+                            svg()
+                                .path("icons/plus.svg")
+                                .size(px(13.0))
+                                .text_color(t.secondary_text),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.agents_new_scratch(cx);
+                            }),
+                        ),
+                )
+            })
             .when(is_git, |d| {
                 d.child(
                     ui::icon_btn(("agents-new-wt", si), 20.0)
@@ -5243,36 +5397,42 @@ impl Kyde {
                         ),
                 )
             })
-            .child(
-                ui::icon_btn(("agents-rm-space", si), 20.0)
-                    .tooltip(ui::tip("Remove project (the folder stays on disk)"))
-                    .child(
-                        svg()
-                            .path("icons/x.svg")
-                            .size(px(13.0))
-                            .text_color(t.secondary_text),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.agents_remove_space(&rm, cx);
-                        }),
-                    ),
-            );
+            // Scratch is always there.
+            .when(!space.scratch, |d| {
+                d.child(
+                    ui::icon_btn(("agents-rm-space", si), 20.0)
+                        .tooltip(ui::tip("Remove project (the folder stays on disk)"))
+                        .child(
+                            svg()
+                                .path("icons/x.svg")
+                                .size(px(13.0))
+                                .text_color(t.secondary_text),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.agents_remove_space(&rm, cx);
+                            }),
+                        ),
+                )
+            });
         // Folded: how many items hide under it — its issues / PRs on those tabs, else its
         // worktrees with their rolled-up status dot.
-        let folded = space.collapsed.then(|| match items {
-            Some(k) => (None, k),
-            None => (
-                Some(AgentState::rollup(
-                    std::iter::once(&space.path)
-                        .chain(&space.worktrees)
-                        .map(|w| self.agents_state(w)),
-                )),
-                n,
-            ),
-        });
+        let folded = space
+            .collapsed
+            .then(|| match items {
+                Some(k) => (None, k),
+                None => (
+                    Some(AgentState::rollup(
+                        std::iter::once(&space.path)
+                            .chain(&space.worktrees)
+                            .map(|w| self.agents_state(w)),
+                    )),
+                    n,
+                ),
+            })
+            .filter(|(_, k)| *k > 0);
         div()
             .id(("agents-space", si))
             .group(grp)
@@ -5325,14 +5485,7 @@ impl Kyde {
                             .min_w_0()
                             .truncate()
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .child(
-                                self.agents
-                                    .cfg
-                                    .names
-                                    .get(&space.path)
-                                    .cloned()
-                                    .unwrap_or_else(|| leaf_name(&space.path)),
-                            )
+                            .child(self.agents_space_name(space))
                             .into_any_element()
                     })
                     .when_some(folded, |d, (state, n)| {
@@ -5384,6 +5537,7 @@ impl Kyde {
         let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
         // The space's own folder: titled by its branch, behind a branch glyph.
         let is_default = wt == space;
+        let scratch = self.agents.cfg.is_scratch(wt);
         let fields = self.agents.cfg.row;
         let title: SharedString = self.agents_wt_title(space, wt).into();
 
@@ -5479,7 +5633,11 @@ impl Kyde {
             .when(!is_default && hovered, |d| {
                 d.child(
                     ui::icon_btn(("agents-rm-wt", id), 18.0)
-                        .tooltip(ui::tip("Remove worktree…"))
+                        .tooltip(ui::tip(if scratch {
+                            "Close (ends its agent)"
+                        } else {
+                            "Remove worktree…"
+                        }))
                         .child(
                             svg()
                                 .path("icons/x.svg")
@@ -5490,7 +5648,12 @@ impl Kyde {
                             MouseButton::Left,
                             cx.listener(move |this, _e, _w, cx| {
                                 cx.stop_propagation();
-                                this.agents_confirm_remove(rm_space.clone(), rm_wt.clone(), cx);
+                                // Nothing to lose in scratch: no git, and saved files stay.
+                                if scratch {
+                                    this.agents_close_scratch(&rm_wt, cx);
+                                } else {
+                                    this.agents_confirm_remove(rm_space.clone(), rm_wt.clone(), cx);
+                                }
                             }),
                         ),
                 )
@@ -5699,8 +5862,10 @@ impl Kyde {
                     .text_color(t.line_number)
                     .child(SharedString::from(wt.display().to_string())),
             )
-            .child(label("GIT"))
-            .child(body(git_line))
+            // A scratch folder has no git.
+            .when(!self.agents.cfg.is_scratch(wt), |d| {
+                d.child(label("GIT")).child(body(git_line))
+            })
             .children(sync_line.map(body))
             .child(label("TASK"))
             .child(body(ctx.and_then(|c| c.first_prompt.clone()).map_or_else(
@@ -6161,6 +6326,7 @@ impl Kyde {
                 .cfg
                 .spaces
                 .iter()
+                .filter(|s| !s.scratch)
                 .flat_map(|s| s.worktrees.iter().map(move |w| (s.path.clone(), w.clone())))
                 .filter(|(space, wt)| self.agents_wt_cleanup(space, wt).1)
                 .map(|(_, wt)| wt)
@@ -6598,6 +6764,7 @@ impl Kyde {
     /// What `target` is called when you haven't named it.
     fn agents_auto_name(&self, target: &RenameTarget, cx: &App) -> String {
         match target {
+            RenameTarget::Space(p) if *p == kyde_config::agents::scratch_dir() => "Scratch".into(),
             RenameTarget::Space(p) => leaf_name(p),
             RenameTarget::Worktree(wt) => {
                 let space = self
@@ -6621,6 +6788,22 @@ impl Kyde {
                 String::new()
             }
         }
+    }
+
+    /// What a space is called: the name you gave it, else its folder's (Scratch's is fixed).
+    fn agents_space_name(&self, space: &Space) -> String {
+        self.agents
+            .cfg
+            .names
+            .get(&space.path)
+            .cloned()
+            .unwrap_or_else(|| {
+                if space.scratch {
+                    "Scratch".into()
+                } else {
+                    leaf_name(&space.path)
+                }
+            })
     }
 
     /// What a worktree row is called: the name you gave it, else its automatic title. A

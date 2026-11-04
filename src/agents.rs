@@ -981,6 +981,21 @@ pub(crate) fn exclude_claude_worktrees(wt: &std::path::Path) {
         .and_then(|mut f| std::io::Write::write_all(&mut f, format!("{sep}{LINE}\n").as_bytes()));
 }
 
+/// Delete a closed scratch row's folder — only when nothing's in it but Claude Code's own
+/// `.claude` settings: anything its agent saved there stays on disk. File IO: call it off the
+/// UI thread.
+pub(crate) fn remove_scratch_dir(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    if entries
+        .flatten()
+        .all(|e| e.file_name() == ".claude" && e.path().is_dir())
+    {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 /// A project's worktrees after git lists `listed`: the ones still there keep `current`'s
 /// order (you may have dragged them), new ones follow in git's order. Each appears once, so
 /// a row a race saved twice heals on the next refresh.
