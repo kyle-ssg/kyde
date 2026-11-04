@@ -642,6 +642,33 @@ impl TerminalView {
         self.backend.write(text.as_bytes().to_vec().into());
     }
 
+    /// Hand the program in it `text` as one bracketed paste (so its line breaks don't submit
+    /// early) and — when `enter` — press Enter a beat later (in the same read a TUI may take it
+    /// as part of the paste), reporting `Submitted`. Control characters other than line breaks
+    /// are dropped: an ESC could end the paste early.
+    pub fn submit_prompt(&mut self, text: &str, enter: bool, cx: &mut Context<Self>) {
+        let text: String = text
+            .chars()
+            .filter(|&c| c == '\n' || !c.is_control())
+            .collect();
+        self.scroll(Scroll::Bottom);
+        self.write(format!("\x1b[200~{text}\x1b[201~").into_bytes());
+        if enter {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                let _ = this.update(cx, |v, cx| {
+                    v.write(b"\r".to_vec());
+                    v.taken_suggestion = None;
+                    cx.emit(TerminalEvent::Submitted);
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
     /// Whether Claude Code in it has finished its turn, from Kyde's hook. A new turn forgets
     /// the suggestion accepted in the last one (however its prompt was sent).
     pub fn set_claude_done(&mut self, done: bool, cx: &mut Context<Self>) {
