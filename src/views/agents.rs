@@ -5116,7 +5116,7 @@ impl Kyde {
             && !self.agents.gh_unresolved.is_empty())
         .then(|| {
             let count = self.agents.gh_unresolved.len();
-            btn_secondary("agents-gh-action-all", "Action comments")
+            btn_primary("agents-gh-action-all", "Action comments")
                 .tooltip(ui::tip(format!(
                     "Hand the {count} unresolved review thread{} to an agent in this PR's \
                      worktree",
@@ -7797,7 +7797,7 @@ fn action_comment_btn(
     at: FeedbackAt,
     cx: &mut Context<Kyde>,
 ) -> gpui::Stateful<gpui::Div> {
-    btn_secondary(id, "Action comment")
+    btn_primary(id, "Action comment")
         .px_2()
         .py_0()
         .flex_none()
