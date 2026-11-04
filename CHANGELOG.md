@@ -45,6 +45,20 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.12.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.11.1...kyde-v2.12.0) (2026-11-04)
+
+
+### Features
+
+* **agents:** hand a PR's review comments to an agent from its pull request view ([#154](https://github.com/kyle-ssg/kyde/issues/154)) ([48b9d62](https://github.com/kyle-ssg/kyde/commit/48b9d62e503e52d4426c8657a477497c2e4c7236))
+* **agents:** Scratch — ad-hoc agent tabs, each in a throwaway folder of its own ([#157](https://github.com/kyle-ssg/kyde/issues/157)) ([47cb583](https://github.com/kyle-ssg/kyde/commit/47cb583c1e3b0cf78d64b2c583f3615bbc9fe7d7))
+
+
+### Bug Fixes
+
+* **agents:** a background agent's tab follows it, beside its live work ([#156](https://github.com/kyle-ssg/kyde/issues/156)) ([60aadb3](https://github.com/kyle-ssg/kyde/commit/60aadb3efc6f0fa5c0c94fb1c657cd55b3e2bd4c))
+* **terminal:** resizing the window no longer scrambles an agent's text ([#153](https://github.com/kyle-ssg/kyde/issues/153)) ([cf43c47](https://github.com/kyle-ssg/kyde/commit/cf43c47d61d78967d14c2f6a90e8568c770916f3))
+
 ## [2.11.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.11.0...kyde-v2.11.1) (2026-11-02)
 
 
