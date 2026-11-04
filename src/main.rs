@@ -4786,6 +4786,46 @@ mod gpui_smoke_tests {
         (handle, dir)
     }
 
+    /// A select's open list closes on a click outside it — and a click on the control while
+    /// open closes it, rather than the outside-click closing it and the control reopening it.
+    #[gpui::test]
+    fn select_closes_on_click_outside(cx: &mut TestAppContext) {
+        struct Host(ui::SelectState);
+        impl Render for Host {
+            fn render(&mut self, _w: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let select = ui::select(
+                    cx,
+                    "sel",
+                    120.0,
+                    &["A", "B"],
+                    Some(0),
+                    &self.0,
+                    |h: &mut Host| &mut h.0,
+                    |_h, _cx| {},
+                    |_h, _i, _cx| {},
+                );
+                div().size_full().child(
+                    div()
+                        .w(px(120.0))
+                        .debug_selector(|| "sel".into())
+                        .child(select),
+                )
+            }
+        }
+        let (host, vcx) = cx.add_window_view(|_w, cx| Host(ui::SelectState::new(cx)));
+        let open = |vcx: &mut gpui::VisualTestContext| host.read_with(vcx, |h, _| h.0.is_open());
+        let none = gpui::Modifiers::none();
+        let control = vcx.debug_bounds("sel").expect("the select is on screen");
+        vcx.simulate_click(control.center(), none);
+        assert!(open(vcx));
+        vcx.simulate_click(control.center(), none);
+        assert!(!open(vcx), "the control toggles it shut");
+        vcx.simulate_click(control.center(), none);
+        let outside = gpui::point(control.center().x, control.bottom() + gpui::px(200.0));
+        vcx.simulate_click(outside, none);
+        assert!(!open(vcx), "a click outside closes it");
+    }
+
     /// Renaming a FOLDER (issue #68) moves its whole subtree on disk and repoints every
     /// piece of Browse UI state that pointed under it — open tabs, the active/selected
     /// path, and the expanded set — to the new location.

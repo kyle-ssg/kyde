@@ -3,7 +3,8 @@
 //! the component flips that state itself through an accessor, so it stays stateless +
 //! reusable. The option list paints as a `deferred` absolute overlay anchored just below the
 //! control, so it floats **over** the content below instead of pushing it down. While open,
-//! the list holds focus: ↑/↓ move the highlight, ⏎ / space pick, ⎋ closes (issue #81).
+//! the list holds focus: ↑/↓ move the highlight, ⏎ / space pick, ⎋ or a click outside closes
+//! (issue #81).
 //! Kyde-agnostic — depends only on gpui + kyde-theme.
 use crate::nav::{
     ListConfirm, ListDismiss, ListDown, ListToggle, ListUp, NAV_LIST, NAV_POPUP, NAV_TREE,
@@ -98,7 +99,10 @@ pub fn select<V: 'static>(
             MouseButton::Left,
             cx.listener(move |this, _e, window, cx| {
                 let st = access(this);
-                st.open = !st.open;
+                // Toggle from the open state this frame drew, not the live one: a click here
+                // while open has already closed the list (the list's click-outside runs in the
+                // capture phase, first), and must not reopen it.
+                st.open = !open;
                 if st.open {
                     st.hl = selected;
                     // The list isn't in the tree until the next frame — focus now and again
@@ -169,6 +173,11 @@ pub fn select<V: 'static>(
             .on_action(cx.listener(move |this, _: &ListConfirm, _w, cx| confirm(this, cx)))
             .on_action(cx.listener(move |this, _: &ListToggle, _w, cx| toggle(this, cx)))
             .on_action(cx.listener(move |this, _: &ListDismiss, _w, cx| {
+                access(this).open = false;
+                cx.notify();
+            }))
+            // A click anywhere else closes it, like ⎋.
+            .on_mouse_down_out(cx.listener(move |this, _e, _w, cx| {
                 access(this).open = false;
                 cx.notify();
             }))
