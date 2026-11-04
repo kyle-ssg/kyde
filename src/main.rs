@@ -1420,6 +1420,17 @@ struct AgentsView {
     /// A read of the agents' hook state files is in flight.
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     hooks_polling: bool,
+    /// The background agent whose work is on screen (by id), picked in its worktree's strip
+    /// over that worktree's own tabs; `None` = the tab (or, with none, its first one).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    sub_shown: Option<String>,
+    /// Its work's scroll — kept at the newest step while you're there.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    sub_scroll: ScrollHandle,
+    /// Background agents that stopped: their work stays in the worktree each worked in until
+    /// you dismiss it (saved, so a relaunch keeps it too — `agents::done_path`).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    done_subs: Vec<agents::DoneSub>,
     /// The Claude Code hook was installed / removed per the setting this launch.
     hooks_synced: bool,
     /// The space / worktree / tab being renamed in place, and the name field.
@@ -1662,6 +1673,15 @@ struct AgentTab {
     /// The write file's mtime when last read, and the last file its agent wrote in this
     /// repository — where it's at work (`agents::repo_write`).
     wrote: Option<(std::time::SystemTime, Option<agents::WriteReport>)>,
+    /// Background agents (Claude Code subagents) its session started that are still at work —
+    /// shown in the worktree each works in — and their folder's mtime when last read.
+    subs: Vec<agents::SubAgent>,
+    subs_seen: Option<std::time::SystemTime>,
+    /// The helpers it has followed into their worktree (each once — `agents::helper_to_follow`).
+    followed: std::collections::HashSet<String>,
+    /// It's in a worktree a helper took it to while its session was in this one: it stays
+    /// there until its session moves or writes something itself.
+    held: Option<PathBuf>,
     /// Last output, for the working dot.
     last_output: Option<std::time::Instant>,
     /// Last output OR last time on screen — what the idle cleanup measures.
@@ -1686,6 +1706,26 @@ struct AgentTab {
     verdict: Option<String>,
     /// The last AI "is it done?" check: the output it had seen, and its answer.
     ai: Option<AiCheck>,
+}
+
+/// One tab's hook files, read off the UI thread where they changed (`agents_poll_hooks`).
+#[cfg(feature = "terminal")]
+struct HookRead {
+    /// The tab's worktree and id.
+    wt: PathBuf,
+    id: String,
+    /// Its state file, when that changed: its mtime and what it says.
+    state: Option<(std::time::SystemTime, Option<agents::HookReport>)>,
+    /// The other worktree its agent is at work in, if it is.
+    moved: Option<PathBuf>,
+    /// Its write file, when that changed: its mtime and the last write in the repository.
+    wrote: Option<(std::time::SystemTime, Option<agents::WriteReport>)>,
+    /// Its background agents, when they or its state changed — with their folder's mtime.
+    subs: Option<(Option<std::time::SystemTime>, agents::SubsRead)>,
+    /// The worktree its session is in (`agents::session_worktree`).
+    session: Option<PathBuf>,
+    /// A helper of its to follow into the worktree it works in (`agents::helper_to_follow`).
+    follow: Option<(String, PathBuf)>,
 }
 
 /// One AI "is this tab done?" answer, and what it was asked about.
@@ -1839,6 +1879,9 @@ impl AgentsView {
             last_sound: None,
 
             hooks_polling: false,
+            sub_shown: None,
+            sub_scroll: ScrollHandle::new(),
+            done_subs: Vec::new(),
             hooks_synced: false,
             renaming: None,
             rename_input: cx.new(|cx| CodeEditor::single_line(cx, "Name")),
@@ -4140,9 +4183,11 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // its worktrees, each running KYDE_SHOT_AGENT_CMD (screenshots.sh passes
         // scripts/shot-agent.sh; else a harmless git log) — the first worktree on screen and
         // working, the second waiting on you, the third working, the fourth done. Nothing is
-        // saved (shots share one config dir).
+        // saved (shots share one config dir). `agents-background` (manual, validation): the
+        // last worktree on screen, its tab's background agent at work there and another one
+        // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`).
         #[cfg(feature = "terminal")]
-        "agents" => {
+        "agents" | "agents-background" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
@@ -4208,6 +4253,65 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     }
                     _ => {}
                 }
+            }
+            if let (true, Some(home), Some(there)) =
+                (name == "agents-background", wts.first(), wts.last())
+            {
+                // Its tab followed it there (from the first worktree).
+                view.agents.tabs.remove(there);
+                view.agents_new_tab(there.clone(), true, None, cx);
+                if let Some(t) = view
+                    .agents
+                    .tabs
+                    .get_mut(there)
+                    .and_then(|g| g.tabs.first_mut())
+                {
+                    t.name = Some("Find bar polish".into());
+                    use crate::agents::Step;
+                    let tool = |name: &str, on: &str, note: Option<&str>, outcome| Step::Tool {
+                        name: name.into(),
+                        on: Some(on.into()),
+                        note: note.map(Into::into),
+                        outcome,
+                    };
+                    let failed =
+                        Err("error[E0425]: cannot find value `whole` in this scope".into());
+                    t.subs = vec![crate::agents::SubAgent {
+                        id: "a1".into(),
+                        worktree: Some(there.clone()),
+                        what: "Add a whole-word toggle to find".into(),
+                        steps: vec![
+                            Step::Said(
+                                "I'll add the toggle next to the case-sensitive one.".into(),
+                            ),
+                            tool("Grep", "match_case", None, Some(Ok(()))),
+                            tool("Read", "src/views/find.rs", None, Some(Ok(()))),
+                            tool("Edit", "src/views/find.rs", Some("+18 −2"), Some(Ok(()))),
+                            tool("Bash", "cargo check", None, Some(failed)),
+                            Step::Said("A typo in the field name — fixing it.".into()),
+                            tool("Edit", "src/views/find.rs", Some("+1 −1"), Some(Ok(()))),
+                            tool("Bash", "cargo test -p kyde find", None, None),
+                        ],
+                        at: std::time::SystemTime::now(),
+                    }];
+                    let finished = crate::agents::SubAgent {
+                        id: "a0".into(),
+                        worktree: Some(there.clone()),
+                        what: "Map the find bar's key handling".into(),
+                        steps: vec![Step::Said("The find bar's keys live in find.rs.".into())],
+                        at: std::time::SystemTime::now(),
+                    };
+                    view.agents.done_subs = vec![crate::agents::DoneSub {
+                        sub: finished,
+                        tab: t.id.clone(),
+                        home: home.clone(),
+                        from: "Find bar polish".into(),
+                        finished: true,
+                    }];
+                }
+                // KYDE_SHOT_SUB: which of them is on screen (`a0` = the finished one).
+                view.agents.sub_shown = std::env::var("KYDE_SHOT_SUB").ok();
+                view.agents_select(there.clone(), cx);
             }
             cx.notify();
         }
@@ -7432,18 +7536,21 @@ mod gpui_smoke_tests {
             session: Some("s1".into()),
             cwd: Some(cwd.clone()),
             transcript: Some(transcript.clone()),
+            background: None,
         };
         let to = agents::moved_worktree(&dir, Some(&report), None).expect("EnterWorktree'd");
         handle
             .update(cx, |k, _w, cx| {
-                let read = (
-                    dir.clone(),
-                    id.clone(),
-                    std::time::SystemTime::now(),
-                    Some(report),
-                    Some(to.clone()),
-                    None,
-                );
+                let read = HookRead {
+                    wt: dir.clone(),
+                    id: id.clone(),
+                    state: Some((std::time::SystemTime::now(), Some(report))),
+                    moved: Some(to.clone()),
+                    wrote: None,
+                    subs: None,
+                    session: Some(to.clone()),
+                    follow: None,
+                };
                 k.agents_apply_hooks(vec![read], cx);
                 assert_eq!(k.agents.tabs[&dir].tabs.len(), 1, "the first tab stays");
                 let moved = &k.agents.tabs[&to].tabs;
@@ -7538,6 +7645,162 @@ mod gpui_smoke_tests {
         handle
             .update(cx, |k, _w, _cx| assert!(tab_in(k, &wt), "stays"))
             .unwrap();
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
+    /// A background agent (subagent) of a tab's session at work in another worktree: the tab
+    /// follows it there and stays — its session reporting from home doesn't take it back —
+    /// beside the agent's live work; once it finishes, its work stays until dismissed, and the
+    /// session writing at home takes the tab back. Through the
+    /// real hook files and poll.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_follows_its_background_agent_and_keeps_its_work(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let id = handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents.tabs[&dir].tabs.last().unwrap().id.clone()
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let wt = dir.with_extension("bg");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "bg"],
+        );
+        let wt = wt.canonicalize().unwrap();
+        handle
+            .update(cx, |k, _w, _cx| {
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+            })
+            .unwrap();
+        // As the hook writes them: a temp file renamed into place.
+        let put = |path: std::path::PathBuf, json: serde_json::Value| {
+            std::thread::sleep(std::time::Duration::from_millis(20)); // a new mtime
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, json.to_string()).unwrap();
+            std::fs::rename(tmp, path).unwrap();
+        };
+        let transcript = agents::claude_project_dir(&dir).unwrap().join("s1.jsonl");
+        let sub = |event: &str| {
+            serde_json::json!({
+                "hook_event_name": event, "session_id": "s1", "cwd": dir,
+                "transcript_path": transcript, "agent_id": "a1", "agent_type": "general-purpose",
+                "tool_name": "Edit", "tool_input": { "file_path": wt.join("a.txt") },
+            })
+        };
+        // Its turn is over; its background agent edits the other worktree — its transcript
+        // where Claude Code keeps it, beside the session's.
+        let subs = agents::sub_dir(&id);
+        let call = serde_json::json!({ "type": "assistant", "message": { "content": [{
+            "type": "tool_use", "id": "t1", "name": "Edit",
+            "input": { "file_path": wt.join("a.txt"), "old_string": "", "new_string": "x" } }] } });
+        put(
+            transcript
+                .with_extension("")
+                .join("subagents/agent-a1.jsonl"),
+            call,
+        );
+        put(subs.join("a1"), sub("PostToolUse"));
+        put(subs.join("a1.write"), sub("PostToolUse"));
+        put(agents::write_path(&id), sub("PostToolUse")); // an older hook's routing
+        let stop = || {
+            serde_json::json!({
+                "hook_event_name": "Stop", "session_id": "s1", "cwd": dir,
+                "transcript_path": transcript, "background_tasks": [{ "id": "a1" }],
+            })
+        };
+        put(agents::state_path(&id), stop());
+        let poll = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, _w, cx| k.agents_poll_hooks(cx))
+                .unwrap();
+            cx.run_until_parked();
+        };
+        let tab_in = |k: &Kyde, w: &std::path::Path| {
+            k.agents
+                .tabs
+                .get(w)
+                .is_some_and(|g| g.tabs.iter().any(|t| t.id == id))
+        };
+        poll(cx);
+        // Its session reporting from home again doesn't take the tab back.
+        put(agents::state_path(&id), stop());
+        poll(cx);
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(
+                    tab_in(k, &wt) && !tab_in(k, &dir),
+                    "the tab follows its agent"
+                );
+                let tab = &k.agents.tabs[&wt].tabs[0];
+                assert_eq!(
+                    tab.shown,
+                    agents::AgentState::Working,
+                    "not done while it works on"
+                );
+                // Its work, from its transcript, paths relative to where it works.
+                let steps: Vec<_> = k.agents_subs_in(&wt).map(|(.., s)| &s.steps).collect();
+                let edit = agents::Step::Tool {
+                    name: "Edit".into(),
+                    on: Some("a.txt".into()),
+                    note: Some("+1 −0".into()),
+                    outcome: None,
+                };
+                assert_eq!(steps, [&vec![edit]]);
+                assert_eq!(k.agents_state(&wt), agents::AgentState::Working);
+            })
+            .unwrap();
+        // It finishes: no longer at work, but its work stays there (and on disk, for a
+        // relaunch) until you dismiss it.
+        put(subs.join("a1"), sub("SubagentStop"));
+        poll(cx);
+        let saved = || std::fs::read_to_string(agents::done_path()).unwrap_or_default();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(tab_in(k, &wt), "it stays where the work is");
+                assert!(k.agents.tabs[&wt].tabs[0].subs.is_empty());
+                let kept: Vec<_> = k
+                    .agents_done_in(&wt)
+                    .map(|d| (d.finished, d.sub.steps.len()))
+                    .collect();
+                assert_eq!(kept, [(true, 1)]);
+            })
+            .unwrap();
+        assert!(!subs.join("a1").exists(), "a finished agent's files go");
+        assert!(saved().contains("\"a1\""));
+        // Its session writing at home takes it back.
+        let own = serde_json::json!({
+            "hook_event_name": "PostToolUse", "session_id": "s1", "cwd": dir,
+            "transcript_path": transcript, "tool_name": "Edit",
+            "tool_input": { "file_path": dir.join("app.tsx") },
+        });
+        put(agents::write_path(&id), own.clone());
+        put(agents::state_path(&id), own);
+        poll(cx);
+        handle
+            .update(cx, |k, _w, _cx| {
+                // (as git has its path)
+                let home = dir.canonicalize().unwrap();
+                assert!(tab_in(k, &home) && !tab_in(k, &wt));
+            })
+            .unwrap();
+        handle
+            .update(cx, |k, _w, cx| k.agents_dismiss_sub("a1", cx))
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert_eq!(k.agents_done_in(&wt).count(), 0);
+            })
+            .unwrap();
+        assert!(!saved().contains("\"a1\""));
         let _ = std::fs::remove_dir_all(&wt);
     }
 

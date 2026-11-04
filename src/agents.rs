@@ -56,12 +56,23 @@ pub(crate) struct HookReport {
     pub session: Option<String>,
     pub cwd: Option<std::path::PathBuf>,
     pub transcript: Option<std::path::PathBuf>,
+    /// A `Stop`'s background agents still at work, by id (`None` when it doesn't say).
+    pub background: Option<Vec<String>>,
+}
+
+/// The subagent an event came from (Claude Code's `agent_id`) — `None` for the session's own.
+fn agent_of(v: &serde_json::Value) -> Option<&str> {
+    v.get("agent_id")?.as_str().filter(|a| !a.is_empty())
 }
 
 /// Read one Claude Code hook event (the JSON the hook wrote). `None` for events that don't
-/// change the tab's state (e.g. an auth notification) or unreadable text.
+/// change the tab's state (e.g. an auth notification, or a subagent's — see [`parse_sub`]) or
+/// unreadable text.
 pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if agent_of(&v).is_some() {
+        return None;
+    }
     let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
     let tool = s("tool_name");
     let hook = match s("hook_event_name") {
@@ -88,11 +99,19 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
     };
     let session = Some(s("session_id").to_string()).filter(|id| !id.is_empty());
     let path = |k: &str| Some(s(k)).filter(|p| !p.is_empty()).map(Into::into);
+    // Every entry named by id, or it's a shape this doesn't know: no list.
+    let background = v.get("background_tasks").and_then(|b| {
+        b.as_array()?
+            .iter()
+            .map(|t| Some(t.get("id")?.as_str()?.to_string()))
+            .collect()
+    });
     Some(HookReport {
         hook,
         session,
         cwd: path("cwd"),
         transcript: path("transcript_path"),
+        background,
     })
 }
 
@@ -104,10 +123,18 @@ pub(crate) struct WriteReport {
     pub transcript: Option<std::path::PathBuf>,
 }
 
-/// Read the write hook's event (the JSON it recorded). `None` for unreadable text or one
-/// without a file.
+/// Read the write hook's event (the JSON it recorded). `None` for unreadable text, one
+/// without a file, or a subagent's (it never moves the tab).
 pub(crate) fn parse_write(json: &str) -> Option<WriteReport> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    if agent_of(&v).is_some() {
+        return None;
+    }
+    write_of(&v)
+}
+
+/// The file a write event wrote, and where its session was then.
+fn write_of(v: &serde_json::Value) -> Option<WriteReport> {
     let s = |v: &serde_json::Value, k: &str| {
         Some(v.get(k)?.as_str()?)
             .filter(|p| !p.is_empty())
@@ -116,9 +143,440 @@ pub(crate) fn parse_write(json: &str) -> Option<WriteReport> {
     let input = v.get("tool_input")?;
     Some(WriteReport {
         file: s(input, "file_path").or_else(|| s(input, "notebook_path"))?,
-        cwd: s(&v, "cwd"),
-        transcript: s(&v, "transcript_path"),
+        cwd: s(v, "cwd"),
+        transcript: s(v, "transcript_path"),
     })
+}
+
+/// A background agent's latest event (a Claude Code subagent its tab's session started), from
+/// its own file in [`sub_dir`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SubReport {
+    /// Claude Code's `agent_id`.
+    pub id: String,
+    /// Its type ("Explore", "general-purpose", …).
+    pub kind: String,
+    /// It finished (`SubagentStop`).
+    pub ended: bool,
+    pub session: Option<String>,
+    /// Its own folder — a worktree of its own under the Agent tool's `isolation: "worktree"`.
+    pub cwd: Option<std::path::PathBuf>,
+    /// Its parent session's file.
+    pub transcript: Option<std::path::PathBuf>,
+    /// Its own transcript (`agent_transcript_path`, when the event carries it).
+    pub agent_transcript: Option<std::path::PathBuf>,
+}
+
+/// Read a subagent's hook event. `None` for unreadable text or the session's own event.
+pub(crate) fn parse_sub(json: &str) -> Option<SubReport> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let id = agent_of(&v)?.to_string();
+    let s = |v: &serde_json::Value, k: &str| {
+        Some(v.get(k)?.as_str()?.trim().to_string()).filter(|x| !x.is_empty())
+    };
+    Some(SubReport {
+        id,
+        kind: s(&v, "agent_type").unwrap_or_else(|| "agent".into()),
+        ended: s(&v, "hook_event_name").as_deref() == Some("SubagentStop"),
+        session: s(&v, "session_id"),
+        cwd: s(&v, "cwd").map(Into::into),
+        transcript: s(&v, "transcript_path").map(Into::into),
+        agent_transcript: s(&v, "agent_transcript_path").map(Into::into),
+    })
+}
+
+/// How long a background agent may go without reporting before it's taken for gone (its
+/// session crashed): a long build or test run reports nothing between its start and end.
+pub(crate) const SUB_STALE: Duration = Duration::from_mins(15);
+
+/// Whether background agent `sub` (its latest event written at `at`) is still at work: not
+/// once it stopped or after [`SUB_STALE`] of silence, nor once its session (`parent`: its
+/// latest report and when that was written), reporting after it, ended, moved on to another
+/// session, or stopped without listing it among the background agents still running.
+pub(crate) fn sub_live(
+    sub: &SubReport,
+    at: std::time::SystemTime,
+    parent: Option<(&HookReport, std::time::SystemTime)>,
+    now: std::time::SystemTime,
+) -> bool {
+    if sub.ended || now.duration_since(at).unwrap_or_default() >= SUB_STALE {
+        return false;
+    }
+    let Some((p, _)) = parent.filter(|(_, p_at)| *p_at > at) else {
+        return true;
+    };
+    let other_session = p.session.is_some() && sub.session.is_some() && p.session != sub.session;
+    let unlisted = p
+        .background
+        .as_ref()
+        .is_some_and(|ids| !ids.contains(&sub.id));
+    !(p.hook == Hook::Ended || other_session || unlisted)
+}
+
+/// The worktree `p` is in (the nearest folder holding `.git`), canonical. Stats a few folders.
+fn worktree_of(p: &std::path::Path) -> Option<std::path::PathBuf> {
+    let at = p.ancestors().find(|d| d.join(".git").exists())?;
+    Some(at.canonicalize().unwrap_or_else(|_| at.to_path_buf()))
+}
+
+/// How many of its latest tool calls' paths decide where a background agent works.
+const RECENT_PATHS: usize = 20;
+
+/// Where a background agent is at work: the worktree of the last file it wrote (`wrote`), else
+/// the one most of its recent tool calls named (`touched`, oldest first — one sent to work in
+/// another worktree reads and runs commands there by path), else that of its own folder (the
+/// Agent tool's `isolation: "worktree"` starts it in a worktree of its own). Never its parent
+/// tab's business: the tab stays where its own session works. Stats a few folders: call it
+/// off the UI thread.
+pub(crate) fn sub_worktree(
+    sub: &SubReport,
+    wrote: Option<&WriteReport>,
+    touched: &[std::path::PathBuf],
+) -> Option<std::path::PathBuf> {
+    if let Some(w) = wrote.and_then(|w| worktree_of(&w.file)) {
+        return Some(w);
+    }
+    // Newest first, so a tie goes to the latest.
+    let mut seen: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    for p in touched.iter().rev().take(RECENT_PATHS) {
+        let Some(w) = worktree_of(p) else { continue };
+        match seen.iter_mut().find(|(s, _)| *s == w) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((w, 1)),
+        }
+    }
+    let top = seen.iter().map(|(_, n)| *n).max();
+    seen.into_iter()
+        .find(|(_, n)| Some(*n) == top)
+        .map(|(w, _)| w)
+        .or_else(|| worktree_of(sub.cwd.as_deref()?))
+}
+
+/// One step of a background agent's work, as its transcript records it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Step {
+    /// Something it said.
+    Said(String),
+    /// A tool call: the tool, what it's on (a file, a command), a size note for an edit
+    /// ("+3 −1"), and how it went — `None` while it runs, `Some(Err(why))` when it failed.
+    Tool {
+        name: String,
+        on: Option<String>,
+        note: Option<String>,
+        outcome: Option<Result<(), String>>,
+    },
+}
+
+/// A background agent's work so far, read from its transcript.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Feed {
+    /// Its steps, oldest first (the latest [`FEED_STEPS`]).
+    pub steps: Vec<Step>,
+    /// The absolute paths its tool calls named, oldest first — where it works.
+    pub touched: Vec<std::path::PathBuf>,
+}
+
+/// Steps kept of a background agent's work — plenty to follow it, bounded however long it runs.
+const FEED_STEPS: usize = 300;
+/// Bytes read from the end of its transcript (tool results make lines long).
+const FEED_BYTES: u64 = 512 * 1024;
+
+/// Parse a subagent's transcript (JSONL; a line cut by the byte window just fails to parse
+/// and is skipped) into its [`Feed`]: what it said and each tool call, paired with its result.
+pub(crate) fn parse_feed(jsonl: &str) -> Feed {
+    use serde_json::Value;
+    let mut feed = Feed::default();
+    // Tool calls still waiting for their result: id → index in `steps`.
+    let mut open: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let text =
+        |v: &Value, k: &str| Some(v.get(k)?.as_str()?.trim().to_string()).filter(|x| !x.is_empty());
+    let lines = |x: &str| x.lines().count();
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(blocks) = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for b in blocks {
+            match b.get("type").and_then(Value::as_str) {
+                Some("text") if v.get("type").and_then(Value::as_str) == Some("assistant") => {
+                    if let Some(t) = text(b, "text") {
+                        feed.steps.push(Step::Said(t));
+                    }
+                }
+                Some("tool_use") => {
+                    let input = b.get("input").cloned().unwrap_or_default();
+                    let on = [
+                        "file_path",
+                        "notebook_path",
+                        "command",
+                        "pattern",
+                        "url",
+                        "query",
+                        "description",
+                        "path",
+                    ]
+                    .into_iter()
+                    .find_map(|k| text(&input, k))
+                    .map(|x| x.lines().next().unwrap_or_default().to_string());
+                    for k in ["file_path", "notebook_path", "path"] {
+                        if let Some(p) = text(&input, k).filter(|p| p.starts_with('/')) {
+                            feed.touched.push(p.into());
+                        }
+                    }
+                    // A command's absolute paths (`cd /…/wt && …`, `sed -n 1,9p /…/a.rs`).
+                    if let Some(cmd) = text(&input, "command") {
+                        let words =
+                            cmd.split(|c: char| c.is_whitespace() || "=;&|()'\"<>`".contains(c));
+                        let paths = words.filter(|w| w.len() > 1 && w.starts_with('/'));
+                        feed.touched.extend(paths.take(4).map(Into::into));
+                    }
+                    let edits = match input.get("edits").and_then(Value::as_array) {
+                        Some(edits) => edits.iter().collect(),
+                        None => vec![&input],
+                    };
+                    let count = |k: &str| {
+                        edits
+                            .iter()
+                            .filter_map(|e| e.get(k)?.as_str())
+                            .map(lines)
+                            .sum::<usize>()
+                    };
+                    let note = if input.get("new_string").is_some() || input.get("edits").is_some()
+                    {
+                        Some(format!("+{} −{}", count("new_string"), count("old_string")))
+                    } else {
+                        input
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .map(|c| format!("+{}", lines(c)))
+                    };
+                    if let Some(id) = text(b, "id") {
+                        open.insert(id, feed.steps.len());
+                    }
+                    feed.steps.push(Step::Tool {
+                        name: text(b, "name").unwrap_or_default(),
+                        on,
+                        note,
+                        outcome: None,
+                    });
+                }
+                Some("tool_result") => {
+                    let Some(i) = text(b, "tool_use_id").and_then(|id| open.remove(&id)) else {
+                        continue;
+                    };
+                    let failed = b.get("is_error").and_then(Value::as_bool) == Some(true);
+                    let result = match b.get("content") {
+                        Some(Value::String(s)) => s.clone(),
+                        Some(Value::Array(parts)) => parts
+                            .iter()
+                            .filter_map(|p| p.get("text")?.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => String::new(),
+                    };
+                    if let Some(Step::Tool { outcome, .. }) = feed.steps.get_mut(i) {
+                        *outcome = Some(if failed {
+                            let why = result.lines().map(str::trim).find(|l| !l.is_empty());
+                            Err(why.unwrap_or("failed").to_string())
+                        } else {
+                            Ok(())
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let extra = feed.steps.len().saturating_sub(FEED_STEPS);
+    feed.steps.drain(..extra);
+    feed
+}
+
+/// A background agent at work, as the Agents view shows it — in the worktree it works in.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SubAgent {
+    pub id: String,
+    /// Where it's at work (canonical), see [`sub_worktree`].
+    pub worktree: Option<std::path::PathBuf>,
+    /// What it was asked to do (the Agent call's description), else its type.
+    pub what: String,
+    /// Its work so far, paths shown relative to its worktree.
+    pub steps: Vec<Step>,
+    /// When it last reported or wrote to its transcript.
+    pub at: std::time::SystemTime,
+}
+
+/// The background agent (helper) tab `wt` follows, as `(its id, the worktree it works in)`:
+/// the newest one at work in another worktree of `wt`'s repository — each only once, so
+/// `followed` ones never pull it again. Runs git for a candidate only: call it off the UI
+/// thread.
+pub(crate) fn helper_to_follow(
+    wt: &std::path::Path,
+    live: &[SubAgent],
+    followed: &std::collections::HashSet<String>,
+) -> Option<(String, std::path::PathBuf)> {
+    let wt = wt.canonicalize().unwrap_or_else(|_| wt.to_path_buf());
+    let newest = live
+        .iter()
+        .filter(|s| !followed.contains(&s.id))
+        .filter(|s| s.worktree.as_ref().is_some_and(|w| *w != wt))
+        .max_by_key(|s| s.at)?;
+    let to = newest.worktree.clone()?;
+    let common = |p: &std::path::Path| kyde_git::Repo::discover(p).ok()?.common_dir().ok();
+    (common(&to)? == common(&wt)?).then(|| (newest.id.clone(), to))
+}
+
+/// Where tab `id`'s background agents report, a file each (`<agent_id>`, and
+/// `<agent_id>.write` for its writes — `kyde_config::claude_hooks::command`).
+pub(crate) fn sub_dir(id: &str) -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join(format!("{id}.state.sub"))
+}
+
+/// A subagent's own transcript: the event's `agent_transcript_path`, else where Claude Code
+/// keeps it, beside its session's (`<session>/subagents/agent-<id>.jsonl`).
+fn sub_transcript(sub: &SubReport) -> Option<std::path::PathBuf> {
+    sub.agent_transcript.clone().or_else(|| {
+        let session = sub.transcript.as_ref()?.with_extension("");
+        Some(
+            session
+                .join("subagents")
+                .join(format!("agent-{}.jsonl", sub.id)),
+        )
+    })
+}
+
+/// What a background agent was asked to do: the Agent call's `description`, from the metadata
+/// Claude Code keeps beside its transcript (`agent-<id>.meta.json` — undocumented, so
+/// best-effort).
+fn sub_description(transcript: &std::path::Path) -> Option<String> {
+    let meta = transcript.with_extension("meta.json");
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(meta).ok()?).ok()?;
+    let d = v.get("description")?.as_str()?.trim();
+    (!d.is_empty()).then(|| d.to_string())
+}
+
+/// A background agent that stopped, its work kept until you dismiss it — and across
+/// relaunches ([`done_path`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DoneSub {
+    pub sub: SubAgent,
+    /// The tab that started it: its id, its worktree, and its name then.
+    pub tab: String,
+    pub home: std::path::PathBuf,
+    pub from: String,
+    /// It finished its task (vs. its session ending or going quiet first).
+    pub finished: bool,
+}
+
+/// Where the stopped background agents' work is kept until dismissed.
+pub(crate) fn done_path() -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join("finished-background-agents.json")
+}
+
+/// What [`read_subs`] found: the background agents still at work, and the ones that stopped
+/// since — each with its final work, and whether it finished (vs. its session ending or going
+/// quiet first).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubsRead {
+    pub live: Vec<SubAgent>,
+    pub stopped: Vec<(SubAgent, bool)>,
+}
+
+/// Tab `id`'s background agents (see [`sub_live`]; `parent` = its session's latest report and
+/// when it was written), by id, each with its work so far. A stopped one's files are deleted
+/// once read — its work goes on in [`SubsRead::stopped`]. File IO: call it off the UI thread.
+pub(crate) fn read_subs(
+    id: &str,
+    parent: Option<(&HookReport, std::time::SystemTime)>,
+) -> SubsRead {
+    let Ok(dir) = std::fs::read_dir(sub_dir(id)) else {
+        return SubsRead::default();
+    };
+    let now = std::time::SystemTime::now();
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut read = SubsRead::default();
+    let found = dir
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        // `<agent_id>` (ids have no dot), not its `<agent_id>.write`.
+        .filter(|p| p.extension().is_none())
+        .filter_map(|path| {
+            let wpath = path.with_extension("write");
+            let sub = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| parse_sub(&s));
+            let transcript = sub.as_ref().and_then(sub_transcript);
+            // Thinking between tool calls reports nothing, but writes its transcript.
+            let at = mtime(&path).max(transcript.as_deref().and_then(mtime));
+            let (Some(sub), Some(at)) = (sub, at) else {
+                let _ = std::fs::remove_file(&path);
+                return None;
+            };
+            let live = sub_live(&sub, at, parent, now);
+            let wrote = std::fs::read_to_string(&wpath)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .and_then(|v| write_of(&v));
+            if !live {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(&wpath);
+            }
+            let feed = transcript
+                .as_deref()
+                .map(|t| parse_feed(&read_end(t, FEED_BYTES, true)))
+                .unwrap_or_default();
+            let worktree = sub_worktree(&sub, wrote.as_ref(), &feed.touched);
+            // Paths inside its worktree read relative to it.
+            let prefix = worktree.as_ref().map(|w| format!("{}/", w.display()));
+            let rel = |x: String| match &prefix {
+                Some(p) => x.replace(p.as_str(), ""),
+                None => x,
+            };
+            let steps = feed
+                .steps
+                .into_iter()
+                .map(|s| match s {
+                    Step::Tool {
+                        name,
+                        on,
+                        note,
+                        outcome,
+                    } => Step::Tool {
+                        name,
+                        on: on.map(rel),
+                        note,
+                        outcome,
+                    },
+                    said @ Step::Said(_) => said,
+                })
+                .collect();
+            let agent = SubAgent {
+                what: transcript
+                    .as_deref()
+                    .and_then(sub_description)
+                    .unwrap_or_else(|| sub.kind.clone()),
+                id: sub.id,
+                worktree,
+                steps,
+                at,
+            };
+            Some((agent, live, sub.ended))
+        });
+    for (agent, live, ended) in found {
+        if live {
+            read.live.push(agent);
+        } else {
+            read.stopped.push((agent, ended));
+        }
+    }
+    read.live.sort_by(|a, b| a.id.cmp(&b.id));
+    read
 }
 
 /// Everything a tab's dot is decided from.
@@ -131,17 +589,27 @@ pub(crate) struct Signals {
     pub last_input: Option<Instant>,
     /// It finished while you were elsewhere.
     pub unseen: bool,
+    /// Background agents it started are still at work.
+    pub background: bool,
 }
 
 impl AgentState {
     /// A tab's state: the agent's own report (hook) when there is one — sanity-checked
-    /// against its output, since an interrupt reports nothing — else the output clock.
+    /// against its output, since an interrupt reports nothing — else the output clock. A
+    /// finished turn with background agents still at work is working: the session picks up
+    /// again when they're done, and nothing waits on you.
     pub(crate) fn of_tab(s: &Signals, now: Instant) -> Self {
         let quiet = |d: Duration| {
             s.last_output
                 .is_none_or(|t| now.saturating_duration_since(t) >= d)
         };
-        let rest = if s.unseen { Self::Unseen } else { Self::Idle };
+        let rest = if s.background {
+            Self::Working
+        } else if s.unseen {
+            Self::Unseen
+        } else {
+            Self::Idle
+        };
         match &s.hook {
             None => Self::of(s.last_output, s.unseen, now),
             Some((Hook::Blocked(_), at)) => {
@@ -1088,6 +1556,7 @@ mod tests {
                 session: Some("s1".into()),
                 cwd: None,
                 transcript: None,
+                background: None,
             })
         );
         assert_eq!(
@@ -1119,6 +1588,10 @@ mod tests {
         // …typing after it, then quiet, means you did (even if Claude reported nothing).
         s.last_input = Some(at(61));
         assert_eq!(AgentState::of_tab(&s, at(70)), AgentState::Idle);
+        // Its turn is over but its background agents work on: not done yet.
+        s.hook = Some((Hook::Done, at(80)));
+        s.background = true;
+        assert_eq!(AgentState::of_tab(&s, at(90)), AgentState::Working);
     }
 
     #[test]
@@ -1267,6 +1740,206 @@ mod tests {
         let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap();
         assert_eq!(exclude.matches(".claude/worktrees/").count(), 1);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A subagent's events (as Claude Code 2.1 sends them) never drive its tab's state, and
+    /// say where it works: its own worktree under `isolation: "worktree"`, else where its
+    /// tool calls go — where its tab then follows it.
+    #[test]
+    fn a_background_agent_is_found_where_it_works() {
+        let base = std::env::temp_dir().join(format!("kyde-sub-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "i",
+        ]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent-a1",
+            "-b",
+            "a1",
+        ]);
+        let own = repo
+            .join(".claude/worktrees/agent-a1")
+            .canonicalize()
+            .unwrap();
+        let event = |cwd: &std::path::Path, rest: &str| {
+            format!(
+                r#"{{"session_id":"s1","transcript_path":"/t/s1.jsonl","cwd":{cwd:?},"agent_id":"a1","agent_type":"general-purpose",{rest}}}"#
+            )
+        };
+        let start = event(&own, r#""hook_event_name":"SubagentStart""#);
+        assert_eq!(parse_hook(&start), None, "not the tab's own event");
+        let sub = parse_sub(&start).unwrap();
+        assert_eq!((sub.id.as_str(), sub.ended), ("a1", false));
+        assert_eq!(sub_worktree(&sub, None, &[]), Some(own.clone()));
+        // Started in the checkout, it works in the other worktree by path — runs commands and
+        // reads there before it writes anything: it's at work there.
+        let checkout = parse_sub(&event(&repo, r#""hook_event_name":"PreToolUse""#)).unwrap();
+        let call = |id: &str, name: &str, input: serde_json::Value| {
+            serde_json::json!({ "type": "assistant", "message": { "content": [
+                { "type": "tool_use", "id": id, "name": name, "input": input }] } })
+            .to_string()
+        };
+        let calls = [
+            call(
+                "t1",
+                "Bash",
+                serde_json::json!({ "command": format!("cd {} && ls", own.display()) }),
+            ),
+            call(
+                "t2",
+                "Read",
+                serde_json::json!({ "file_path": own.join("a.rs") }),
+            ),
+        ];
+        let feed = parse_feed(&calls.join("\n"));
+        assert_eq!(
+            sub_worktree(&checkout, None, &feed.touched),
+            Some(own.clone())
+        );
+        // Its edit there says so too — and isn't the tab's.
+        let edit = event(
+            &repo,
+            &format!(
+                r#""hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{{"file_path":{:?}}}"#,
+                own.join("a.rs")
+            ),
+        );
+        assert_eq!(parse_write(&edit), None);
+        let sub = parse_sub(&edit).unwrap();
+        let wrote = write_of(&serde_json::from_str(&edit).unwrap());
+        assert_eq!(sub_worktree(&sub, wrote.as_ref(), &[]), Some(own.clone()));
+
+        // A second helper, in another worktree.
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            ".claude/worktrees/agent-a2",
+            "-b",
+            "a2",
+        ]);
+        let other = repo
+            .join(".claude/worktrees/agent-a2")
+            .canonicalize()
+            .unwrap();
+        let helper = |id: &str, w: &std::path::Path, s: u64| SubAgent {
+            id: id.into(),
+            worktree: Some(w.to_path_buf()),
+            what: String::new(),
+            steps: Vec::new(),
+            at: std::time::UNIX_EPOCH + Duration::from_secs(s),
+        };
+        // Its tab goes to the newest one's worktree — each helper once.
+        let two = [helper("a1", &own, 10), helper("a2", &other, 20)];
+        let to = |followed: &[&str]| {
+            let followed = followed.iter().map(ToString::to_string).collect();
+            helper_to_follow(&repo, &two, &followed)
+        };
+        assert_eq!(to(&[]), Some(("a2".to_string(), other.clone())));
+        assert_eq!(to(&["a2"]), Some(("a1".to_string(), own.clone())));
+        assert_eq!(to(&["a1", "a2"]), None);
+
+        // Live until it stops — or its session stops without listing it among those running.
+        let t = |s: u64| std::time::UNIX_EPOCH + Duration::from_secs(s);
+        let stop = |ids: &[&str]| HookReport {
+            hook: Hook::Done,
+            session: Some("s1".into()),
+            cwd: None,
+            transcript: None,
+            background: Some(ids.iter().map(ToString::to_string).collect()),
+        };
+        assert!(sub_live(&sub, t(10), Some((&stop(&["a1"]), t(20))), t(30)));
+        assert!(!sub_live(&sub, t(10), Some((&stop(&[]), t(20))), t(30)));
+        // A report after that Stop is news: it's at work again.
+        assert!(sub_live(&sub, t(25), Some((&stop(&[]), t(20))), t(30)));
+        assert!(!sub_live(&sub, t(10), None, t(10) + SUB_STALE));
+        let done = parse_sub(&event(&own, r#""hook_event_name":"SubagentStop""#)).unwrap();
+        assert!(!sub_live(&done, t(10), None, t(11)));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A background agent's transcript reads as its work: what it said, each tool call with
+    /// what it's on and how it went (an edit's size, a failure's reason, one still running).
+    #[test]
+    fn a_background_agents_transcript_reads_as_its_steps() {
+        let line = |role: &str, content: serde_json::Value| {
+            serde_json::json!({ "type": role, "message": { "content": content } }).to_string()
+        };
+        let call = |id: &str, name: &str, input: serde_json::Value| {
+            let block =
+                serde_json::json!([{ "type": "tool_use", "id": id, "name": name, "input": input }]);
+            line("assistant", block)
+        };
+        let result = |id: &str, err: bool, text: &str| {
+            let block = serde_json::json!([{ "type": "tool_result", "tool_use_id": id,
+                "is_error": err, "content": [{ "type": "text", "text": text }] }]);
+            line("user", block)
+        };
+        let jsonl = [
+            line("user", serde_json::json!("the task prompt")),
+            line(
+                "assistant",
+                serde_json::json!([{ "type": "thinking", "thinking": "hm" },
+                { "type": "text", "text": "Looking at the find bar." }]),
+            ),
+            call(
+                "e",
+                "Edit",
+                serde_json::json!({ "file_path": "/w/find.rs",
+                "old_string": "a", "new_string": "a\nb\nc" }),
+            ),
+            result("e", false, "ok"),
+            call(
+                "b",
+                "Bash",
+                serde_json::json!({ "command": "cargo test\n--quiet" }),
+            ),
+            result("b", true, "\nerror[E0425]: cannot find value\nmore"),
+            call("r", "Read", serde_json::json!({ "file_path": "/w/lib.rs" })),
+            r#"{"type":"assistant","message":{"content":[{"ty"#.to_string(), // cut off
+        ]
+        .join("\n");
+        let tool = |name: &str, on: &str, note: Option<&str>, outcome| Step::Tool {
+            name: name.into(),
+            on: Some(on.into()),
+            note: note.map(Into::into),
+            outcome,
+        };
+        let failed = Some(Err("error[E0425]: cannot find value".into()));
+        assert_eq!(
+            parse_feed(&jsonl).steps,
+            [
+                Step::Said("Looking at the find bar.".into()),
+                tool("Edit", "/w/find.rs", Some("+3 −1"), Some(Ok(()))),
+                tool("Bash", "cargo test", None, failed),
+                tool("Read", "/w/lib.rs", None, None),
+            ]
+        );
     }
 
     #[test]

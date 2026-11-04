@@ -29,6 +29,10 @@ const GIT_EVERY_TICKS: u32 = 5;
 /// How often running agent hosts are checked for ones to adopt (started by the CLI).
 #[cfg(all(feature = "terminal", unix))]
 const HOST_SCAN_TICKS: u32 = 3;
+/// How often a worktree showing the background agents at work in it repaints (their "last
+/// reported" ages are in minutes).
+#[cfg(feature = "terminal")]
+const SUB_AGE_TICKS: u32 = 15;
 /// How often the open Issues / Pull Requests lists re-fetch (PRs merge, issues close), and
 /// how old they may be when the tab is shown again.
 #[cfg(feature = "terminal")]
@@ -139,6 +143,8 @@ impl Kyde {
     /// at the last quit, then each other worktree's latest session. The selection and focus
     /// stay where they are.
     fn agents_restore_saved(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        self.agents_load_done(cx);
         // Agents still running in their hosts come back first (exactly as they are); only
         // worktrees left without one resume a session.
         #[cfg(all(feature = "terminal", unix))]
@@ -1689,13 +1695,14 @@ impl Kyde {
         }
     }
 
-    /// Rolled-up status of worktree `wt`'s tabs.
-    fn agents_state(&self, wt: &Path) -> AgentState {
+    /// Rolled-up status of worktree `wt`'s tabs — and of any background agent at work in it
+    /// (started from a tab anywhere).
+    pub(crate) fn agents_state(&self, wt: &Path) -> AgentState {
         #[cfg(feature = "terminal")]
         {
-            self.agents.tabs.get(wt).map_or(AgentState::None, |g| {
-                AgentState::rollup(g.tabs.iter().map(|t| t.shown))
-            })
+            let tabs = self.agents.tabs.get(wt).into_iter().flat_map(|g| &g.tabs);
+            let busy = self.agents_subs_in(wt).next().map(|_| AgentState::Working);
+            AgentState::rollup(tabs.map(|t| t.shown).chain(busy))
         }
         #[cfg(not(feature = "terminal"))]
         {
@@ -1708,6 +1715,44 @@ impl Kyde {
 // ── live tabs (PTY-backed — terminal feature) ────────────────────────────────────────────
 #[cfg(feature = "terminal")]
 impl Kyde {
+    /// The background agents at work in worktree `wt`, each with the worktree and tab that
+    /// started it.
+    pub(crate) fn agents_subs_in<'a>(
+        &'a self,
+        wt: &'a Path,
+    ) -> impl Iterator<Item = (&'a Path, &'a AgentTab, &'a crate::agents::SubAgent)> + 'a {
+        self.agents.tabs.iter().flat_map(move |(home, g)| {
+            g.tabs.iter().flat_map(move |t| {
+                t.subs
+                    .iter()
+                    .filter(move |s| s.worktree.as_deref() == Some(wt))
+                    .map(move |s| (home.as_path(), t, s))
+            })
+        })
+    }
+
+    /// The stopped background agents whose work in worktree `wt` is kept until dismissed.
+    pub(crate) fn agents_done_in<'a>(
+        &'a self,
+        wt: &'a Path,
+    ) -> impl Iterator<Item = &'a crate::agents::DoneSub> + 'a {
+        self.agents
+            .done_subs
+            .iter()
+            .filter(move |d| d.sub.worktree.as_deref() == Some(wt))
+    }
+
+    /// Show tab `id` of worktree `wt` (the tab a background agent came from).
+    fn agents_go_to_tab(&mut self, wt: PathBuf, id: &str, cx: &mut Context<Self>) {
+        self.agents.sub_shown = None;
+        if let Some(g) = self.agents.tabs.get_mut(&wt) {
+            if let Some(i) = g.tabs.iter().position(|t| t.id == id) {
+                g.active = i;
+            }
+        }
+        self.agents_select(wt, cx);
+    }
+
     /// Bring a worktree's tabs up as it's opened: the tabs it had at the last quit (agent tabs
     /// resume their Claude Code sessions), else one fresh agent tab. No-op if it has tabs.
     fn agents_open_tabs(&mut self, wt: PathBuf, cx: &mut Context<Self>) {
@@ -1780,6 +1825,9 @@ impl Kyde {
                     }
                 }
             }
+            // A background agent is at work here: no agent of its own beside it (two on the
+            // same files) — the empty state says whose it is.
+            None if self.agents_subs_in(&wt).next().is_some() => {}
             // Its latest Claude Code session, resumed — else, in a project's own checkout, a
             // fresh agent. A linked worktree with neither waits for you to start one: one an
             // agent made (`git worktree add`) gets that agent's tab once it edits there, and a
@@ -1849,13 +1897,18 @@ impl Kyde {
                 self.agents.main_sync.get(wt),
                 Some(crate::agents::MainSync::OffBranch(_))
             ),
-            others: self.agents.tabs.get(wt).map_or_else(Vec::new, |g| {
-                g.tabs
-                    .iter()
-                    .filter(|t| t.agent && t.used)
-                    .map(|t| t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx)))
-                    .collect()
-            }),
+            others: self
+                .agents
+                .tabs
+                .get(wt)
+                .into_iter()
+                .flat_map(|g| g.tabs.iter().filter(|t| t.agent && t.used))
+                .map(|t| t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx)))
+                .chain(self.agents_subs_in(wt).map(|(_, t, s)| {
+                    let from = t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx));
+                    format!("{} (a background agent of tab {from})", s.what)
+                }))
+                .collect(),
             last_task: self
                 .agents
                 .contexts
@@ -2075,6 +2128,10 @@ impl Kyde {
             hook: None,
             hook_seen: None,
             wrote: None,
+            subs: Vec::new(),
+            subs_seen: None,
+            followed: std::collections::HashSet::new(),
+            held: None,
             last_output: None,
             last_active: Instant::now(),
             unseen: false,
@@ -2104,19 +2161,37 @@ impl Kyde {
             return;
         }
         let gone = g.tabs.remove(idx);
-        // Closing the tab ends its agent (quitting Kyde doesn't).
+        // Closing the tab ends its agent (quitting Kyde doesn't) — and its background agents,
+        // whose work stays where they worked until dismissed.
         gone.view.read(cx).kill_host();
+        let from = gone
+            .name
+            .clone()
+            .unwrap_or_else(|| tab_auto_title(&gone, cx));
+        let stopped: Vec<_> = gone
+            .subs
+            .iter()
+            .map(|sub| crate::agents::DoneSub {
+                sub: sub.clone(),
+                tab: gone.id.clone(),
+                home: wt.to_path_buf(),
+                from: from.clone(),
+                finished: false,
+            })
+            .collect();
         self.agents.closed_hosts.insert(gone.id.clone());
         let files = [
             crate::agents::state_path(&gone.id),
             crate::agents::brief_path(&gone.id),
             crate::agents::write_path(&gone.id),
         ];
+        let subs = crate::agents::sub_dir(&gone.id);
         cx.background_executor()
             .spawn(async move {
                 for f in files {
                     let _ = std::fs::remove_file(f);
                 }
+                let _ = std::fs::remove_dir_all(subs);
             })
             .detach();
         match crate::term_panel::active_after_close(len, idx, g.active) {
@@ -2125,9 +2200,83 @@ impl Kyde {
                 self.agents.tabs.remove(wt);
             }
         }
+        self.agents_keep_done(stopped, &[], cx);
         self.agents.focus_pending = true;
         self.agents_save(cx);
         cx.notify();
+    }
+
+    /// Keep the work of background agents that `stopped` until it's dismissed (a newer read of
+    /// one replaces the older), and drop any that are `live` again; saves when that changed.
+    fn agents_keep_done(
+        &mut self,
+        stopped: Vec<crate::agents::DoneSub>,
+        live: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.agents.done_subs.len();
+        self.agents
+            .done_subs
+            .retain(|d| !live.contains(&d.sub.id) && !stopped.iter().any(|s| s.sub.id == d.sub.id));
+        if stopped.is_empty() && self.agents.done_subs.len() == before {
+            return;
+        }
+        self.agents.done_subs.extend(stopped);
+        self.agents_save_done(cx);
+        cx.notify();
+    }
+
+    /// Dismiss background agent `id`'s finished work.
+    pub(crate) fn agents_dismiss_sub(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.agents.done_subs.retain(|d| d.sub.id != id);
+        if self.agents.sub_shown.as_deref() == Some(id) {
+            self.agents.sub_shown = None;
+        }
+        self.agents_save_done(cx);
+        cx.notify();
+    }
+
+    /// Save the stopped background agents' work (`agents::done_path`), off the UI thread.
+    fn agents_save_done(&self, cx: &mut Context<Self>) {
+        let Ok(json) = serde_json::to_string(&self.agents.done_subs) else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                let path = crate::agents::done_path();
+                let tmp = path.with_extension("json.tmp");
+                let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+                if std::fs::write(&tmp, json).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            })
+            .detach();
+    }
+
+    /// Bring back the stopped background agents' work saved at the last quit, off the UI
+    /// thread (any already found this launch stay).
+    fn agents_load_done(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let saved: Vec<crate::agents::DoneSub> = cx
+                .background_executor()
+                .spawn(async {
+                    std::fs::read_to_string(crate::agents::done_path())
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default()
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let mut kept = saved;
+                let now = std::mem::take(&mut this.agents.done_subs);
+                kept.retain(|s| !now.iter().any(|d| d.sub.id == s.sub.id));
+                kept.extend(now);
+                this.agents.done_subs = kept;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The (worktree, tab index) on screen right now, if the Agents view is showing one.
@@ -2258,6 +2407,14 @@ impl Kyde {
         {
             self.agents_refresh_gh(gh_tab, true, cx);
         }
+        if self.mode == Mode::Agents
+            && ticks.is_multiple_of(SUB_AGE_TICKS)
+            && self.agents.selected.as_deref().is_some_and(|w| {
+                self.agents_subs_in(w).next().is_some() || self.agents_done_in(w).next().is_some()
+            })
+        {
+            cx.notify();
+        }
         if ticks.is_multiple_of(SWEEP_EVERY_TICKS) {
             self.agents_sweep(false, cx);
         }
@@ -2269,13 +2426,33 @@ impl Kyde {
     /// likely changed).
     fn agents_refresh_states(&mut self, cx: &mut Context<Self>) -> bool {
         let now = Instant::now();
+        let wall = std::time::SystemTime::now();
         let (mut changed, mut finished, mut done) = (false, false, false);
-        for tab in self
+        let mut quiet = Vec::new();
+        for (home, tab) in self
             .agents
             .tabs
-            .values_mut()
-            .flat_map(|g| g.tabs.iter_mut())
+            .iter_mut()
+            .flat_map(|(wt, g)| g.tabs.iter_mut().map(move |t| (wt, t)))
         {
+            // A background agent silent this long is gone (its files go with the next read);
+            // its work stays until you dismiss it.
+            let stale = |s: &crate::agents::SubAgent| {
+                wall.duration_since(s.at).unwrap_or_default() >= crate::agents::SUB_STALE
+            };
+            if tab.subs.iter().any(stale) {
+                let from = tab.name.clone().unwrap_or_else(|| tab_auto_title(tab, cx));
+                quiet.extend(tab.subs.extract_if(.., |s| stale(s)).map(|sub| {
+                    crate::agents::DoneSub {
+                        sub,
+                        tab: tab.id.clone(),
+                        home: home.clone(),
+                        from: from.clone(),
+                        finished: false,
+                    }
+                }));
+                changed = true;
+            }
             let state = AgentState::of_tab(&tab_signals(tab, cx), now);
             if state != tab.shown {
                 finished |= tab.shown == AgentState::Working;
@@ -2288,6 +2465,7 @@ impl Kyde {
         if done {
             self.agents_alert(alert::Sound::Done);
         }
+        self.agents_keep_done(quiet, &[], cx);
         if changed {
             cx.notify();
         }
@@ -2300,15 +2478,24 @@ impl Kyde {
             return;
         }
         type Wrote = Option<(std::time::SystemTime, Option<crate::agents::WriteReport>)>;
-        let probes: Vec<(PathBuf, String, Option<std::time::SystemTime>, Wrote)> = self
+        type Seen = Option<std::time::SystemTime>;
+        type Followed = std::collections::HashSet<String>;
+        let probes: Vec<(PathBuf, String, Seen, Wrote, Seen, Followed)> = self
             .agents
             .tabs
             .iter()
             .flat_map(|(wt, g)| {
-                g.tabs
-                    .iter()
-                    .filter(|t| t.agent)
-                    .map(|t| (wt.clone(), t.id.clone(), t.hook_seen, t.wrote.clone()))
+                g.tabs.iter().filter(|t| t.agent).map(|t| {
+                    let (id, followed) = (t.id.clone(), t.followed.clone());
+                    (
+                        wt.clone(),
+                        id,
+                        t.hook_seen,
+                        t.wrote.clone(),
+                        t.subs_seen,
+                        followed,
+                    )
+                })
             })
             .collect();
         if probes.is_empty() {
@@ -2321,16 +2508,45 @@ impl Kyde {
                 .spawn(async move {
                     probes
                         .into_iter()
-                        .filter_map(|(wt, id, seen, wrote)| {
+                        .filter_map(|(wt, id, seen, wrote, subs_seen, followed)| {
                             let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified());
                             let path = crate::agents::state_path(&id);
                             let m = mtime(&path).ok()?;
-                            if Some(m) == seen {
+                            // Its background agents report to their own files.
+                            let sm = mtime(&crate::agents::sub_dir(&id)).ok();
+                            if Some(m) == seen && sm == subs_seen {
                                 return None;
                             }
                             let report = std::fs::read_to_string(&path)
                                 .ok()
                                 .and_then(|s| crate::agents::parse_hook(&s));
+                            // Its session's latest report says which of them still work…
+                            let parent = report.as_ref().map(|r| (r, m));
+                            let subs = (sm.is_some() || subs_seen.is_some())
+                                .then(|| (sm, crate::agents::read_subs(&id, parent)));
+                            // …and whether the tab goes where one of them works.
+                            let follow = subs.as_ref().and_then(|(_, read)| {
+                                crate::agents::helper_to_follow(&wt, &read.live, &followed)
+                            });
+                            let session = report.as_ref().and_then(|r| {
+                                crate::agents::session_worktree(
+                                    r.cwd.as_deref()?,
+                                    r.transcript.as_deref()?,
+                                )
+                            });
+                            if Some(m) == seen {
+                                let (state, moved, wrote) = (None, None, None);
+                                return Some(HookRead {
+                                    wt,
+                                    id,
+                                    state,
+                                    moved,
+                                    wrote,
+                                    subs,
+                                    session,
+                                    follow,
+                                });
+                            }
                             // Its latest write, read again only when there's a new one.
                             let (write_seen, kept) = wrote.unzip();
                             let kept = kept.flatten();
@@ -2347,7 +2563,17 @@ impl Kyde {
                             let last = wrote.as_ref().map_or(kept, |(_, w)| w.clone());
                             let moved =
                                 crate::agents::moved_worktree(&wt, report.as_ref(), last.as_ref());
-                            Some((wt, id, m, report, moved, wrote))
+                            let state = Some((m, report));
+                            Some(HookRead {
+                                wt,
+                                id,
+                                state,
+                                moved,
+                                wrote,
+                                subs,
+                                session,
+                                follow,
+                            })
                         })
                         .collect()
                 })
@@ -2368,10 +2594,18 @@ impl Kyde {
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let active = self.agents.window_active;
         let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
-        for (wt, id, mtime, report, moved, wrote) in found {
-            if let Some(to) = moved {
-                moves.push((wt.clone(), id.clone(), to));
-            }
+        let (mut subs_changed, mut stopped, mut live) = (false, Vec::new(), Vec::new());
+        for HookRead {
+            wt,
+            id,
+            state,
+            moved,
+            wrote,
+            subs,
+            session,
+            follow,
+        } in found
+        {
             let Some(g) = self.agents.tabs.get_mut(&wt) else {
                 continue;
             };
@@ -2380,6 +2614,45 @@ impl Kyde {
             };
             let on_screen = visible.as_ref().is_some_and(|(w, vi)| *w == wt && *vi == i);
             let t = &mut g.tabs[i];
+            // A helper took it where it is: its session reporting from where it was then
+            // doesn't take it back — its session moving, or writing itself, does.
+            let mut moved = moved;
+            if let Some(held) = t.held.clone() {
+                if wrote.is_none() && session.as_ref().is_none_or(|s| *s == held) {
+                    moved = None;
+                } else {
+                    t.held = None;
+                }
+            }
+            // Its session's work is where its one helper works: the tab goes there too.
+            if let Some((helper, to)) = follow.filter(|_| moved.is_none()) {
+                if t.followed.insert(helper) {
+                    t.held.clone_from(&session);
+                    moved = Some(to);
+                }
+            }
+            if let Some(to) = moved {
+                moves.push((wt.clone(), id.clone(), to));
+            }
+            if let Some((seen, read)) = subs {
+                t.subs_seen = seen;
+                let from = t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx));
+                stopped.extend(read.stopped.into_iter().map(|(sub, finished)| {
+                    crate::agents::DoneSub {
+                        sub,
+                        tab: t.id.clone(),
+                        home: wt.clone(),
+                        from: from.clone(),
+                        finished,
+                    }
+                }));
+                live.extend(read.live.iter().map(|s| s.id.clone()));
+                subs_changed |= t.subs != read.live;
+                t.subs = read.live;
+            }
+            let Some((mtime, report)) = state else {
+                continue;
+            };
             t.hook_seen = Some(mtime);
             if wrote.is_some() {
                 t.wrote = wrote;
@@ -2396,7 +2669,8 @@ impl Kyde {
                 (_, Hook::Blocked(_)) if !looking => sound = Some(alert::Sound::NeedsInput),
                 (Some(Hook::Working | Hook::Blocked(_)), Hook::Done) => {
                     t.unseen |= !on_screen;
-                    if !looking && sound.is_none() {
+                    // Its background agents still work: it'll pick up again — not done yet.
+                    if !looking && sound.is_none() && t.subs.is_empty() {
                         sound = Some(alert::Sound::Done);
                     }
                 }
@@ -2422,6 +2696,15 @@ impl Kyde {
         }
         for (from, id, to) in moves {
             self.agents_move_tab(&from, &id, to, cx);
+        }
+        self.agents_keep_done(stopped, &live, cx);
+        if subs_changed {
+            // A feed you're at the bottom of follows its newest step.
+            let h = &self.agents.sub_scroll;
+            if -h.offset().y >= h.max_offset().height - px(24.0) {
+                h.scroll_to_bottom();
+            }
+            cx.notify();
         }
         self.agents_refresh_states(cx);
     }
@@ -2690,7 +2973,12 @@ impl Kyde {
                     ai_done: t.ai.as_ref().and_then(|a| a.done.clone()),
                 };
                 let was = t.verdict.is_some();
-                t.verdict = crate::agents::closable(&facts, rules, hours);
+                // Closing it would end its background agents too.
+                t.verdict = if t.subs.is_empty() {
+                    crate::agents::closable(&facts, rules, hours)
+                } else {
+                    None
+                };
                 if t.verdict.is_some() {
                     finished.push((wt.clone(), t.spawned_at));
                     if !was {
@@ -2742,7 +3030,8 @@ impl Kyde {
             .agents
             .tabs
             .get(wt)
-            .is_some_and(|g| g.tabs.iter().any(|t| t.shown == AgentState::Working));
+            .is_some_and(|g| g.tabs.iter().any(|t| t.shown == AgentState::Working))
+            || self.agents_subs_in(wt).next().is_some();
         // Removing it would take the worktree inside it along (git refuses; see
         // `kyde_git::GitError::NestedWorktree`).
         if let Some(inner) = self
@@ -3202,6 +3491,7 @@ impl Kyde {
                     last_output: tab.last_output,
                     last_input: None,
                     unseen: false,
+                    background: !tab.subs.is_empty(),
                 };
                 tab.shown = AgentState::of_tab(&signals, now);
             }
@@ -5743,9 +6033,24 @@ impl Kyde {
         let t = theme::get();
         let group = self.agents.tabs.get(wt);
         let renaming_tab = matches!(self.agents.renaming, Some(RenameTarget::Tab(..)));
+        // Background agents at work here (from a tab here or elsewhere): read-only tabs of
+        // their own, showing their work. Stopped ones keep it here until dismissed.
+        let subs: Vec<Bg> = self
+            .agents_subs_in(wt)
+            .map(|(_, t, s)| Bg::Live(t, s))
+            .chain(self.agents_done_in(wt).map(Bg::Done))
+            .collect();
+        let picked = self.agents.sub_shown.as_deref();
+        let has_tab = group.is_some_and(|g| !g.tabs.is_empty());
+        let shown_sub = subs
+            .iter()
+            .find(|b| Some(b.sub().id.as_str()) == picked)
+            .or_else(|| subs.first().filter(|_| !has_tab))
+            .copied();
         // One tab and the setting's on: no strip — just its tools, floating top-right.
         let bare = self.agents.cfg.hide_single_tab
             && group.is_some_and(|g| g.tabs.len() == 1)
+            && subs.is_empty()
             && !renaming_tab;
         let mut strip = div()
             .flex()
@@ -5769,7 +6074,7 @@ impl Kyde {
             group.map(|g| g.tabs.as_slice()).unwrap_or_default()
         };
         for (i, tab) in tabs.iter().enumerate() {
-            let active = group.is_some_and(|g| g.active == i);
+            let active = group.is_some_and(|g| g.active == i) && shown_sub.is_none();
             let title: SharedString = tab
                 .name
                 .clone()
@@ -5808,6 +6113,44 @@ impl Kyde {
                         self.agents_rename_field(cx)
                     } else {
                         div().min_w_0().truncate().child(title).into_any_element()
+                    })
+                    // Its background agents still at work, and where.
+                    .when(!tab.subs.is_empty(), |d| {
+                        let n = tab.subs.len();
+                        let mut at: Vec<String> = tab
+                            .subs
+                            .iter()
+                            .map(|s| match s.worktree.as_deref() {
+                                Some(w) if w == wt => "this worktree".to_string(),
+                                Some(w) => leaf_name(w),
+                                None => "outside git".to_string(),
+                            })
+                            .collect();
+                        at.sort();
+                        at.dedup();
+                        let tip = format!(
+                            "{n} background agent{} at work — in {}",
+                            if n == 1 { "" } else { "s" },
+                            at.join(", ")
+                        );
+                        d.child(
+                            div()
+                                .id(("agents-tab-subs", i))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .text_size(px(t.ui_font_size - 1.0))
+                                .text_color(t.line_number)
+                                .tooltip(ui::tip(tip))
+                                .child(
+                                    svg()
+                                        .path("icons/bot.svg")
+                                        .size(px(12.0))
+                                        .text_color(t.line_number),
+                                )
+                                .child(SharedString::from(n.to_string())),
+                        )
                     })
                     // The cleanup found it finished (closable from the Clean Up window).
                     .when_some(tab.verdict.clone(), |d, why| {
@@ -5854,7 +6197,105 @@ impl Kyde {
                             if let Some(g) = this.agents.tabs.get_mut(&sel) {
                                 g.active = i;
                             }
+                            this.agents.sub_shown = None;
                             this.agents.focus_pending = true;
+                            cx.notify();
+                        }),
+                    ),
+            );
+        }
+        for (k, &bg) in subs.iter().enumerate() {
+            let sub = bg.sub();
+            let active = shown_sub.is_some_and(|b| b.sub().id == sub.id);
+            let (id, gone) = (sub.id.clone(), sub.id.clone());
+            let grp = SharedString::from(format!("agents-sub-tab-{k}"));
+            let mark = match bg {
+                Bg::Live(..) => status_dot(AgentState::Working).into_any_element(),
+                Bg::Done(d) => div()
+                    .flex_none()
+                    .text_color(if d.finished {
+                        t.status_added
+                    } else {
+                        t.line_number
+                    })
+                    .child(if d.finished { "✓" } else { "–" })
+                    .into_any_element(),
+            };
+            let tip = format!(
+                "Background agent from “{}” ({}) — {}",
+                bg.from(cx),
+                bg.status(),
+                sub.what
+            );
+            strip = strip.child(
+                div()
+                    .id(("agents-sub-tab", k))
+                    .group(grp.clone())
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .max_w(px(260.0))
+                    .h(px(22.0))
+                    .pl_2()
+                    .pr(px(if matches!(bg, Bg::Done(_)) { 4.0 } else { 8.0 }))
+                    .rounded_md()
+                    .border_1()
+                    .cursor_pointer()
+                    .when(active, |d| {
+                        d.bg(t.bg_light).border_color(t.divider).text_color(t.text)
+                    })
+                    .when(!active, |d| {
+                        d.border_color(gpui::rgba(0x0000_0000))
+                            .text_color(t.line_number)
+                            .hover(|d| d.bg(t.bg_mid))
+                    })
+                    .tooltip(ui::tip(tip))
+                    .child(mark)
+                    .child(
+                        svg()
+                            .flex_none()
+                            .path("icons/bot.svg")
+                            .size(px(13.0))
+                            .text_color(t.line_number),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(SharedString::from(sub.what.clone())),
+                    )
+                    // Its work is kept until you dismiss it.
+                    .when(matches!(bg, Bg::Done(_)), |d| {
+                        d.child(
+                            div()
+                                .id(("agents-sub-tab-x", k))
+                                .flex_none()
+                                .w(px(18.0))
+                                .flex()
+                                .justify_center()
+                                .rounded_sm()
+                                .text_color(t.line_number)
+                                .hover(|d| d.bg(t.bg_light).text_color(t.text))
+                                .when(!active, |d| {
+                                    d.opacity(0.0).group_hover(grp, |s| s.opacity(1.0))
+                                })
+                                .tooltip(ui::tip("Dismiss"))
+                                .child("×")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _e, _w, cx| {
+                                        cx.stop_propagation();
+                                        this.agents_dismiss_sub(&gone, cx);
+                                    }),
+                                ),
+                        )
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.agents.sub_shown = Some(id.clone());
+                            this.agents.sub_scroll.scroll_to_bottom();
                             cx.notify();
                         }),
                     ),
@@ -5862,13 +6303,18 @@ impl Kyde {
         }
         let (new_agent, new_shell, open) = (wt.to_path_buf(), wt.to_path_buf(), wt.to_path_buf());
         let cmd = self.agents.cfg.default_command().to_string();
+        let new_tip = if subs.iter().any(|b| matches!(b, Bg::Live(..))) {
+            format!("Start `{cmd}` here anyway — a background agent is already at work in it")
+        } else {
+            format!(
+                "New tab running `{cmd}`  ({})",
+                pretty_key(&format!("{TERMINAL_MOD}-t"))
+            )
+        };
         strip = strip
             .child(
                 ui::icon_btn("agents-tab-new", 24.0)
-                    .tooltip(ui::tip(format!(
-                        "New tab running `{cmd}`  ({})",
-                        pretty_key(&format!("{TERMINAL_MOD}-t"))
-                    )))
+                    .tooltip(ui::tip(new_tip))
                     .child("+")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -5935,7 +6381,9 @@ impl Kyde {
                         }),
                     ),
             );
-        let body = if let Some(tab) = group.and_then(|g| g.tabs.get(g.active)) {
+        let body = if let Some(bg) = shown_sub {
+            self.render_agents_sub_feed(bg, ui, cx)
+        } else if let Some(tab) = group.and_then(|g| g.tabs.get(g.active)) {
             div()
                 .flex_1()
                 .min_h_0()
@@ -5976,6 +6424,207 @@ impl Kyde {
                     d.child(strip).child(body)
                 }
             })
+            .into_any_element()
+    }
+
+    /// A background agent's work, live: whose it is (and a way to that tab), then each step —
+    /// what it said, each tool call with what it's on and how it went — newest at the bottom.
+    #[cfg(feature = "terminal")]
+    fn render_agents_sub_feed(
+        &self,
+        bg: Bg,
+        ui: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        use crate::agents::Step;
+        let t = theme::get();
+        let sub = bg.sub();
+        let name = bg.from(cx);
+        let small = px(t.ui_font_size - 1.0);
+        let age = short_age(
+            std::time::SystemTime::now()
+                .duration_since(sub.at)
+                .unwrap_or_default(),
+        );
+        let ago = if age == "now" {
+            "just now".to_string()
+        } else {
+            format!("{age} ago")
+        };
+        let said = match bg {
+            Bg::Live(..) => format!("is working here · last step {ago}"),
+            Bg::Done(d) if d.finished => format!("finished here · {ago}"),
+            Bg::Done(_) => format!("stopped here (its session ended or went quiet) · {ago}"),
+        };
+        // Its tab, wherever it is now — if it's still open.
+        let go = self
+            .agents
+            .tabs
+            .iter()
+            .find(|(_, g)| g.tabs.iter().any(|t| t.id == bg.tab_id()))
+            .map(|(w, _)| (w.clone(), bg.tab_id().to_string()));
+        let done = matches!(bg, Bg::Done(_)).then(|| sub.id.clone());
+        let banner = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(t.divider)
+            .child(
+                svg()
+                    .flex_none()
+                    .path("icons/bot.svg")
+                    .size(px(18.0))
+                    .text_color(t.line_number),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .truncate()
+                            .text_color(t.text)
+                            .child(SharedString::from(sub.what.clone())),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(small)
+                            .text_color(t.line_number)
+                            .child(SharedString::from(format!(
+                                "A background agent from “{name}” {said}"
+                            ))),
+                    ),
+            )
+            .children(go.map(|(go_wt, go_id)| {
+                btn_secondary("agents-sub-go", format!("Go to “{name}”")).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        this.agents_go_to_tab(go_wt.clone(), &go_id, cx);
+                    }),
+                )
+            }))
+            .children(done.map(|id| {
+                btn_secondary("agents-sub-dismiss", "Dismiss").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        this.agents_dismiss_sub(&id, cx);
+                    }),
+                )
+            }));
+        let row = || div().flex().flex_row().items_start().gap_2().min_w_0();
+        let steps = sub.steps.iter().map(|step| match step {
+            Step::Said(text) => row()
+                .py_1()
+                .child(div().flex_none().w(px(14.0)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(t.text)
+                        .child(SharedString::from(clip(text, 600))),
+                )
+                .into_any_element(),
+            Step::Tool {
+                name,
+                on,
+                note,
+                outcome,
+            } => {
+                let (glyph, color) = match outcome {
+                    // Never answered: still running — or, once it stopped, cut short.
+                    None if matches!(bg, Bg::Done(_)) => ("–", t.line_number),
+                    None => ("•", t.primary),
+                    Some(Ok(())) => ("✓", t.line_number),
+                    Some(Err(_)) => ("✗", t.status_conflict),
+                };
+                let why = match outcome {
+                    Some(Err(why)) => Some(why.clone()),
+                    _ => None,
+                };
+                row()
+                    .child(div().flex_none().w(px(14.0)).text_color(color).child(glyph))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_2()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(t.secondary_text)
+                                            .child(SharedString::from(name.clone())),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_family(theme::font::family())
+                                            .text_color(t.line_number)
+                                            .child(SharedString::from(
+                                                on.clone().unwrap_or_default(),
+                                            )),
+                                    )
+                                    .children(note.clone().map(|n| {
+                                        div()
+                                            .flex_none()
+                                            .font_family(theme::font::family())
+                                            .text_color(t.line_number)
+                                            .child(SharedString::from(n))
+                                    })),
+                            )
+                            .children(why.map(|w| {
+                                div()
+                                    .truncate()
+                                    .text_size(small)
+                                    .font_family(theme::font::family())
+                                    .text_color(t.status_conflict)
+                                    .child(SharedString::from(w))
+                            })),
+                    )
+                    .into_any_element()
+            }
+        });
+        let feed = div()
+            .id("agents-sub-feed")
+            .track_scroll(&self.agents.sub_scroll)
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px_3()
+            .py_2()
+            .when(sub.steps.is_empty(), |d| {
+                d.child(div().text_color(t.line_number).child("Starting…"))
+            })
+            .children(steps.map(|r| div().flex_none().child(r)));
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .font_family(ui)
+            .bg(t.main_bg)
+            .rounded(px(theme::ISLAND_RADIUS))
+            .child(banner)
+            .child(feed)
             .into_any_element()
     }
 
@@ -6419,6 +7068,49 @@ fn ago(t: std::time::SystemTime) -> String {
     }
 }
 
+/// A background agent in a worktree's strip: at work (its tab, and it), or stopped with its
+/// work kept until dismissed.
+#[cfg(feature = "terminal")]
+#[derive(Clone, Copy)]
+enum Bg<'a> {
+    Live(&'a AgentTab, &'a crate::agents::SubAgent),
+    Done(&'a crate::agents::DoneSub),
+}
+
+#[cfg(feature = "terminal")]
+impl Bg<'_> {
+    fn sub(&self) -> &crate::agents::SubAgent {
+        match self {
+            Self::Live(_, s) => s,
+            Self::Done(d) => &d.sub,
+        }
+    }
+
+    /// The id of the tab that started it.
+    fn tab_id(&self) -> &str {
+        match self {
+            Self::Live(t, _) => &t.id,
+            Self::Done(d) => &d.tab,
+        }
+    }
+
+    /// That tab's name.
+    fn from(&self, cx: &gpui::App) -> String {
+        match self {
+            Self::Live(t, _) => t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx)),
+            Self::Done(d) => d.from.clone(),
+        }
+    }
+
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Live(..) => "working",
+            Self::Done(d) if d.finished => "finished",
+            Self::Done(_) => "stopped",
+        }
+    }
+}
+
 /// A tab's inputs to its status dot.
 #[cfg(feature = "terminal")]
 fn tab_signals(t: &AgentTab, cx: &gpui::App) -> crate::agents::Signals {
@@ -6427,6 +7119,7 @@ fn tab_signals(t: &AgentTab, cx: &gpui::App) -> crate::agents::Signals {
         last_output: t.last_output,
         last_input: t.view.read(cx).last_input,
         unseen: t.unseen,
+        background: !t.subs.is_empty(),
     }
 }
 
@@ -6440,19 +7133,6 @@ fn tab_auto_title(t: &AgentTab, cx: &gpui::App) -> String {
         view.title.clone()
     }
 }
-
-/// One changed hook state file: worktree, tab id, its mtime, what it says, the other
-/// worktree its agent is at work in (if it is), and its write file when that changed (mtime,
-/// the last write in the repository).
-#[cfg(feature = "terminal")]
-type HookRead = (
-    PathBuf,
-    String,
-    std::time::SystemTime,
-    Option<crate::agents::HookReport>,
-    Option<PathBuf>,
-    Option<(std::time::SystemTime, Option<crate::agents::WriteReport>)>,
-);
 
 // ── keyboard navigation, renaming, scrollback ────────────────────────────────────────────
 impl Kyde {
