@@ -40,6 +40,9 @@ const CONTEXT_EVERY_TICKS: u32 = 5 * 60;
 /// …and once this long after a tab's first prompt (time for Claude Code to title it).
 #[cfg(feature = "terminal")]
 const TITLE_AFTER_PROMPT: Duration = Duration::from_secs(15);
+/// An agent tab this new, with no hook report yet, counts as alive: its agent is starting.
+#[cfg(feature = "terminal")]
+const FEEDBACK_STARTING: Duration = Duration::from_mins(1);
 /// One tab for the cleanup's background probe: worktree, spawn time, shell pid, last output,
 /// and the AI question to ask about it (if any).
 #[cfg(feature = "terminal")]
@@ -846,12 +849,11 @@ impl Kyde {
                         this.agents_save(cx);
                         #[cfg(feature = "terminal")]
                         match start {
-                            Some(s) => this.agents_new_tab_as(
-                                path.clone(),
-                                Some(s.prompt),
-                                Some(s.tab),
-                                cx,
-                            ),
+                            Some(s) => {
+                                // Made to act on review comments: on every one queued by now.
+                                let prompt = this.agents_feedback_take(&path).unwrap_or(s.prompt);
+                                this.agents_new_tab_as(path.clone(), Some(prompt), Some(s.tab), cx);
+                            }
                             // Made for you to work in: its agent starts if you're still here.
                             None if this.agents.selected.as_ref() == Some(&path) => {
                                 this.agents_new_tab(path.clone(), true, None, cx);
@@ -871,6 +873,9 @@ impl Kyde {
                             "Couldn't create worktree: {}",
                             crate::agents::git_reason(&e)
                         ));
+                        // Review comments waiting for it have nowhere to go.
+                        #[cfg(feature = "terminal")]
+                        this.agents.feedback.remove(&path);
                         if this.agents.selected.as_ref() == Some(&path) {
                             this.agents.selected = Some(space.clone());
                         }
@@ -2368,6 +2373,16 @@ impl Kyde {
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let active = self.agents.window_active;
         let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
+        // Worktrees with review feedback waiting, whose agents just reported: each may be free
+        // for it now. (Only these — a busy check for every queue each tick would spawn `pgrep`s.)
+        let mut waiting: Vec<PathBuf> = found
+            .iter()
+            .map(|f| &f.0)
+            .filter(|wt| self.agents.feedback.contains_key(*wt))
+            .cloned()
+            .collect();
+        waiting.sort();
+        waiting.dedup();
         for (wt, id, mtime, report, moved, wrote) in found {
             if let Some(to) = moved {
                 moves.push((wt.clone(), id.clone(), to));
@@ -2424,6 +2439,9 @@ impl Kyde {
             self.agents_move_tab(&from, &id, to, cx);
         }
         self.agents_refresh_states(cx);
+        for wt in waiting {
+            self.agents_flush_feedback(&wt, false, cx);
+        }
     }
 
     /// The worktree tab `v` is in now.
@@ -2493,6 +2511,384 @@ impl Kyde {
         self.agents_save(cx);
         self.agents_refresh_branches(cx);
         cx.notify();
+    }
+
+    /// The PR the detail shows: (project, PR).
+    fn agents_selected_pr(&self) -> Option<(PathBuf, kyde_git::github::PullRequest)> {
+        let (space, tab, _) = self.agents.gh_selected.clone()?;
+        let Some(Ok(d)) = self
+            .agents
+            .gh_detail
+            .as_ref()
+            .filter(|_| tab == SideTab::Prs)
+        else {
+            return None;
+        };
+        let p = d.pr.as_ref()?;
+        let pr = kyde_git::github::PullRequest {
+            number: d.number,
+            title: d.title.clone(),
+            url: d.url.clone(),
+            author: d.author.clone(),
+            head: p.head.clone(),
+            draft: p.draft,
+        };
+        Some((space, pr))
+    }
+
+    /// Action comments: hand every unresolved review thread to the PR's agent.
+    fn agents_action_unresolved(&mut self, cx: &mut Context<Self>) {
+        let items = self.agents.gh_unresolved.clone();
+        if let Some((space, pr)) = self.agents_selected_pr() {
+            self.agents_action_feedback(space, pr, items, cx);
+        }
+    }
+
+    /// Action comment: hand the comment at `at` to the PR's agent.
+    fn agents_action_comment(&mut self, at: FeedbackAt, cx: &mut Context<Self>) {
+        let one = |author: &str, body: &str| crate::agents::Feedback {
+            path: None,
+            line: None,
+            context: Vec::new(),
+            comments: vec![(author.to_string(), body.to_string())],
+        };
+        let pair =
+            |c: &(String, String, Entity<mdview::MarkdownView>, String)| (c.0.clone(), c.3.clone());
+        let item = match at {
+            FeedbackAt::Card(ci) => match self.agents.gh_cards.get(ci) {
+                Some(GhCard::Comment {
+                    author,
+                    raw: Some(raw),
+                    ..
+                }) => Some(one(author, raw)),
+                Some(GhCard::Review { author, raw, .. }) if !raw.trim().is_empty() => {
+                    Some(one(author, raw))
+                }
+                _ => None,
+            },
+            // The thread's earlier comments go along, for what it's answering.
+            FeedbackAt::Thread(ci, ti, k) => match self.agents.gh_cards.get(ci) {
+                Some(GhCard::Review { threads, .. }) => threads.get(ti).and_then(|th| {
+                    Some(crate::agents::Feedback {
+                        path: Some(th.path.clone()),
+                        line: th.line,
+                        context: th.comments.get(..k)?.iter().map(pair).collect(),
+                        comments: vec![pair(th.comments.get(k)?)],
+                    })
+                }),
+                _ => None,
+            },
+        };
+        if let (Some(item), Some((space, pr))) = (item, self.agents_selected_pr()) {
+            self.agents_action_feedback(space, pr, vec![item], cx);
+        }
+    }
+
+    /// Hand `items` on `pr` to the agent in its worktree — one per PR (`pr-<n>`, or the one on
+    /// its branch), so every hand-off on it goes to the same place. They wait while that
+    /// worktree is set up or its agent is busy, and go to it once it finishes its turn; with
+    /// no agent alive there, a fresh one starts on them.
+    fn agents_action_feedback(
+        &mut self,
+        space: PathBuf,
+        pr: kyde_git::github::PullRequest,
+        items: Vec<crate::agents::Feedback>,
+        cx: &mut Context<Self>,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+        let wt = self.agents_pr_worktree(&space, &pr).unwrap_or_else(|| {
+            kyde_config::agents::worktree_path(&space, &format!("pr-{}", pr.number))
+        });
+        let fb = self
+            .agents
+            .feedback
+            .entry(wt.clone())
+            .or_insert_with(|| PrFeedback {
+                space,
+                pr: pr.clone(),
+                items: Vec::new(),
+                preparing: false,
+                checking: false,
+            });
+        fb.pr = pr;
+        // A second click on the same comment before it's gone over adds nothing.
+        for f in items {
+            if !fb.items.contains(&f) {
+                fb.items.push(f);
+            }
+        }
+        self.agents_flush_feedback(&wt, true, cx);
+    }
+
+    /// Hand worktree `wt`'s queued feedback over if its agent can take it now: one that's
+    /// finished its turn (or never been prompted) — checked off the UI thread to still be
+    /// running first — gets it typed in; with none alive a fresh one starts on it; a busy one
+    /// (working, or asking you something, where Enter would answer) is left until its next
+    /// hook report. `clicked`: from a button, so show the agent; else (a hook report) just say
+    /// so in the note.
+    fn agents_flush_feedback(&mut self, wt: &Path, clicked: bool, cx: &mut Context<Self>) {
+        use crate::agents::Hook;
+        let hooks = self.agents.cfg.claude_hooks;
+        let creating = self.agents.creating.iter().any(|c| c.path == wt);
+        let Some(fb) = self.agents.feedback.get(wt) else {
+            return;
+        };
+        let n = fb.pr.number;
+        if fb.items.is_empty() {
+            self.agents.feedback.remove(wt);
+            return;
+        }
+        if fb.preparing || fb.checking || creating {
+            if creating && !fb.preparing && !hooks {
+                // A review is setting it up, and without the hook nothing tells when its agent
+                // is free.
+                self.agents.feedback.remove(wt);
+                self.agents.note = Some(format!(
+                    "#{n}'s worktree is still being set up — try again once it's ready"
+                ));
+            } else if clicked {
+                self.agents.note = Some(format!(
+                    "Queued for #{n} — its agent gets it as soon as it's ready"
+                ));
+            }
+            cx.notify();
+            return;
+        }
+        // Without the hook there's no telling whether an agent is free: a fresh one each time.
+        if !hooks {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        let tabs = self.agents.tabs.get(wt).map_or(&[][..], |g| &g.tabs[..]);
+        let starting = |t: &AgentTab| {
+            t.hook.is_none() && t.spawned_at.elapsed().is_ok_and(|d| d < FEEDBACK_STARTING)
+        };
+        let live: Vec<&AgentTab> = tabs
+            .iter()
+            .filter(|t| {
+                t.agent && (t.hook.as_ref().is_some_and(|(h, _)| *h != Hook::Ended) || starting(t))
+            })
+            .collect();
+        if live.is_empty() {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        // A seeded tab reports Ready just before its first prompt lands — only a never-prompted
+        // one is really waiting.
+        let free = live.iter().rev().find(|t| match &t.hook {
+            Some((Hook::Done, _)) => true,
+            Some((Hook::Ready, _)) => !t.prompted,
+            _ => false,
+        });
+        let Some(tab) = free else {
+            if clicked {
+                self.agents.note = Some(format!(
+                    "Queued for #{n} — its agent gets it once it finishes its turn"
+                ));
+                cx.notify();
+            }
+            return;
+        };
+        // Its shell still runs the agent (else zsh would run the pasted lines), and its state
+        // file still says it's free — both read off the UI thread.
+        let (id, pid) = (tab.id.clone(), tab.view.read(cx).shell_pid());
+        if let Some(fb) = self.agents.feedback.get_mut(wt) {
+            fb.checking = true;
+        }
+        let wt = wt.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let state = crate::agents::state_path(&id);
+            let (alive, hook) = cx
+                .background_executor()
+                .spawn(async move {
+                    let alive = pid != 0 && !crate::agents::shell_is_idle(pid);
+                    let hook = std::fs::read_to_string(state)
+                        .ok()
+                        .and_then(|s| crate::agents::parse_hook(&s))
+                        .map(|r| r.hook);
+                    (alive, hook)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.agents_feedback_checked(&wt, &id, alive, hook, clicked, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The check on tab `id` (in `wt`) is back: type the feedback in if its agent is still
+    /// running and free; start a fresh one if it has quit.
+    fn agents_feedback_checked(
+        &mut self,
+        wt: &Path,
+        id: &str,
+        alive: bool,
+        hook: Option<crate::agents::Hook>,
+        clicked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::agents::Hook;
+        let Some(fb) = self.agents.feedback.get_mut(wt) else {
+            return;
+        };
+        fb.checking = false;
+        let n = fb.pr.number;
+        let Some((i, tab)) = self
+            .agents
+            .tabs
+            .get(wt)
+            .and_then(|g| g.tabs.iter().enumerate().find(|(_, t)| t.id == id))
+        else {
+            // Closed or moved meanwhile: decide again.
+            self.agents_flush_feedback(wt, clicked, cx);
+            return;
+        };
+        if !alive || hook == Some(Hook::Ended) {
+            self.agents_feedback_fresh(wt, clicked, cx);
+            return;
+        }
+        let free = match hook {
+            Some(Hook::Done) => true,
+            Some(Hook::Ready) => !tab.prompted,
+            _ => false,
+        };
+        if free {
+            self.agents_feedback_submit(wt, i, clicked, cx);
+        } else if clicked {
+            // Its next hook report tries again.
+            self.agents.note = Some(format!(
+                "Queued for #{n} — its agent gets it once it finishes its turn"
+            ));
+            cx.notify();
+        }
+    }
+
+    /// Type `wt`'s queued feedback into its tab `i` as one prompt, and send it — unless you've
+    /// typed there since its agent last reported (your unsent text may be in its box: the
+    /// prompt joins it, for you to send).
+    fn agents_feedback_submit(
+        &mut self,
+        wt: &Path,
+        i: usize,
+        clicked: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(t) = self.agents.tabs.get_mut(wt).and_then(|g| g.tabs.get_mut(i)) else {
+            return;
+        };
+        let Some(fb) = self.agents.feedback.remove(wt) else {
+            return;
+        };
+        let prompt = crate::agents::feedback_prompt(&fb.pr, &fb.items);
+        let at = t.hook.as_ref().map(|(_, at)| *at);
+        let enter = t
+            .view
+            .read(cx)
+            .last_input
+            .is_none_or(|typed| at.is_some_and(|at| typed <= at));
+        t.view
+            .update(cx, |v, cx| v.submit_prompt(&prompt, enter, cx));
+        if enter {
+            // Working at once, so a second click before its hook says so doesn't type it twice.
+            t.hook = Some((crate::agents::Hook::Working, Instant::now()));
+            t.view.update(cx, |v, cx| v.set_claude_done(false, cx));
+        }
+        let (n, count) = (fb.pr.number, fb.items.len());
+        let what = if count == 1 {
+            "a review comment".to_string()
+        } else {
+            format!("{count} review comments")
+        };
+        self.agents.note = Some(if enter {
+            format!("Handed {what} on #{n} to its agent")
+        } else {
+            format!("Typed {what} on #{n} into its agent — press Enter there to send")
+        });
+        if clicked {
+            self.agents.side_tab = SideTab::Code;
+            if let Some(g) = self.agents.tabs.get_mut(wt) {
+                g.active = i;
+            }
+            self.agents_select(wt.to_path_buf(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Start a fresh agent on `wt`'s queued feedback, named "Comments #n": in a new `pr-<n>`
+    /// worktree when there's none (as Review makes it), else after bringing the worktree up to
+    /// the PR's latest commits (as Re-review does) — unless an agent there might still be at
+    /// work. It starts on everything queued by then.
+    fn agents_feedback_fresh(&mut self, wt: &Path, clicked: bool, cx: &mut Context<Self>) {
+        let existing = match self.agents.feedback.get(wt) {
+            Some(fb) => self.agents_pr_worktree(&fb.space, &fb.pr).as_deref() == Some(wt),
+            None => return,
+        };
+        // With the hook on, no agent here is alive (see `agents_flush_feedback`).
+        let update = self.agents.cfg.claude_hooks || !self.agents_has_tabs(wt);
+        let Some(fb) = self.agents.feedback.get_mut(wt) else {
+            return;
+        };
+        fb.preparing = true;
+        let (space, pr) = (fb.space.clone(), fb.pr.clone());
+        let n = pr.number;
+        let tab = format!("Comments #{n}");
+        if !existing {
+            // The prompt is made again once the worktree is ready (`agents_feedback_take`).
+            let start = WtStart {
+                prompt: crate::agents::feedback_prompt(&pr, &fb.items),
+                tab,
+                origin: format!("Comments on #{n}: {}", pr.title),
+                doing: format!("Setting up #{n} to act on its review comments"),
+            };
+            self.agents_create_worktree(space, format!("pr-{n}"), WtSource::Pr(n), Some(start), cx);
+            return;
+        }
+        if clicked {
+            self.agents.side_tab = SideTab::Code;
+        }
+        self.agents.note = Some(format!("Updating #{n} for its review comments…"));
+        cx.notify();
+        let wt = wt.to_path_buf();
+        cx.spawn(async move |this, cx| {
+            let dir = wt.clone();
+            let res = cx
+                .background_executor()
+                .spawn(async move { update.then(|| kyde_git::github::pr_checkout(&dir, n)) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.agents.note = Some(match res {
+                    Some(Err(e)) => format!(
+                        "Couldn't update #{n}: {} — acting on what's there",
+                        crate::agents::git_reason(&e.to_string())
+                    ),
+                    _ => format!("Started an agent on #{n}'s review comments"),
+                });
+                let Some(prompt) = this.agents_feedback_take(&wt) else {
+                    return;
+                };
+                // New tab first: selecting first would resume an old session in an empty strip.
+                this.agents_new_tab_as(wt.clone(), Some(prompt), Some(tab), cx);
+                if clicked {
+                    this.agents_select(wt, cx);
+                }
+                this.agents_refresh_branches(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The first prompt for the fresh agent set up for `wt`'s feedback: everything queued by
+    /// now, handed over with it. `None` if no agent was being set up for it.
+    fn agents_feedback_take(&mut self, wt: &Path) -> Option<String> {
+        if !self.agents.feedback.get(wt).is_some_and(|f| f.preparing) {
+            return None;
+        }
+        let fb = self.agents.feedback.remove(wt)?;
+        Some(crate::agents::feedback_prompt(&fb.pr, &fb.items))
     }
 
     /// An agent finished or needs you: a sound (one per burst), and a Dock bounce (Linux: a
@@ -3886,6 +4282,7 @@ impl Kyde {
         self.agents.gh_selected = Some(key.clone());
         self.agents.gh_detail = None;
         self.agents.gh_cards.clear();
+        self.agents.gh_unresolved.clear();
         self.agents.gh_diff = None;
         self.agents.gh_reply_to = None;
         self.agents.merge_armed = false;
@@ -3993,9 +4390,25 @@ impl Kyde {
                     at: at.clone(),
                     verb: "commented",
                     body: md(body, cx),
+                    raw: Some(body.clone()),
                 },
             ));
         }
+        // What Action comments hands over: every thread still open on GitHub.
+        self.agents.gh_unresolved = threads
+            .iter()
+            .filter(|t| t.resolved == Some(false))
+            .map(|t| crate::agents::Feedback {
+                path: Some(t.path.clone()),
+                line: t.line,
+                context: Vec::new(),
+                comments: t
+                    .comments
+                    .iter()
+                    .map(|(a, _, b)| (a.clone(), b.clone()))
+                    .collect(),
+            })
+            .collect();
         let mut threads: Vec<Option<kyde_git::github::ReviewThread>> =
             threads.into_iter().map(Some).collect();
         let thread_view = |t: kyde_git::github::ReviewThread, cx: &mut Context<Self>| {
@@ -4007,13 +4420,15 @@ impl Kyde {
             GhThread {
                 root: t.root,
                 path: t.path,
+                line: t.line,
+                resolved: t.resolved,
                 hunk: rows[tail..].to_vec(),
                 comments: t
                     .comments
                     .into_iter()
                     .map(|(a, at, b)| {
                         let view = md(&b, cx);
-                        (a, at, view)
+                        (a, at, view, b)
                     })
                     .collect(),
             }
@@ -4037,6 +4452,7 @@ impl Kyde {
                     at: r.at,
                     state: r.state,
                     body,
+                    raw: r.body,
                     threads: mine,
                 },
             ));
@@ -4056,6 +4472,7 @@ impl Kyde {
                     at,
                     state: "COMMENTED".into(),
                     body: None,
+                    raw: String::new(),
                     threads: vec![view],
                 },
             ));
@@ -4084,6 +4501,7 @@ impl Kyde {
                 "opened"
             },
             body: self.agents.gh_body.clone(),
+            raw: None,
         }];
         cards.extend(timeline.into_iter().map(|(_, c)| c));
         cards
@@ -4266,6 +4684,27 @@ impl Kyde {
                     .into_any_element()
                 })
         };
+        // Every unresolved review thread, to the agent in the PR's worktree.
+        #[cfg(feature = "terminal")]
+        let action_all = (is_pr
+            && d.state.eq_ignore_ascii_case("open")
+            && !self.agents.gh_unresolved.is_empty())
+        .then(|| {
+            let count = self.agents.gh_unresolved.len();
+            btn_secondary("agents-gh-action-all", "Action comments")
+                .tooltip(ui::tip(format!(
+                    "Hand the {count} unresolved review thread{} to an agent in this PR's \
+                     worktree",
+                    if count == 1 { "" } else { "s" }
+                )))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| this.agents_action_unresolved(cx)),
+                )
+                .into_any_element()
+        });
+        #[cfg(not(feature = "terminal"))]
+        let action_all: Option<gpui::AnyElement> = None;
         let url = d.url.clone();
         let state = d.state.to_uppercase();
         let (pill_label, pill_color) = match (is_pr, state.as_str()) {
@@ -4391,6 +4830,7 @@ impl Kyde {
                         .gap_2()
                         .pt_1()
                         .children(action)
+                        .children(action_all)
                         .child(
                             btn_secondary("agents-gh-web", "Open on GitHub").on_mouse_down(
                                 MouseButton::Left,
@@ -4577,6 +5017,9 @@ impl Kyde {
                 .rounded_md()
                 .overflow_hidden()
         };
+        let open = d.state.eq_ignore_ascii_case("open");
+        // An open PR's comments can each go to an agent (Action comment).
+        let actionable = cfg!(feature = "terminal") && d.pr.is_some() && open;
         let mut items: Vec<gpui::AnyElement> = Vec::new();
         for (ci, c) in self.agents.gh_cards.iter().enumerate() {
             match c {
@@ -4585,15 +5028,26 @@ impl Kyde {
                     at,
                     verb,
                     body,
-                } => items.push(
-                    card()
-                        .child(card_head(
-                            author,
-                            format!("{verb} {}", crate::agents::iso_ago(at)),
+                    raw,
+                } => {
+                    let head = card_head(author, format!("{verb} {}", crate::agents::iso_ago(at)));
+                    #[cfg(feature = "terminal")]
+                    let head = head.when(actionable && raw.is_some(), |h| {
+                        h.child(div().flex_1()).child(action_comment_btn(
+                            ("gh-act-c", ci),
+                            FeedbackAt::Card(ci),
+                            cx,
                         ))
-                        .child(div().px_1().py_2().child(body.clone()))
-                        .into_any_element(),
-                ),
+                    });
+                    #[cfg(not(feature = "terminal"))]
+                    let _ = raw;
+                    items.push(
+                        card()
+                            .child(head)
+                            .child(div().px_1().py_2().child(body.clone()))
+                            .into_any_element(),
+                    );
+                }
                 GhCard::Commit {
                     oid,
                     headline,
@@ -4632,6 +5086,7 @@ impl Kyde {
                     state,
                     body,
                     threads,
+                    ..
                 } => {
                     let (verb, color) = match state.as_str() {
                         "APPROVED" => ("approved these changes", t.status_added),
@@ -4658,20 +5113,28 @@ impl Kyde {
                             ))),
                     );
                     if let Some(b) = body {
+                        let head = card_head(author, "left a comment".into());
+                        #[cfg(feature = "terminal")]
+                        let head = head.when(actionable, |h| {
+                            h.child(div().flex_1()).child(action_comment_btn(
+                                ("gh-act-r", ci),
+                                FeedbackAt::Card(ci),
+                                cx,
+                            ))
+                        });
                         review = review.child(
                             card()
-                                .child(card_head(author, "left a comment".into()))
+                                .child(head)
                                 .child(div().px_1().py_2().child(b.clone())),
                         );
                     }
                     for (ti, th) in threads.iter().enumerate() {
-                        review = review.child(self.render_gh_thread(ci * 1000 + ti, th, cx));
+                        review = review.child(self.render_gh_thread(ci, ti, th, actionable, cx));
                     }
                     items.push(review.pl_4().into_any_element());
                 }
             }
         }
-        let open = d.state.eq_ignore_ascii_case("open");
         if let Some(merge_box) =
             d.pr.as_ref()
                 .filter(|_| open)
@@ -4950,14 +5413,18 @@ impl Kyde {
         )
     }
 
-    /// An inline review thread: the file, the diff lines it's on, its comments, and a reply.
+    /// An inline review thread (card `ci`'s thread `ti`): the file, the diff lines it's on, its
+    /// comments — each with Action comment when `actionable` — and a reply.
     fn render_gh_thread(
         &self,
-        id: usize,
+        ci: usize,
+        ti: usize,
         th: &GhThread,
+        actionable: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         use kyde_git::github::DiffRow;
+        let id = ci * 1000 + ti;
         let t = theme::get();
         let fs = t.ui_font_size;
         let lines = th.hunk.iter().map(|r| {
@@ -4978,32 +5445,44 @@ impl Kyde {
                         .child(SharedString::from(text.replace('\t', "    "))),
                 )
         });
-        let comments = th.comments.iter().map(|(author, at, body)| {
-            div()
+        let mut comments = Vec::with_capacity(th.comments.len());
+        for (k, (author, at, body, _)) in th.comments.iter().enumerate() {
+            let head = div()
                 .flex()
-                .flex_col()
-                .px_3()
-                .pt_2()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(avatar(author))
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(avatar(author))
-                        .child(
-                            div()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .child(SharedString::from(author.clone())),
-                        )
-                        .child(
-                            div()
-                                .text_color(t.line_number)
-                                .child(SharedString::from(crate::agents::iso_ago(at))),
-                        ),
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(SharedString::from(author.clone())),
                 )
-                .child(body.clone())
-        });
+                .child(
+                    div()
+                        .text_color(t.line_number)
+                        .child(SharedString::from(crate::agents::iso_ago(at))),
+                );
+            #[cfg(feature = "terminal")]
+            let head = head.when(actionable, |h| {
+                h.child(div().flex_1()).child(action_comment_btn(
+                    ("gh-act-t", id * 1000 + k),
+                    FeedbackAt::Thread(ci, ti, k),
+                    cx,
+                ))
+            });
+            #[cfg(not(feature = "terminal"))]
+            let _ = (actionable, k);
+            comments.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .px_3()
+                    .pt_2()
+                    .child(head)
+                    .child(body.clone()),
+            );
+        }
         let root = th.root;
         let replying = self.agents.gh_reply_to == Some(root);
         let reply = if replying {
@@ -5082,14 +5561,36 @@ impl Kyde {
             .overflow_hidden()
             .child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
                     .px_3()
                     .py_1p5()
                     .bg(t.bg_mid)
                     .border_b_1()
                     .border_color(t.divider)
-                    .font_family(theme::font::family())
                     .text_size(px(fs - 1.0))
-                    .child(SharedString::from(th.path.clone())),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(theme::font::family())
+                            .child(SharedString::from(th.path.clone())),
+                    )
+                    .when(th.resolved == Some(true), |h| {
+                        h.child(
+                            div()
+                                .flex_none()
+                                .px_2()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(t.divider)
+                                .text_color(t.line_number)
+                                .child("Resolved"),
+                        )
+                    }),
             )
             .children(lines)
             .children(comments)
@@ -6273,6 +6774,17 @@ enum GhPost {
     Merge(kyde_git::github::MergeMethod),
 }
 
+/// The PR conversation comment an Action comment button hands over, by position in
+/// `gh_cards` (read when clicked, so the button keeps nothing of its own).
+#[cfg(feature = "terminal")]
+#[derive(Clone, Copy)]
+enum FeedbackAt {
+    /// Card `ci`: a comment, or a review's summary.
+    Card(usize),
+    /// Card `ci`'s thread `ti`, its comment `k` (the ones before it go along, for context).
+    Thread(usize, usize, usize),
+}
+
 /// A small round avatar: the login's initial on a colour picked from the login.
 fn avatar(login: &str) -> gpui::Div {
     use std::hash::{Hash, Hasher};
@@ -6417,6 +6929,31 @@ fn ago(t: std::time::SystemTime) -> String {
         3600..86_400 => format!("{} h ago", s / 3600),
         _ => format!("{} d ago", s / 86_400),
     }
+}
+
+/// The small Action comment button at the right of a comment's header: hands the comment at
+/// `at` to an agent in the PR's worktree.
+#[cfg(feature = "terminal")]
+fn action_comment_btn(
+    id: impl Into<gpui::ElementId>,
+    at: FeedbackAt,
+    cx: &mut Context<Kyde>,
+) -> gpui::Stateful<gpui::Div> {
+    btn_secondary(id, "Action comment")
+        .px_2()
+        .py_0()
+        .flex_none()
+        .text_size(px(theme::get().ui_font_size - 2.0))
+        .tooltip(ui::tip(
+            "Hand this comment to an agent in the PR's worktree",
+        ))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _e, _w, cx| {
+                cx.stop_propagation();
+                this.agents_action_comment(at, cx);
+            }),
+        )
 }
 
 /// A tab's inputs to its status dot.

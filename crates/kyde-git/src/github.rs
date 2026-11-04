@@ -848,6 +848,10 @@ pub struct ReviewThread {
     pub path: String,
     /// The diff hunk it's anchored to (git's `@@ … @@` + lines).
     pub hunk: String,
+    /// The line it's on — in the code it was left on when that has changed since (outdated).
+    pub line: Option<u64>,
+    /// Marked resolved on GitHub (`None`: its state couldn't be read).
+    pub resolved: Option<bool>,
     /// `(author, at, markdown body)`, oldest first.
     pub comments: Vec<(String, String, String)>,
 }
@@ -878,6 +882,11 @@ struct RawReviewComment {
     path: String,
     #[serde(default)]
     diff_hunk: String,
+    /// `null` once the code it's on has changed (outdated) — then `original_line` has it.
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    original_line: Option<u64>,
     user: Option<RawUser>,
     #[serde(default)]
     body: String,
@@ -886,10 +895,17 @@ struct RawReviewComment {
 }
 
 /// Pull request `number`'s reviews and inline review threads (`gh api …/pulls/N/reviews`
-/// and `…/comments`), oldest first.
+/// and `…/comments`, plus which threads are resolved — GraphQL only), oldest first. The
+/// three calls run side by side. A thread's `resolved` is `None` when that last one fails.
 pub fn reviews(dir: &Path, number: u64) -> Result<(Vec<Review>, Vec<ReviewThread>)> {
-    let reviews: Vec<RawReview> = api_items(dir, &format!("pulls/{number}/reviews"))?;
-    let comments: Vec<RawReviewComment> = api_items(dir, &format!("pulls/{number}/comments"))?;
+    let (reviews, comments, states) = std::thread::scope(|s| {
+        let comments =
+            s.spawn(|| api_items::<RawReviewComment>(dir, &format!("pulls/{number}/comments")));
+        let states = s.spawn(|| thread_states(dir, number));
+        let reviews = api_items::<RawReview>(dir, &format!("pulls/{number}/reviews"));
+        (reviews, join(comments), join(states))
+    });
+    let (reviews, comments, states) = (reviews?, comments?, states.ok());
     let login = |u: Option<RawUser>| u.map(|u| u.login).unwrap_or_default();
     let reviews = reviews
         .into_iter()
@@ -915,11 +931,96 @@ pub fn reviews(dir: &Path, number: u64) -> Result<(Vec<Review>, Vec<ReviewThread
                 root: c.id,
                 path: c.path,
                 hunk: c.diff_hunk,
+                line: c.line.or(c.original_line),
+                resolved: states.as_ref().and_then(|s| s.get(&c.id).copied()),
                 comments: vec![entry],
             }),
         }
     }
     Ok((reviews, threads))
+}
+
+/// A scoped thread's result, its panic passed on.
+fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    h.join().unwrap_or_else(|p| std::panic::resume_unwind(p))
+}
+
+/// Whether each of pull request `number`'s review threads is resolved, keyed by its first
+/// comment's REST id (GraphQL's `fullDatabaseId`) — REST has no resolved state.
+pub fn thread_states(dir: &Path, number: u64) -> Result<std::collections::HashMap<u64, bool>> {
+    const QUERY: &str = "query($owner:String!,$repo:String!,$number:Int!,$endCursor:String){\
+        repository(owner:$owner,name:$repo){pullRequest(number:$number){\
+        reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} \
+        nodes{isResolved comments(first:1){nodes{fullDatabaseId}}}}}}}";
+    let raw = gh(
+        dir,
+        &[
+            "api",
+            "graphql",
+            "--paginate",
+            "-F",
+            "owner={owner}",
+            "-F",
+            "repo={repo}",
+            "-F",
+            &format!("number={number}"),
+            "-f",
+            &format!("query={QUERY}"),
+            "--jq",
+            ".data.repository.pullRequest.reviewThreads.nodes[]",
+        ],
+    )?;
+    parse_thread_states(&raw)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawThreadState {
+    #[serde(default)]
+    is_resolved: bool,
+    comments: RawNodes,
+}
+#[derive(Deserialize)]
+struct RawNodes {
+    #[serde(default)]
+    nodes: Vec<RawFirstComment>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawFirstComment {
+    /// A GraphQL `BigInt` — a JSON string.
+    #[serde(default)]
+    full_database_id: Option<serde_json::Value>,
+}
+
+/// Parse [`thread_states`]' output: one review-thread JSON object per line.
+///
+/// ```
+/// let s = kyde_git::github::parse_thread_states(concat!(
+///     r#"{"isResolved":true,"comments":{"nodes":[{"fullDatabaseId":"4312305778"}]}}"#, "\n",
+///     r#"{"isResolved":false,"comments":{"nodes":[{"fullDatabaseId":"17"}]}}"#, "\n",
+/// )).unwrap();
+/// assert_eq!((s[&4312305778], s[&17]), (true, false));
+/// ```
+pub fn parse_thread_states(text: &str) -> Result<std::collections::HashMap<u64, bool>> {
+    let mut out = std::collections::HashMap::new();
+    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+        let t: RawThreadState = serde_json::from_str(l).map_err(|source| GitError::Json {
+            what: "gh api graphql reviewThreads".into(),
+            source,
+        })?;
+        let id = t
+            .comments
+            .nodes
+            .into_iter()
+            .next()
+            .and_then(|c| c.full_database_id)
+            .and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok()));
+        if let Some(id) = id {
+            out.insert(id, t.is_resolved);
+        }
+    }
+    Ok(out)
 }
 
 /// Every item of a paginated REST list under the current repo (`gh api --paginate --jq
