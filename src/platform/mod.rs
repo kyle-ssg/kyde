@@ -10,6 +10,8 @@ pub(crate) mod input_method;
 pub(crate) mod instance;
 #[cfg(target_os = "linux")]
 pub(crate) mod keyboard_layout;
+#[cfg(all(feature = "terminal", target_os = "macos"))]
+pub(crate) mod locale;
 pub(crate) mod scratch;
 pub(crate) mod shellcmd;
 #[cfg(all(unix, not(target_os = "macos")))]

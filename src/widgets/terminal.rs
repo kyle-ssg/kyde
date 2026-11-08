@@ -389,6 +389,8 @@ impl TerminalView {
         let proxy = EventProxy(tx);
 
         let shell = default_shell();
+        #[cfg(target_os = "macos")]
+        let env = crate::platform::locale::with_lang(env);
         let options = PtyOptions {
             shell: Some(Shell::new(shell, Vec::new())),
             working_directory: working_dir,

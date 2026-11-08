@@ -185,11 +185,12 @@ pub struct AgentsCfg {
 }
 
 /// The standard prompt an issue's agent starts with.
-pub const ISSUE_PROMPT: &str = "Work on GitHub issue #{number}: {title} ({url}). Read it, and \
-its discussion, with `gh issue view {number} --comments`. You're on branch {branch} in a fresh \
-worktree off the latest {base}. If the change is straightforward, implement it with tests and \
-check them; if it's bigger or unclear, don't start coding — use plan mode and produce an \
-implementation plan first.";
+pub const ISSUE_PROMPT: &str = "Resolve GitHub issue #{number}: {title} ({url}). Your job is to \
+fix the bug or build the feature it describes, not just to read it, so start right away \
+without asking me what to do. Read the issue and its discussion with `gh issue view {number} \
+--comments`. You're on branch {branch} in a fresh worktree off the latest {base}. If the change \
+is straightforward, implement it, add focused tests and run them. If it's big or unclear, use \
+plan mode and give me an implementation plan to approve before coding.";
 
 /// The standard prompt a pull request's review agent starts with.
 pub const REVIEW_PROMPT: &str = "Review pull request #{number}: {title} by {author} ({url}). \

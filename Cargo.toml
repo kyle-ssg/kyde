@@ -163,6 +163,7 @@ libc = { version = "0.2", optional = true }
 objc2.workspace = true
 objc2-foundation = { workspace = true, features = [
     "NSData",
+    "NSLocale",
     "NSProcessInfo",
     "NSString",
     "NSArray",
