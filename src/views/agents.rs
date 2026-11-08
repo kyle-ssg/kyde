@@ -1433,11 +1433,7 @@ impl Kyde {
         )
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(move |this, _e, _w, cx| {
-                this.agents.removing = None;
-                this.close_modal_window(ModalKind::RemoveWorktree, cx);
-                this.agents_remove_worktree(space.clone(), wt.clone(), cx);
-            }),
+            cx.listener(|this, _e, _w, cx| this.agents_remove_confirmed(cx)),
         );
         ui::confirm_body(heading, path)
             .child(
@@ -1458,6 +1454,15 @@ impl Kyde {
             )
             .child(ui::modal_footer().child(cancel).child(confirm))
             .into_any_element()
+    }
+
+    /// The "Remove worktree?" window's confirm (its primary button, or Enter): close it and
+    /// remove the worktree it asked about.
+    pub(crate) fn agents_remove_confirmed(&mut self, cx: &mut Context<Self>) {
+        self.close_modal_window(ModalKind::RemoveWorktree, cx);
+        if let Some((space, wt)) = self.agents.removing.take() {
+            self.agents_remove_worktree(space, wt, cx);
+        }
     }
 
     /// Remove a linked worktree the user confirmed: `git worktree remove --force` (its
