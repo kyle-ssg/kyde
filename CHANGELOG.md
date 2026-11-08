@@ -45,6 +45,22 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.13.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.12.1...kyde-v2.13.0) (2026-11-08)
+
+
+### Features
+
+* **terminal:** URLs and file paths are links — ⌘-click opens them ([#170](https://github.com/kyle-ssg/kyde/issues/170)) ([84d7feb](https://github.com/kyle-ssg/kyde/commit/84d7feb820d6ab3b15441bb3524c5934dd1ef369))
+
+
+### Bug Fixes
+
+* **agents:** a bot's PR comment has no Action comment button ([#167](https://github.com/kyle-ssg/kyde/issues/167)) ([c895509](https://github.com/kyle-ssg/kyde/commit/c8955091bf22ffa856fc19c5533fa9be23c5c6d6))
+* **agents:** Claude Code's own helpers no longer show as background agent tabs ([#169](https://github.com/kyle-ssg/kyde/issues/169)) ([deda788](https://github.com/kyle-ssg/kyde/commit/deda788355ef7801821edf62c326ced9fb556d0f))
+* **agents:** cleanup closes finished background agent tabs ([#163](https://github.com/kyle-ssg/kyde/issues/163)) ([#165](https://github.com/kyle-ssg/kyde/issues/165)) ([6c13b68](https://github.com/kyle-ssg/kyde/commit/6c13b680517544634400f6ecb183d536af77a0fa))
+* **agents:** issue agents start on the fix, and shells get a UTF-8 locale ([#166](https://github.com/kyle-ssg/kyde/issues/166)) ([c429f04](https://github.com/kyle-ssg/kyde/commit/c429f043c5079812df2ca68a2ad222cd7146684f))
+* **ui:** Enter confirms the Remove Worktree and Push windows ([#164](https://github.com/kyle-ssg/kyde/issues/164)) ([97aca78](https://github.com/kyle-ssg/kyde/commit/97aca788512d1dd561d2e5486f4d5944233ad023)), closes [#162](https://github.com/kyle-ssg/kyde/issues/162)
+
 ## [2.12.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.12.0...kyde-v2.12.1) (2026-11-04)
 
 
