@@ -34,8 +34,8 @@ use futures::StreamExt;
 use gpui::{
     div, fill, point, prelude::*, px, relative, svg, App, Bounds, ContentMask, Context,
     DispatchPhase, ElementId, Entity, EventEmitter, FocusHandle, Focusable, GlobalElementId, Hsla,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollWheelEvent, ShapedLine, Style, TextRun, Window,
+    KeyDownEvent, LayoutId, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, ScrollWheelEvent, ShapedLine, Style, TextRun, UnderlineStyle, Window,
 };
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -246,6 +246,83 @@ pub struct TerminalView {
     sb_drag: Option<SbDrag>,
     /// Find (⌘F), built the first time it opens.
     find: Option<TermFind>,
+    /// The link under the mouse while ⌘ (Ctrl off macOS) is held: drawn underlined, with
+    /// a pointing hand, so you can see a click will open it.
+    link: Option<Link>,
+}
+
+/// A link in the grid: its row, the columns it spans, and where it goes.
+#[derive(Clone, Debug, PartialEq)]
+struct Link {
+    line: Line,
+    cols: std::ops::Range<usize>,
+    target: Target,
+}
+
+/// Where a link goes: a web page, or a file to open (at a line, if it named one).
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Url(String),
+    File { path: PathBuf, line: Option<u32> },
+}
+
+impl Target {
+    /// What a link's text points at: an http(s) URL, else a file path — `~` expanded, and a
+    /// trailing `:line` or `:line:col` taken as the line to open it at.
+    fn parse(text: &str) -> Self {
+        if text.starts_with("http://") || text.starts_with("https://") {
+            return Self::Url(text.to_string());
+        }
+        let (mut path, mut line) = (text, None);
+        for _ in 0..2 {
+            match path.rsplit_once(':').map(|(p, n)| (p, n.parse::<u32>())) {
+                Some((p, Ok(n))) => (path, line) = (p, Some(n)),
+                _ => break,
+            }
+        }
+        let path = match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+            _ => PathBuf::from(path),
+        };
+        Self::File { path, line }
+    }
+
+    /// An OSC-8 hyperlink's target: a `file://` URI is a file, anything else a URL.
+    fn from_uri(uri: &str) -> Self {
+        let Some(rest) = uri.strip_prefix("file://") else {
+            return Self::Url(uri.to_string());
+        };
+        // `file://host/path` — the path starts at the first `/` after the host.
+        let path = rest.find('/').map_or("", |i| &rest[i..]);
+        Self::File {
+            path: PathBuf::from(percent_decode(path)),
+            line: None,
+        }
+    }
+}
+
+/// `%XX` escapes in a URI path decoded (a `%` that isn't one is kept as is).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (b[i], hex) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// A scrollbar drag: the cursor y it started at, and how many lines sat above the view then.
@@ -478,6 +555,7 @@ impl TerminalView {
             bounds: None,
             selecting: false,
             menu_at: None,
+            link: None,
             shift: 0,
             anchor_bottom: false,
             pid,
@@ -1257,54 +1335,108 @@ impl TerminalView {
         }
     }
 
-    /// Cmd-click: open the URL under the cursor — an OSC-8 hyperlink if the cell carries
-    /// one, else a plain http(s) token scanned out of that grid row.
-    fn open_url_at(&mut self, pos: gpui::Point<Pixels>) {
-        let Some((p, _)) = self.point_at(pos) else {
-            return;
-        };
-        let t = self.term.lock();
-        if let Some(h) = t.grid()[p].hyperlink() {
-            let uri = h.uri().to_string();
-            drop(t);
-            open_uri(&uri);
-            return;
+    /// The link at a window-space position — an OSC-8 hyperlink if the cell carries one,
+    /// else a URL or file path scanned out of that grid row. `None` off the drawn rows.
+    fn link_at(&self, pos: gpui::Point<Pixels>) -> Option<Link> {
+        if !self.bounds?.contains(&pos) {
+            return None;
         }
-        let cols = t.columns();
-        let line: String = (0..cols)
-            .map(|c| t.grid()[GridPoint::new(p.line, Column(c))].c)
-            .collect();
-        drop(t);
-        if let Some(url) = url_at(&line, p.column.0) {
-            open_uri(&url);
+        let (p, _) = self.point_at(pos)?;
+        let t = self.term.lock();
+        let grid = t.grid();
+        let off = i32::try_from(grid.display_offset()).unwrap_or(0);
+        if p.line.0 + off >= i32::try_from(t.screen_lines()).unwrap_or(0) {
+            return None;
+        }
+        let cell = |c: usize| &grid[GridPoint::new(p.line, Column(c))];
+        let at = p.column.0;
+        if let Some(h) = cell(at).hyperlink() {
+            let same = |c: &usize| cell(*c).hyperlink().as_ref() == Some(&h);
+            let start = (0..at).rev().take_while(same).last().unwrap_or(at);
+            let end = (at..t.columns()).take_while(same).count() + at;
+            return Some(Link {
+                line: p.line,
+                cols: start..end,
+                target: Target::from_uri(h.uri()),
+            });
+        }
+        let row: Vec<char> = (0..t.columns()).map(|c| cell(c).c).collect();
+        let (cols, target) = link_in(&row, at)?;
+        Some(Link {
+            line: p.line,
+            cols,
+            target,
+        })
+    }
+
+    /// Follow the link under the mouse while ⌘ is `held`, repainting only when it changes.
+    fn hover_link(&mut self, pos: gpui::Point<Pixels>, held: bool, cx: &mut Context<Self>) {
+        let link = if held { self.link_at(pos) } else { None };
+        if link != self.link {
+            self.link = link;
+            cx.notify();
         }
     }
 }
 
-/// Find an http(s) URL token in `line` that covers char column `col`. Trailing sentence
-/// punctuation is trimmed so "see <https://x.com>." doesn't capture the period.
-fn url_at(line: &str, col: usize) -> Option<String> {
-    let chars: Vec<char> = line.chars().collect();
+/// The link token in `row` covering char column `col`: the columns it spans, and where it
+/// goes.
+fn link_in(row: &[char], col: usize) -> Option<(std::ops::Range<usize>, Target)> {
+    let r = link_spans(row).find(|r| r.contains(&col))?;
+    let text: String = row[r.clone()].iter().collect();
+    Some((r, Target::parse(&text)))
+}
+
+/// Every link token in `chars`, as char ranges: http(s) URLs, and absolute (or `~/`) file
+/// paths with at least two parts, so `/compact` isn't one — `:line[:col]` included. Pure
+/// text, no disk: it runs on every drawn row each frame. Wrapping punctuation is trimmed, so
+/// `see (https://x.com).` captures neither bracket nor the period, and `Read(/a/b.rs)` the
+/// path alone.
+fn link_spans(chars: &[char]) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
     let mut i = 0;
-    while i < chars.len() {
-        if chars[i].is_whitespace() {
-            i += 1;
-            continue;
+    std::iter::from_fn(move || {
+        while i < chars.len() {
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            let mut start = i;
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            let mut end = i;
+            while start < end && matches!(chars[start], '(' | '[' | '<' | '"' | '\'' | '`') {
+                start += 1;
+            }
+            while end > start
+                && matches!(
+                    chars[end - 1],
+                    '.' | ',' | ':' | ';' | ')' | ']' | '}' | '"' | '\'' | '>' | '`'
+                )
+            {
+                end -= 1;
+            }
+            let token = &chars[start..end];
+            if token.starts_with(&['h', 't', 't', 'p', ':', '/', '/'])
+                || token.starts_with(&['h', 't', 't', 'p', 's', ':', '/', '/'])
+            {
+                return Some(start..end);
+            }
+            // A path starts the token, or follows a bracket or quote inside it.
+            let path_at = (start..end).find(|&s| {
+                let lead = s == start || matches!(chars[s - 1], '(' | '[' | '<' | '"' | '\'' | '=');
+                let p = &chars[s..end];
+                lead && match p {
+                    ['/', c, rest @ ..] => *c != '/' && rest.contains(&'/'),
+                    ['~', '/', _, ..] => true,
+                    _ => false,
+                }
+            });
+            if let Some(s) = path_at {
+                return Some(s..end);
+            }
         }
-        let start = i;
-        while i < chars.len() && !chars[i].is_whitespace() {
-            i += 1;
-        }
-        let token: String = chars[start..i].iter().collect();
-        let trimmed = token.trim_end_matches(['.', ',', ')', ']', '}', '"', '\'', '>']);
-        if (trimmed.starts_with("http://") || trimmed.starts_with("https://"))
-            && col >= start
-            && col < start + trimmed.chars().count()
-        {
-            return Some(trimmed.to_string());
-        }
-    }
-    None
+        None
+    })
 }
 
 /// `query` as a regex that matches it literally.
@@ -1517,6 +1649,11 @@ pub enum TerminalEvent {
     Submitted,
     /// "Open Scrollback in Editor" from its menu.
     OpenScrollback,
+    /// A file path in it was ⌘-clicked: open it (at `line`, when it named one).
+    OpenFile {
+        path: PathBuf,
+        line: Option<u32>,
+    },
 }
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
@@ -1525,6 +1662,7 @@ impl Render for TerminalView {
         let view = cx.entity();
         let menu_at = self.menu_at;
         div()
+            .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
             .relative()
@@ -1618,10 +1756,16 @@ impl Render for TerminalView {
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus);
-                    // Cmd-click (Ctrl-click off macOS) opens a URL under the cursor; a
+                    // Cmd-click (Ctrl-click off macOS) opens a URL or file under the cursor; a
                     // plain click starts a selection (double = word, triple = line).
                     if e.modifiers.secondary() {
-                        this.open_url_at(e.position);
+                        match this.link_at(e.position).map(|l| l.target) {
+                            Some(Target::Url(url)) => open_uri(&url),
+                            Some(Target::File { path, line }) => {
+                                cx.emit(TerminalEvent::OpenFile { path, line });
+                            }
+                            None => {}
+                        }
                         return;
                     }
                     let ty = match e.click_count {
@@ -1636,7 +1780,18 @@ impl Render for TerminalView {
                 if this.selecting {
                     this.update_selection(e.position, cx);
                 }
+                this.hover_link(e.position, e.modifiers.secondary(), cx);
             }))
+            // ⌘ pressed or let go over a link shows or hides it as one, without a mouse move.
+            .on_modifiers_changed(cx.listener(|this, e: &ModifiersChangedEvent, window, cx| {
+                this.hover_link(window.mouse_position(), e.modifiers.secondary(), cx);
+            }))
+            .on_hover(cx.listener(|this, hovered: &bool, _w, cx| {
+                if !*hovered {
+                    this.hover_link(gpui::Point::default(), false, cx);
+                }
+            }))
+            .when(self.link.is_some(), Styled::cursor_pointer)
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _e: &MouseUpEvent, _w, cx| {
@@ -2060,6 +2215,14 @@ impl Element for TerminalElement {
         let prompts = prompt_rows(&term, Line(-off), term.screen_lines());
         let cleared = view.cleared_suggestion_rows(&term);
         let accent: Hsla = theme::get().primary.into();
+        // URLs and file paths read as links — in the terminal's blue — so it's plain a
+        // ⌘-click opens them.
+        let link_fg = resolve(
+            AnsiColor::Named(NamedColor::Blue),
+            default_fg,
+            content.colors,
+            &pal.ansi,
+        );
         let prompt_bg = default_bg.blend(accent.opacity(0.2));
 
         let selection = content.selection;
@@ -2073,17 +2236,33 @@ impl Element for TerminalElement {
         // Last row with anything on it, for bottom-anchoring.
         let mut last_used: i32 = -1;
         let mut base_line: Option<i32> = None;
-        let mut cur_row: Vec<(char, Hsla)> = Vec::new();
+        // Each cell's char, colour, and whether it's in the ⌘-hovered link (underlined).
+        let mut cur_row: Vec<(char, Hsla, bool)> = Vec::new();
         let mut cur_line_idx: i32 = i32::MIN;
 
-        let flush_row = |lines: &mut Vec<ShapedLine>, row: &mut Vec<(char, Hsla)>| {
-            // Coalesce a row into one shaped line with a run per color change.
-            let text: String = row.iter().map(|(c, _)| *c).collect();
+        // Reused across rows: the link scan's chars, without an allocation per row.
+        let mut chars: Vec<char> = Vec::new();
+        let mut flush_row = |lines: &mut Vec<ShapedLine>, row: &mut Vec<(char, Hsla, bool)>| {
+            // Coalesce a row into one shaped line with a run per color / underline change.
+            let text: String = row.iter().map(|(c, ..)| *c).collect();
+            // Every link has a `/` in it; most rows have none, and skip the scan.
+            if text.contains('/') {
+                chars.clear();
+                chars.extend(row.iter().map(|(c, ..)| *c));
+                for r in link_spans(&chars) {
+                    for (_, color, _) in &mut row[r] {
+                        *color = Hsla {
+                            a: color.a,
+                            ..link_fg
+                        };
+                    }
+                }
+            }
             let mut runs: Vec<TextRun> = Vec::new();
-            for (c, color) in row.iter() {
+            for &(c, color, link) in row.iter() {
                 let len = c.len_utf8();
                 if let Some(last) = runs.last_mut() {
-                    if last.color == *color {
+                    if last.color == color && last.underline.is_some() == link {
                         last.len += len;
                         continue;
                     }
@@ -2091,9 +2270,13 @@ impl Element for TerminalElement {
                 runs.push(TextRun {
                     len,
                     font: font.clone(),
-                    color: *color,
+                    color,
                     background_color: None,
-                    underline: None,
+                    underline: link.then(|| UnderlineStyle {
+                        thickness: px(1.0),
+                        color: Some(color),
+                        wavy: false,
+                    }),
                     strikethrough: None,
                 });
             }
@@ -2148,6 +2331,9 @@ impl Element for TerminalElement {
                 fg = bg.unwrap_or(default_bg);
                 bg = Some(f);
             }
+            if cell.hyperlink().is_some() {
+                fg = link_fg;
+            }
             // SGR dim (faint) — how Claude greys its prompt suggestion apart from typed text.
             if cell.flags.contains(Flags::DIM) {
                 fg = fg.opacity(DIM_ALPHA);
@@ -2188,7 +2374,11 @@ impl Element for TerminalElement {
             if (ch != ' ' && ch != '\0') || bg.is_some() {
                 last_used = last_used.max(line - base_line.unwrap_or(line));
             }
-            cur_row.push((if ch == '\0' { ' ' } else { ch }, fg));
+            let in_link = view
+                .link
+                .as_ref()
+                .is_some_and(|l| l.line == cell.point.line && l.cols.contains(&col));
+            cur_row.push((if ch == '\0' { ' ' } else { ch }, fg, in_link));
         }
         flush_row(&mut lines, &mut cur_row);
 
@@ -2795,6 +2985,39 @@ mod tests {
         assert_eq!(heard, [150, 100, 90]);
     }
 
+    /// Holding ⌘ over a URL marks it as a link (underlined, pointing hand) — so it's plain
+    /// a click will open it — and letting go of ⌘ unmarks it.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn cmd_over_a_url_marks_it_as_a_link(cx: &mut gpui::TestAppContext) {
+        let (_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = ours.try_clone().unwrap();
+        let (view, vcx) = cx.add_window_view(|_w, cx| TerminalView::attach((ours, reader), cx));
+        view.update(vcx, |v, _| {
+            let mut p: alacritty_terminal::vte::ansi::Processor =
+                alacritty_terminal::vte::ansi::Processor::new();
+            p.advance(
+                &mut *v.term.lock(),
+                b"opened https://github.com/o/r/pull/491.\r\n",
+            );
+        });
+        vcx.run_until_parked();
+        let (bounds, (cw, ch)) = view.read_with(vcx, |v, _| (v.bounds.unwrap(), v.cell));
+        let over_url = bounds.origin + gpui::point(gpui::px(cw * 12.5), gpui::px(ch * 0.5));
+        let link = |vcx: &mut gpui::VisualTestContext| view.read_with(vcx, |v, _| v.link.clone());
+
+        vcx.update(|w, cx| w.focus(&view.read(cx).focus));
+        vcx.simulate_mouse_move(over_url, None, gpui::Modifiers::secondary_key());
+        let l = link(vcx).expect("⌘ over the URL marks it");
+        assert_eq!(
+            l.target,
+            Target::Url("https://github.com/o/r/pull/491".into())
+        );
+        assert_eq!(l.cols, 7..38, "the whole URL, not the period after it");
+        vcx.simulate_modifiers_change(gpui::Modifiers::none());
+        assert_eq!(link(vcx), None, "letting go of ⌘ unmarks it");
+    }
+
     #[test]
     fn indexed_palette_covers_all_256_without_panicking() {
         // The 256-color resolver is hit per visible cell; make sure every index maps to a
@@ -2960,18 +3183,64 @@ mod tests {
     }
 
     #[test]
-    fn url_at_finds_token_under_column_and_trims_punctuation() {
+    fn link_in_finds_urls_and_file_paths_under_the_column() {
+        let at = |line: &str, col| link_in(&line.chars().collect::<Vec<_>>(), col);
+        let url = |u: &str| Target::Url(u.to_string());
+        let file = |p: &str, line| Target::File {
+            path: PathBuf::from(p),
+            line,
+        };
         let line = "see https://example.com/path. and clang++ next";
-        // Column inside the URL → returns it, trailing period trimmed.
+        // Inside the URL → it and its span, the trailing period left out.
+        assert_eq!(at(line, 10), Some((4..28, url("https://example.com/path"))));
+        assert_eq!(at(line, 0), None);
+        assert_eq!(at(line, 35), None);
+        // Markdown's brackets around a URL aren't part of it.
         assert_eq!(
-            url_at(line, 10).as_deref(),
-            Some("https://example.com/path")
+            at("(https://x.com/a).", 3),
+            Some((1..16, url("https://x.com/a")))
         );
-        // Column on a non-URL word → None.
-        assert_eq!(url_at(line, 0), None);
-        assert_eq!(url_at(line, 35), None);
-        // No URL at all → None.
-        assert_eq!(url_at("plain text only", 3), None);
+        // An absolute path, with the line (and column) Claude points at.
+        assert_eq!(
+            at("edit /Users/k/src/main.rs:42:7, then", 8),
+            Some((5..30, file("/Users/k/src/main.rs", Some(42))))
+        );
+        // Inside a tool call's brackets.
+        assert_eq!(
+            at("Read(/tmp/a/b.rs)", 7),
+            Some((5..16, file("/tmp/a/b.rs", None)))
+        );
+        // A slash command or a lone root dir isn't a path; nor is a relative one.
+        assert_eq!(at("run /compact now", 6), None);
+        assert_eq!(at("and/or src/a.rs", 9), None);
+        // `~/` is home.
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(
+            at("sh ~/x.sh", 4).map(|(_, t)| t),
+            Some(Target::File {
+                path: home.join("x.sh"),
+                line: None
+            })
+        );
+    }
+
+    /// Every drawn row with a `/` is scanned for links each frame (see `prepaint`); a
+    /// screenful of long link-heavy rows must stay cheap. Loose budget on purpose — see
+    /// CLAUDE.md.
+    #[test]
+    fn perf_link_spans() {
+        let row: Vec<char> = "see https://x.com/o/r/pull/491, (/Users/k/src/a.rs:42). a/b "
+            .repeat(8)
+            .chars()
+            .collect();
+        let t0 = Instant::now();
+        let mut n = 0;
+        for _ in 0..10_000 {
+            n += link_spans(&row).count();
+        }
+        let took = t0.elapsed();
+        assert_eq!(n, 160_000);
+        assert!(took < Duration::from_secs(2), "link scan took {took:?}");
     }
 
     fn dropped(ps: &[&str]) -> String {

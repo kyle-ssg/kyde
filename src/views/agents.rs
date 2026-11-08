@@ -2184,6 +2184,9 @@ impl Kyde {
                 terminal::TerminalEvent::TitleChanged => cx.notify(),
                 terminal::TerminalEvent::Submitted => this.agents_on_submit(&key, &v, cx),
                 terminal::TerminalEvent::OpenScrollback => this.agents_open_scrollback(&v, cx),
+                terminal::TerminalEvent::OpenFile { path, line } => {
+                    this.open_terminal_file(path.clone(), *line, cx);
+                }
                 terminal::TerminalEvent::CloseRequested => {
                     if let Some(i) = this
                         .agents

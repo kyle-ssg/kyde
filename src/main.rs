@@ -4786,6 +4786,26 @@ mod gpui_smoke_tests {
         (handle, dir)
     }
 
+    /// A file path ⌘-clicked in a terminal opens in the editor — looked up off the UI thread,
+    /// then shown as a tab of the project it's in.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_file_link_opens_in_the_editor(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_terminal_file(dir.join("app.tsx"), Some(1), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.mode == Mode::Browse);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
+            })
+            .unwrap();
+    }
+
     /// A select's open list closes on a click outside it — and a click on the control while
     /// open closes it, rather than the outside-click closing it and the control reopening it.
     #[gpui::test]
