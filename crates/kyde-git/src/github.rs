@@ -254,8 +254,8 @@ pub struct ItemDetail {
     pub labels: Vec<String>,
     /// Pull-request specifics (`None` for an issue).
     pub pr: Option<PrDetail>,
-    /// The conversation: `(author, created at, markdown body)`, oldest first.
-    pub comments: Vec<(String, String, String)>,
+    /// The conversation: `(author, created at, markdown body, by a bot)`, oldest first.
+    pub comments: Vec<(String, String, String, bool)>,
     /// Assignees' logins.
     pub assignees: Vec<String>,
     /// When it was opened (ISO 8601).
@@ -392,16 +392,6 @@ struct RawRequested {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RawComment {
-    author: Option<RawAuthor>,
-    #[serde(default)]
-    body: String,
-    #[serde(default)]
-    created_at: String,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct RawDetail {
     number: u64,
     title: String,
@@ -442,38 +432,61 @@ struct RawDetail {
     merge_state_status: String,
     #[serde(default)]
     review_decision: String,
-    #[serde(default)]
-    comments: Vec<RawComment>,
 }
 
 /// Issue `number` in full (`gh issue view`).
 pub fn issue_detail(dir: &Path, number: u64) -> Result<ItemDetail> {
-    let raw = gh(
+    detail(
         dir,
+        number,
         &[
             "issue",
             "view",
             &number.to_string(),
             "--json",
-            "number,title,body,author,state,url,labels,comments,assignees,createdAt",
+            "number,title,body,author,state,url,labels,assignees,createdAt",
         ],
-    )?;
-    parse_detail(&raw, "gh issue view")
+        "gh issue view",
+    )
 }
 
 /// Pull request `number` in full (`gh pr view`), incl. its branches and changed files.
 pub fn pr_detail(dir: &Path, number: u64) -> Result<ItemDetail> {
-    let raw = gh(
+    detail(
         dir,
+        number,
         &[
             "pr", "view", &number.to_string(), "--json",
-            "number,title,body,author,state,url,labels,headRefName,baseRefName,additions,deletions,isDraft,files,comments,assignees,createdAt,commits,statusCheckRollup,reviewRequests,headRefOid,mergeable,mergeStateStatus,reviewDecision",
+            "number,title,body,author,state,url,labels,headRefName,baseRefName,additions,deletions,isDraft,files,assignees,createdAt,commits,statusCheckRollup,reviewRequests,headRefOid,mergeable,mergeStateStatus,reviewDecision",
         ],
-    )?;
-    parse_detail(&raw, "gh pr view")
+        "gh pr view",
+    )
 }
 
-/// Parse `gh issue view` / `gh pr view --json …` (a PR has `headRefName`).
+/// `gh <args>` parsed as `what`, with its [`comments`] fetched side by side.
+fn detail(dir: &Path, number: u64, args: &[&str], what: &str) -> Result<ItemDetail> {
+    let (raw, comments) = std::thread::scope(|s| {
+        let comments = s.spawn(|| comments(dir, number));
+        (gh(dir, args), join(comments))
+    });
+    let mut d = parse_detail(&raw?, what)?;
+    d.comments = comments?;
+    Ok(d)
+}
+
+/// Issue or pull request `number`'s conversation, oldest first (`gh api …/issues/N/comments`:
+/// unlike `gh … view`, REST says which authors are bots).
+pub fn comments(dir: &Path, number: u64) -> Result<Vec<(String, String, String, bool)>> {
+    Ok(
+        api_items::<RawIssueComment>(dir, &format!("issues/{number}/comments"))?
+            .into_iter()
+            .map(RawIssueComment::entry)
+            .collect(),
+    )
+}
+
+/// Parse `gh issue view` / `gh pr view --json …` (a PR has `headRefName`). Its `comments`
+/// are left empty — they come from [`comments`].
 ///
 /// ```
 /// let d = kyde_git::github::parse_detail(
@@ -551,17 +564,7 @@ pub fn parse_detail(json: &str, what: &str) -> Result<ItemDetail> {
             merge_state: r.merge_state_status,
             review_decision: r.review_decision,
         }),
-        comments: r
-            .comments
-            .into_iter()
-            .map(|c| {
-                (
-                    c.author.map(|a| a.login).unwrap_or_default(),
-                    c.created_at,
-                    c.body,
-                )
-            })
-            .collect(),
+        comments: Vec::new(),
         assignees: r.assignees.into_iter().map(|a| a.login).collect(),
         created_at: r.created_at,
     })
@@ -859,6 +862,32 @@ pub struct ReviewThread {
 #[derive(Deserialize)]
 struct RawUser {
     login: String,
+    /// `User` / `Bot` / `Organization`.
+    #[serde(default, rename = "type")]
+    kind: String,
+}
+#[derive(Deserialize)]
+struct RawIssueComment {
+    user: Option<RawUser>,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+impl RawIssueComment {
+    /// `(author, at, body, by a bot)`; a bot's login as GitHub shows it, without REST's `[bot]`.
+    fn entry(self) -> (String, String, String, bool) {
+        let (author, bot) = match self.user {
+            Some(u) if u.kind == "Bot" => {
+                let login = u.login.strip_suffix("[bot]").unwrap_or(&u.login);
+                (login.to_string(), true)
+            }
+            Some(u) => (u.login, false),
+            None => (String::new(), false),
+        };
+        (author, self.created_at, self.body, bot)
+    }
 }
 #[derive(Deserialize)]
 struct RawReview {
@@ -1078,5 +1107,17 @@ mod tests {
         let found = find_bin("kyde-test-gh", Some(bare), Some(home.as_os_str()));
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(found, bin.join("kyde-test-gh"));
+    }
+
+    #[test]
+    fn a_bots_comment_is_marked_as_one() {
+        let entry = |l| serde_json::from_str::<RawIssueComment>(l).unwrap().entry();
+        assert_eq!(
+            entry(
+                r#"{"user":{"login":"github-actions[bot]","type":"Bot"},"body":"b","created_at":"t"}"#
+            ),
+            ("github-actions".into(), "t".into(), "b".into(), true)
+        );
+        assert!(!entry(r#"{"user":{"login":"kyle","type":"User"},"body":"b","created_at":"t"}"#).3);
     }
 }
