@@ -557,6 +557,30 @@ impl Kyde {
         .detach();
     }
 
+    /// Enter in a modal window: a confirmation's primary action, as its button would. Windows
+    /// that aren't a yes/no confirmation (Settings, Plugins, Merge, the Clean Up checklist, …)
+    /// deliberately ignore Enter.
+    pub(crate) fn modal_confirm(&mut self, kind: ModalKind, cx: &mut Context<Self>) {
+        match kind {
+            ModalKind::NewBranch => self.do_create_branch(cx),
+            ModalKind::Rollback => self.do_rollback(cx),
+            ModalKind::Push => self.do_push(cx),
+            ModalKind::ClearData => self.do_clear_data(cx),
+            ModalKind::ClearLocalHistory => self.do_clear_local_history(cx),
+            ModalKind::ConfirmGitInit => self.confirm_git_init(cx),
+            ModalKind::RemoveWorktree => self.agents_remove_confirmed(cx),
+            ModalKind::Plugins
+            | ModalKind::Fonts
+            | ModalKind::Settings
+            | ModalKind::Merge
+            | ModalKind::Compare
+            | ModalKind::LocalHistory
+            | ModalKind::Changelog
+            | ModalKind::Cleanup
+            | ModalKind::Scrollback => {}
+        }
+    }
+
     /// Close a modal's native window (if open) and clear its handle. The actual
     /// `remove_window` is deferred: it's often called from *inside* that window's own button
     /// handler (e.g. the rollback window's "Rollback" button → `do_rollback`), and removing a

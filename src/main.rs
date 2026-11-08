@@ -1486,6 +1486,9 @@ struct AgentsView {
     /// The Clean Up window's ticked finished tabs, as (worktree, spawn time).
     #[cfg(feature = "terminal")]
     cleanup_tabs: std::collections::HashSet<(PathBuf, std::time::SystemTime)>,
+    /// The Clean Up window's ticked stopped background agents, by id.
+    #[cfg(feature = "terminal")]
+    cleanup_subs: std::collections::HashSet<String>,
     /// A main sync is in flight / when the last one finished (throttle).
     main_syncing: bool,
     main_synced_at: Option<std::time::Instant>,
@@ -1630,7 +1633,8 @@ enum GhCard {
         at: String,
         verb: &'static str,
         body: Entity<mdview::MarkdownView>,
-        /// Its markdown, to hand to an agent (`None`: the description, which isn't feedback).
+        /// Its markdown, to hand to an agent (`None`: the description or a bot's comment — a
+        /// deploy link, a CI report — which isn't feedback).
         #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
         raw: Option<String>,
     },
@@ -1952,6 +1956,8 @@ impl AgentsView {
             cleanup_checked: std::collections::HashSet::new(),
             #[cfg(feature = "terminal")]
             cleanup_tabs: std::collections::HashSet::new(),
+            #[cfg(feature = "terminal")]
+            cleanup_subs: std::collections::HashSet::new(),
             main_syncing: false,
             main_synced_at: None,
             sidebar_w: 330.0,
@@ -3068,29 +3074,13 @@ impl Render for ModalWindow {
             .text_color(theme::get().text)
             .font_family(theme::font::ui_family())
             .text_size(px(theme::get().ui_font_size))
-            // Escape closes (cancels) the window; Enter triggers the confirm-style
-            // dialogs' primary action (New Branch / Rollback / Clear Data), IDE
-            // default-button style. Non-confirm windows (Settings, Plugins, Merge, …)
-            // deliberately ignore Enter.
+            // Escape closes (cancels) the window; Enter triggers a confirm-style dialog's
+            // primary action, IDE default-button style (see `Kyde::modal_confirm`).
             .on_key_down(
                 cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
                     match ev.keystroke.key.as_str() {
                         "escape" => window.remove_window(),
-                        "enter" if kind == ModalKind::NewBranch => {
-                            this.kyde.update(cx, Kyde::do_create_branch);
-                        }
-                        "enter" if kind == ModalKind::Rollback => {
-                            this.kyde.update(cx, Kyde::do_rollback);
-                        }
-                        "enter" if kind == ModalKind::ClearData => {
-                            this.kyde.update(cx, Kyde::do_clear_data);
-                        }
-                        "enter" if kind == ModalKind::ClearLocalHistory => {
-                            this.kyde.update(cx, Kyde::do_clear_local_history);
-                        }
-                        "enter" if kind == ModalKind::ConfirmGitInit => {
-                            this.kyde.update(cx, Kyde::confirm_git_init);
-                        }
+                        "enter" => this.kyde.update(cx, |k, kcx| k.modal_confirm(kind, kcx)),
                         _ => {}
                     }
                 }),
@@ -4804,6 +4794,49 @@ mod gpui_smoke_tests {
                 assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
             })
             .unwrap();
+    }
+
+    /// Enter in a confirmation window does what its primary button does (issue #162): the
+    /// "Remove worktree?" window removes the worktree and closes.
+    #[gpui::test]
+    fn enter_confirms_the_remove_worktree_window(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = PathBuf::from(format!("{}-wt", dir.display()));
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "agent/enter"])
+            .arg(&wt)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.removing = Some((dir.clone(), wt.clone()));
+                k.open_modal_window(
+                    ModalKind::RemoveWorktree,
+                    "Remove Worktree",
+                    480.0,
+                    250.0,
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let modal = handle
+            .update(cx, |k, _w, _cx| k.remove_wt_win)
+            .unwrap()
+            .expect("the confirmation window is open");
+        cx.update_window(modal.into(), |_, window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.remove_wt_win.is_none(), "window closed");
+            })
+            .unwrap();
+        assert!(!wt.exists(), "Enter removed the worktree");
     }
 
     /// A select's open list closes on a click outside it — and a click on the control while
@@ -7613,6 +7646,56 @@ mod gpui_smoke_tests {
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
+    /// A stopped background agent's tab is finished too (#163): the auto cleanup dismisses
+    /// one stopped long enough ago — not one that just stopped — and the Clean Up window
+    /// dismisses a ticked one.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_dismisses_stopped_background_agents(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let stopped = |id: &str, at: std::time::SystemTime| agents::DoneSub {
+                    sub: agents::SubAgent {
+                        id: id.into(),
+                        worktree: Some(dir.clone()),
+                        what: "Review the diff".into(),
+                        steps: Vec::new(),
+                        at,
+                    },
+                    tab: "t".into(),
+                    home: dir.clone(),
+                    from: "Review".into(),
+                    finished: true,
+                };
+                let hour_ago = std::time::SystemTime::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                k.agents.done_subs = vec![
+                    stopped("old", hour_ago),
+                    stopped("new", std::time::SystemTime::now()),
+                ];
+                // Auto mode (the default): the tab just started, the old background agent goes.
+                let found = agents::SweepFound::default();
+                assert_eq!(k.agents_apply_sweep(found, false, cx), 1);
+                let ids: Vec<_> = k.agents.done_subs.iter().map(|d| &d.sub.id).collect();
+                assert_eq!(ids, ["new"]);
+                // Ticked in the Clean Up window, confirming dismisses it.
+                k.agents.cleanup_subs.insert("new".into());
+                k.agents_clean_up_checked(cx);
+                assert!(k.agents.done_subs.is_empty());
             })
             .unwrap();
     }
