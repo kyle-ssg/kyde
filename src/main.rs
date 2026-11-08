@@ -1486,6 +1486,9 @@ struct AgentsView {
     /// The Clean Up window's ticked finished tabs, as (worktree, spawn time).
     #[cfg(feature = "terminal")]
     cleanup_tabs: std::collections::HashSet<(PathBuf, std::time::SystemTime)>,
+    /// The Clean Up window's ticked stopped background agents, by id.
+    #[cfg(feature = "terminal")]
+    cleanup_subs: std::collections::HashSet<String>,
     /// A main sync is in flight / when the last one finished (throttle).
     main_syncing: bool,
     main_synced_at: Option<std::time::Instant>,
@@ -1952,6 +1955,8 @@ impl AgentsView {
             cleanup_checked: std::collections::HashSet::new(),
             #[cfg(feature = "terminal")]
             cleanup_tabs: std::collections::HashSet::new(),
+            #[cfg(feature = "terminal")]
+            cleanup_subs: std::collections::HashSet::new(),
             main_syncing: false,
             main_synced_at: None,
             sidebar_w: 330.0,
@@ -7593,6 +7598,56 @@ mod gpui_smoke_tests {
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
+    /// A stopped background agent's tab is finished too (#163): the auto cleanup dismisses
+    /// one stopped long enough ago — not one that just stopped — and the Clean Up window
+    /// dismisses a ticked one.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_dismisses_stopped_background_agents(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let stopped = |id: &str, at: std::time::SystemTime| agents::DoneSub {
+                    sub: agents::SubAgent {
+                        id: id.into(),
+                        worktree: Some(dir.clone()),
+                        what: "Review the diff".into(),
+                        steps: Vec::new(),
+                        at,
+                    },
+                    tab: "t".into(),
+                    home: dir.clone(),
+                    from: "Review".into(),
+                    finished: true,
+                };
+                let hour_ago = std::time::SystemTime::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                k.agents.done_subs = vec![
+                    stopped("old", hour_ago),
+                    stopped("new", std::time::SystemTime::now()),
+                ];
+                // Auto mode (the default): the tab just started, the old background agent goes.
+                let found = agents::SweepFound::default();
+                assert_eq!(k.agents_apply_sweep(found, false, cx), 1);
+                let ids: Vec<_> = k.agents.done_subs.iter().map(|d| &d.sub.id).collect();
+                assert_eq!(ids, ["new"]);
+                // Ticked in the Clean Up window, confirming dismisses it.
+                k.agents.cleanup_subs.insert("new".into());
+                k.agents_clean_up_checked(cx);
+                assert!(k.agents.done_subs.is_empty());
             })
             .unwrap();
     }
