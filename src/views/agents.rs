@@ -4247,6 +4247,35 @@ impl Kyde {
                         cx.listener(move |this, _e, _w, cx| this.agents_show_tab(which, cx)),
                     )
             };
+        // Each tab's pill width (full label, short label), measured: a pill's padding +
+        // border, its label, and its count badge when it has one.
+        let pill_w = {
+            let ts = cx.text_system().clone();
+            let font = ts.resolve_font(&gpui::font(ui));
+            let text_w = move |s: &str, size: f32| -> f32 {
+                s.chars()
+                    .map(|c| {
+                        ts.advance(font, px(size), c)
+                            .map_or(size * 0.6, |a| f32::from(a.width))
+                    })
+                    .sum()
+            };
+            move |label: &str, count: usize| {
+                let badge = if count > 0 {
+                    6.0 + 10.0 + text_w(&count.to_string(), 10.0)
+                } else {
+                    0.0
+                };
+                18.0 + text_w(label, fs) + badge
+            }
+        };
+        let widths: Vec<(f32, f32)> = SIDE_TABS
+            .iter()
+            .map(|(which, _, full, short)| {
+                let n = total(*which);
+                (pill_w(full, n), pill_w(short, n))
+            })
+            .collect();
         let icon = |id: &'static str, path: &'static str, tip: SharedString| {
             ui::icon_btn(id, 22.0)
                 .tooltip(ui::tip(tip))
@@ -4304,6 +4333,31 @@ impl Kyde {
                 .into_any_element(),
             ]
         };
+        // What room the tabs have beside the tools + the Agents-only toggle (22 px icons,
+        // 2 px gaps, 6 px padding each side); the ones that don't fit go behind a ▾ menu.
+        #[allow(clippy::cast_precision_loss)]
+        let avail = self.agents.sidebar_w - 12.0 - (tools.len() + 1) as f32 * 24.0 - 4.0;
+        let active = SIDE_TABS.iter().position(|t| t.0 == tab).unwrap_or(0);
+        let (shown, short) = fit_tabs(avail, &widths, active, 2.0, 22.0);
+        let hidden: Vec<SideTab> = (0..SIDE_TABS.len())
+            .filter(|i| !shown.contains(i))
+            .map(|i| SIDE_TABS[i].0)
+            .collect();
+        let more = (!hidden.is_empty()).then(|| {
+            icon(
+                "agents-tab-more",
+                "icons/chevron-down.svg",
+                "More tabs".into(),
+            )
+            .flex_none()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    let at = gpui::point(e.position.x - px(8.0), e.position.y + px(12.0));
+                    this.open_menu(at, MenuTarget::SideTabs(hidden.clone()), cx);
+                }),
+            )
+        });
         // Code | Issues | Pull Requests | CI, this tab's tools, and the Agents-only toggle.
         let header = div()
             .flex()
@@ -4323,10 +4377,11 @@ impl Kyde {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(tab_btn("agents-tab-code", "Code", SideTab::Code, cx))
-                    .child(tab_btn("agents-tab-issues", "Issues", SideTab::Issues, cx))
-                    .child(tab_btn("agents-tab-prs", "Pull Requests", SideTab::Prs, cx))
-                    .child(tab_btn("agents-tab-ci", "CI", SideTab::Ci, cx)),
+                    .children(shown.into_iter().map(|i| {
+                        let (which, id, full, brief) = SIDE_TABS[i];
+                        tab_btn(id, if short { brief } else { full }, which, cx)
+                    }))
+                    .children(more),
             )
             .children(tools)
             .child({
@@ -7716,6 +7771,53 @@ fn agents_pending_row(name: String, last: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// The sidebar's tabs, in order: (tab, element id, label, short label for a narrow sidebar).
+pub(crate) const SIDE_TABS: [(SideTab, &str, &str, &str); 4] = [
+    (SideTab::Code, "agents-tab-code", "Code", "Code"),
+    (SideTab::Issues, "agents-tab-issues", "Issues", "Issues"),
+    (SideTab::Prs, "agents-tab-prs", "Pull Requests", "PRs"),
+    (SideTab::Ci, "agents-tab-ci", "CI", "CI"),
+];
+
+/// Which sidebar tabs fit in `avail` px, given each one's (full, short) pill width, `gap`
+/// between pills and the width of the ▾ that holds the rest: every tab at full width if
+/// they fit, else every tab short, else the `active` one plus as many others as fit (in
+/// order), short. Returns the shown tabs' indices in order, and whether they're short.
+fn fit_tabs(
+    avail: f32,
+    widths: &[(f32, f32)],
+    active: usize,
+    gap: f32,
+    more: f32,
+) -> (Vec<usize>, bool) {
+    #[allow(clippy::cast_precision_loss)]
+    let span = |tabs: &[usize], short: bool| -> f32 {
+        let pills: f32 = tabs
+            .iter()
+            .filter_map(|&i| widths.get(i))
+            .map(|&(full, brief)| if short { brief } else { full })
+            .sum();
+        pills + gap * tabs.len().saturating_sub(1) as f32
+    };
+    let all: Vec<usize> = (0..widths.len()).collect();
+    if span(&all, false) <= avail {
+        return (all, false);
+    }
+    if span(&all, true) <= avail {
+        return (all, true);
+    }
+    let room = avail - more - gap;
+    let mut shown = vec![active];
+    for i in all.into_iter().filter(|&i| i != active) {
+        shown.push(i);
+        if span(&shown, true) > room {
+            shown.pop();
+        }
+    }
+    shown.sort_unstable();
+    (shown, true)
+}
+
 /// A GitHub list row's action button (`agents_gh_row`).
 #[derive(Clone, Copy)]
 enum RowAct {
@@ -8577,4 +8679,21 @@ fn leaf_name(p: &Path) -> String {
         || p.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A narrowing sidebar shortens the tab labels, then tucks tabs behind the ▾ — never
+    /// the one you're on.
+    #[test]
+    fn sidebar_tabs_shorten_then_overflow_keeping_the_active_one() {
+        // Code, Issues, Pull Requests | PRs, CI.
+        let w = [(50.0, 50.0), (60.0, 60.0), (110.0, 45.0), (30.0, 30.0)];
+        assert_eq!(fit_tabs(300.0, &w, 3, 2.0, 22.0), (vec![0, 1, 2, 3], false));
+        assert_eq!(fit_tabs(200.0, &w, 3, 2.0, 22.0), (vec![0, 1, 2, 3], true));
+        // Room for two short tabs beside the ▾: CI (active) stays, PRs + Issues go.
+        assert_eq!(fit_tabs(110.0, &w, 3, 2.0, 22.0), (vec![0, 3], true));
+    }
 }

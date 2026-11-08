@@ -32,6 +32,7 @@ mod terminal_panel;
 mod toolbar;
 mod worktree;
 
+pub(crate) use agents::SIDE_TABS;
 pub(crate) use context_menu::MenuEntry;
 pub(crate) use file_ops::{REVEAL_IN_FILES, REVEAL_IN_TERMINAL};
 pub(crate) use keyboard::{nav_keys, NavTarget};

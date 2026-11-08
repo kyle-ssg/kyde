@@ -609,6 +609,18 @@ impl Kyde {
                     });
                 }
             }
+            MenuTarget::SideTabs(tabs) => {
+                for &tab in tabs {
+                    let Some(&(_, _, label, _)) =
+                        crate::views::SIDE_TABS.iter().find(|t| t.0 == tab)
+                    else {
+                        continue;
+                    };
+                    out.push(MenuEntry::item(label, move |this, _w, cx| {
+                        this.agents_show_tab(tab, cx);
+                    }));
+                }
+            }
             // Same compare options as the header dropdown, applied to the right-clicked
             // commit (`HistoryCompare`) or file row (`HistoryFile` — the file stays selected).
             MenuTarget::HistoryCompare(idx) | MenuTarget::HistoryFile(idx) => {

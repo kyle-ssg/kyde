@@ -791,6 +791,8 @@ enum MenuTarget {
     Tab(usize),
     /// The tab-bar overflow chooser (`▾`): a flat list of every open tab to jump to.
     TabList,
+    /// The Agents sidebar's `▾`: the tabs too narrow a sidebar has no room for.
+    SideTabs(Vec<SideTab>),
     /// A commit row in the History list (by index into `history.commits`) — its menu offers
     /// the same compare modes as the header dropdown.
     HistoryCompare(usize),

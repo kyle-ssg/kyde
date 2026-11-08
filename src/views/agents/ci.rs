@@ -444,11 +444,16 @@ impl Kyde {
         let run = &d.run;
         let state = run.state();
         let retrying = self.agents.ci.rerunning.contains(&id);
-        // Superseded: (the latest run's id, its number when listed).
-        let newer = self
-            .ci_listed(&space, id)
-            .and_then(|r| r.superseded_by)
-            .map(|n| (n, self.ci_listed(&space, n).map(|r| r.number)));
+        // The runs that supersede it, the latest first (none: it's current).
+        let superseding: Vec<WorkflowRun> =
+            match (self.agents.ci.runs.get(&space), self.ci_listed(&space, id)) {
+                (Some(GhList::Ready(v)), Some(me)) => kyde_git::github::superseding(v, me)
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+                _ => Vec::new(),
+            };
+        let superseded = !superseding.is_empty();
         let pill_color = match state {
             RunState::Running => t.status_modified,
             RunState::Failed => t.status_conflict,
@@ -475,24 +480,7 @@ impl Kyde {
             what.push_str(&format!(" · attempt {}", run.attempt));
         }
         let mut actions: Vec<gpui::AnyElement> = Vec::new();
-        if let Some((latest, number)) = newer {
-            let sp = space.clone();
-            let label = number.map_or_else(
-                || "View the latest run".to_string(),
-                |n| format!("View the latest run #{n}"),
-            );
-            actions.push(
-                btn_primary("agents-ci-latest", label)
-                    .debug_selector(|| "agents-ci-latest".into())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| {
-                            this.agents_select_run(sp.clone(), latest, cx);
-                        }),
-                    )
-                    .into_any_element(),
-            );
-        } else if state == RunState::Failed {
+        if !superseded && state == RunState::Failed {
             let sp = space.clone();
             actions.push(if retrying {
                 btn_primary_state("agents-ci-retry", "Retrying…", true).into_any_element()
@@ -508,7 +496,7 @@ impl Kyde {
                     .into_any_element()
             });
         }
-        if state != RunState::Running && newer.is_none() {
+        if state != RunState::Running && !superseded {
             let sp = space.clone();
             actions.push(
                 btn_secondary_state("agents-ci-rerun-all", "Re-run all jobs", retrying)
@@ -560,17 +548,8 @@ impl Kyde {
                             .child(SharedString::from(what)),
                     ),
             )
-            .when(newer.is_some(), |d| {
-                d.child(
-                    div()
-                        .text_size(px(fs - 1.0))
-                        .text_color(t.secondary_text)
-                        .child(SharedString::from(format!(
-                            "Superseded by a newer {} run on {} — re-running this one could undo \
-                             it (an old deploy would roll back the new one).",
-                            run.workflow, run.branch
-                        ))),
-                )
+            .when(superseded, |d| {
+                d.child(self.ci_superseded_line(&space, &superseding, cx))
             })
             .child(div().flex().flex_row().gap_2().pt_1().children(actions));
         // The log takes the room when there is one; the jobs scroll above it.
@@ -601,6 +580,76 @@ impl Kyde {
                 d.child(self.ci_log_header(cx)).child(self.render_ci_log())
             })
             .into_any_element()
+    }
+
+    /// "Superseded by #371, #372 · latest ✓ #373 on main": the runs in between, then the
+    /// latest with its status — each a link to that run. `superseding` is newest first.
+    fn ci_superseded_line(
+        &self,
+        space: &Path,
+        superseding: &[WorkflowRun],
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let fs = t.ui_font_size;
+        let link = |run: &WorkflowRun, latest: bool, cx: &mut Context<Self>| {
+            let (sp, rid) = (space.to_path_buf(), run.id);
+            let (glyph, color) = state_glyph(run.state());
+            div()
+                .id(SharedString::from(format!("agents-ci-sup-{rid}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(t.primary)
+                .hover(|d| d.bg(t.bg_mid))
+                .when(latest, |d| {
+                    d.debug_selector(|| "agents-ci-latest".into())
+                        .child(div().text_color(color).child(glyph))
+                })
+                .child(SharedString::from(if latest {
+                    format!("#{} on {}", run.number, run.branch)
+                } else {
+                    format!("#{}", run.number)
+                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        this.agents_select_run(sp.clone(), rid, cx);
+                    }),
+                )
+        };
+        let Some((latest, between)) = superseding.split_first() else {
+            return div().into_any_element();
+        };
+        let mut line = div()
+            .id("agents-ci-superseded")
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .text_size(px(fs - 1.0))
+            .text_color(t.secondary_text)
+            .tooltip(ui::tip(
+                "No re-run here: re-running an old run could undo a newer one (an old deploy \
+                 would roll back the new one)",
+            ))
+            .child("Superseded by");
+        // The ones in between, oldest first.
+        for (k, run) in between.iter().rev().enumerate() {
+            if k > 0 {
+                line = line.child(",");
+            }
+            line = line.child(link(run, false, cx));
+        }
+        if !between.is_empty() {
+            line = line.child("· latest");
+        }
+        line.child(link(latest, true, cx)).into_any_element()
     }
 
     /// One row per job — its glyph, name and time (or the step it's on) — with a failed

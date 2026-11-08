@@ -1102,9 +1102,10 @@ pub struct WorkflowRun {
     pub created_at: String,
     /// Which attempt this is (each re-run counts up from 1).
     pub attempt: u64,
-    /// The id of the latest run of the same workflow on the same branch, when that's a newer
-    /// one — this run is then out of date (re-running an old deploy would roll it back). Set
-    /// by [`parse_runs`] from the runs listed with it; `None` from [`run_detail`].
+    /// The id of a newer run of the same workflow for the same work — on the same branch, or
+    /// of the same change landed elsewhere (a PR's squash merge onto main) — when there is
+    /// one: this run is then out of date (re-running an old deploy would roll the new one
+    /// back). Set by [`parse_runs`] from the runs listed with it; `None` from [`run_detail`].
     pub superseded_by: Option<u64>,
 }
 
@@ -1114,6 +1115,41 @@ impl WorkflowRun {
     pub fn state(&self) -> RunState {
         RunState::of(&self.status, &self.conclusion)
     }
+
+    /// Whether `other` runs the same workflow for the same work: on the same branch, or for
+    /// the same change (a PR's runs and its squash-merged commit's).
+    #[must_use]
+    pub fn same_work(&self, other: &Self) -> bool {
+        let change = change_title(&self.title);
+        self.workflow == other.workflow
+            && (self.branch == other.branch
+                || (!change.is_empty() && change == change_title(&other.title)))
+    }
+}
+
+/// The runs in `runs` (newest first, as listed) that supersede `run`, newest first: its
+/// latest (`superseded_by`) and every newer run of the same work before it.
+///
+/// ```
+/// use kyde_git::github::{parse_runs, superseding};
+/// let v = parse_runs(
+///     r#"[{"databaseId":3,"workflowName":"build","headBranch":"main","status":"queued"},
+///        {"databaseId":2,"workflowName":"build","headBranch":"main","status":"queued"},
+///        {"databaseId":1,"workflowName":"build","headBranch":"main","status":"queued"}]"#,
+/// ).unwrap();
+/// let by: Vec<u64> = superseding(&v, &v[2]).iter().map(|r| r.id).collect();
+/// assert_eq!(by, [3, 2]); // the latest, then the one in between
+/// assert!(superseding(&v, &v[0]).is_empty());
+/// ```
+#[must_use]
+pub fn superseding<'a>(runs: &'a [WorkflowRun], run: &WorkflowRun) -> Vec<&'a WorkflowRun> {
+    if run.superseded_by.is_none() {
+        return Vec::new();
+    }
+    runs.iter()
+        .take_while(|r| r.id != run.id)
+        .filter(|r| Some(r.id) == run.superseded_by || r.same_work(run))
+        .collect()
 }
 
 /// One job of a workflow run.
@@ -1275,7 +1311,8 @@ pub fn runs(dir: &Path) -> Result<Vec<WorkflowRun>> {
 }
 
 /// Parse `gh run list --json databaseId,number,…` (see `RUN_FIELDS`; newest first), marking
-/// each run a newer one of the same workflow on the same branch has superseded.
+/// each run that a newer run of the same workflow supersedes: one on the same branch, or one
+/// for the same change — the same title, give or take the ` (#N)` a squash merge adds.
 ///
 /// ```
 /// use kyde_git::github::{parse_runs, RunState};
@@ -1285,35 +1322,44 @@ pub fn runs(dir: &Path) -> Result<Vec<WorkflowRun>> {
 ///        {"databaseId":41,"number":7,"workflowName":"build","headBranch":"main",
 ///         "status":"completed","conclusion":"timed_out"},
 ///        {"databaseId":40,"number":3,"workflowName":"deploy","headBranch":"main",
-///         "status":"completed","conclusion":"skipped"}]"#,
+///         "status":"completed","conclusion":"skipped"},
+///        {"databaseId":39,"number":6,"workflowName":"build","headBranch":"fix-y",
+///         "displayTitle":"Fix x","status":"completed","conclusion":"failure"}]"#,
 /// ).unwrap();
 /// assert_eq!((v[0].id, v[0].title.as_str()), (42, "Fix x"));
-/// let states: Vec<RunState> = v.iter().map(|r| r.state()).collect();
+/// let states: Vec<RunState> = v[..3].iter().map(|r| r.state()).collect();
 /// assert_eq!(states, [RunState::Running, RunState::Failed, RunState::Passed]);
 /// let superseded: Vec<Option<u64>> = v.iter().map(|r| r.superseded_by).collect();
-/// assert_eq!(superseded, [None, Some(42), None]); // the older `build` on main is out of date
+/// // The older `build` on main is out of date, and so is the PR branch's run of "Fix x"
+/// // (main's run 42 is the same change, merged).
+/// assert_eq!(superseded, [None, Some(42), None, Some(42)]);
 /// ```
 pub fn parse_runs(json: &str) -> Result<Vec<WorkflowRun>> {
     let raw: Vec<RawRun> = serde_json::from_str(json).map_err(|source| GitError::Json {
         what: "gh run list".into(),
         source,
     })?;
-    let mut latest: std::collections::HashMap<(String, String), u64> =
-        std::collections::HashMap::new();
-    Ok(raw
-        .into_iter()
-        .map(|r| {
-            let mut run = WorkflowRun::from(r);
-            let key = (run.workflow.clone(), run.branch.clone());
-            match latest.get(&key) {
-                Some(&newer) => run.superseded_by = Some(newer),
-                None => {
-                    latest.insert(key, run.id);
-                }
-            }
-            run
-        })
-        .collect())
+    let mut runs: Vec<WorkflowRun> = raw.into_iter().map(WorkflowRun::from).collect();
+    // Newest first: the newest same-work run before each one is already resolved to its own
+    // latest, so following it reaches the end of the chain (PR run → merged run → newer).
+    for i in 0..runs.len() {
+        let latest = runs[..i]
+            .iter()
+            .find(|n| n.same_work(&runs[i]))
+            .map(|n| n.superseded_by.unwrap_or(n.id));
+        runs[i].superseded_by = latest;
+    }
+    Ok(runs)
+}
+
+/// A run's title as the change it's for: without the ` (#N)` a squash merge adds to the PR
+/// title, so the PR's runs and the merged commit's runs match.
+fn change_title(title: &str) -> &str {
+    let t = title.trim();
+    t.strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" (#"))
+        .filter(|(_, n)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .map_or(t, |(head, _)| head)
 }
 
 /// Run `id` in full (`gh run view`): its latest attempt and jobs, each failed job with its
