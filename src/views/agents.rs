@@ -1552,10 +1552,15 @@ impl Kyde {
             }
         }
         #[cfg(feature = "terminal")]
-        if let Some(g) = self.agents.tabs.remove(wt) {
-            for t in &g.tabs {
-                t.view.read(cx).kill_host();
+        {
+            if let Some(g) = self.agents.tabs.remove(wt) {
+                for t in &g.tabs {
+                    t.view.read(cx).kill_host();
+                }
             }
+            // Its stopped background agents' tabs go too.
+            let gone: Vec<String> = self.agents_done_in(wt).map(|d| d.sub.id.clone()).collect();
+            self.agents_dismiss_subs(&gone, cx);
         }
         if self.agents.selected.as_deref() == Some(wt) {
             self.agents.selected = owner;
@@ -2317,12 +2322,48 @@ impl Kyde {
 
     /// Dismiss background agent `id`'s finished work.
     pub(crate) fn agents_dismiss_sub(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.agents.done_subs.retain(|d| d.sub.id != id);
-        if self.agents.sub_shown.as_deref() == Some(id) {
+        self.agents_dismiss_subs(&[id.to_string()], cx);
+    }
+
+    /// Dismiss the finished work of background agents `ids`; returns how many went.
+    fn agents_dismiss_subs(&mut self, ids: &[String], cx: &mut Context<Self>) -> usize {
+        let before = self.agents.done_subs.len();
+        self.agents.done_subs.retain(|d| !ids.contains(&d.sub.id));
+        if self
+            .agents
+            .sub_shown
+            .as_ref()
+            .is_some_and(|s| ids.contains(s))
+        {
             self.agents.sub_shown = None;
         }
-        self.agents_save_done(cx);
-        cx.notify();
+        let gone = before - self.agents.done_subs.len();
+        if gone > 0 {
+            self.agents_save_done(cx);
+            cx.notify();
+        }
+        gone
+    }
+
+    /// The stopped background agent on screen right now, if the Agents view is showing one —
+    /// as `render_agents_tabs` picks it: the one clicked, else the first when no tab is there.
+    fn agents_visible_sub(&self) -> Option<&str> {
+        if self.mode != Mode::Agents || self.diff_view_open {
+            return None;
+        }
+        let wt = self.agents.selected.as_deref()?;
+        let has_tab = self.agents.tabs.get(wt).is_some_and(|g| !g.tabs.is_empty());
+        let ids: Vec<&str> = self
+            .agents_subs_in(wt)
+            .map(|(.., s)| s)
+            .chain(self.agents_done_in(wt).map(|d| &d.sub))
+            .map(|s| s.id.as_str())
+            .collect();
+        let picked = self.agents.sub_shown.as_deref();
+        ids.iter()
+            .find(|id| Some(**id) == picked)
+            .or_else(|| ids.first().filter(|_| !has_tab))
+            .copied()
     }
 
     /// Save the stopped background agents' work (`agents::done_path`), off the UI thread.
@@ -3484,6 +3525,20 @@ impl Kyde {
                     closed += 1;
                 }
             }
+            // A stopped background agent's tab has nothing left running: it goes once it's
+            // been stopped as long as a tab must be quiet — never the one on screen.
+            if rules.agent_quit {
+                let shown = self.agents_visible_sub();
+                let stale: Vec<String> = self
+                    .agents
+                    .done_subs
+                    .iter()
+                    .filter(|d| shown != Some(d.sub.id.as_str()))
+                    .filter(|d| d.sub.at.elapsed().is_ok_and(|e| e >= rules.quiet()))
+                    .map(|d| d.sub.id.clone())
+                    .collect();
+                closed += self.agents_dismiss_subs(&stale, cx);
+            }
             if closed > 0 {
                 self.agents.note = Some(format!(
                     "Closed {closed} finished tab{}",
@@ -3573,13 +3628,32 @@ impl Kyde {
             .collect()
     }
 
-    /// Act on the Clean Up window: close the ticked finished tabs, then remove the ticked
-    /// worktrees — one after another (git locks the repo's worktree list), closing their tabs;
-    /// branches are kept.
+    /// The Clean Up window's ticked stopped background agents that closing would dismiss: still
+    /// kept, and not in a worktree it's removing anyway (those go with it).
+    fn agents_cleanup_subs_to_close(&self) -> Vec<String> {
+        self.agents
+            .done_subs
+            .iter()
+            .filter(|d| self.agents.cleanup_subs.contains(&d.sub.id))
+            .filter(|d| {
+                d.sub
+                    .worktree
+                    .as_ref()
+                    .is_none_or(|w| !self.agents.cleanup_checked.contains(w))
+            })
+            .map(|d| d.sub.id.clone())
+            .collect()
+    }
+
+    /// Act on the Clean Up window: close the ticked finished tabs and background agents, then
+    /// remove the ticked worktrees — one after another (git locks the repo's worktree list),
+    /// closing their tabs; branches are kept.
     pub(crate) fn agents_clean_up_checked(&mut self, cx: &mut Context<Self>) {
         let tabs = self.agents_cleanup_tabs_to_close();
         self.agents.cleanup_tabs.clear();
-        let mut closed = 0;
+        let subs = self.agents_cleanup_subs_to_close();
+        self.agents.cleanup_subs.clear();
+        let mut closed = self.agents_dismiss_subs(&subs, cx);
         for (wt, spawned) in tabs {
             if let Some(i) = self
                 .agents
@@ -3627,10 +3701,44 @@ impl Kyde {
         let mut tab_rows: Vec<gpui::AnyElement> = Vec::new();
         for space in &self.agents.cfg.spaces {
             for wt in space.rows() {
+                let removing = self.agents.cleanup_checked.contains(&wt);
+                // Stopped background agents: finished by definition.
+                for d in self.agents_done_in(&wt) {
+                    let id = d.sub.id.clone();
+                    let mut line = format!(
+                        "Background agent from “{}” · {}",
+                        d.from,
+                        if d.finished { "finished" } else { "stopped" }
+                    );
+                    if removing {
+                        line.push_str(" · closes with its worktree");
+                    }
+                    let row = cleanup_row(
+                        format!("cleanup-sub-{id}").into(),
+                        removing || self.agents.cleanup_subs.contains(&id),
+                        d.sub.what.clone(),
+                        worktree_title(Some(&space.path), &wt),
+                        line,
+                        false,
+                    );
+                    tab_rows.push(if removing {
+                        row.into_any_element()
+                    } else {
+                        row.on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _e, _w, cx| {
+                                if !this.agents.cleanup_subs.remove(&id) {
+                                    this.agents.cleanup_subs.insert(id.clone());
+                                }
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    });
+                }
                 let Some(g) = self.agents.tabs.get(&wt) else {
                     continue;
                 };
-                let removing = self.agents.cleanup_checked.contains(&wt);
                 for tab in &g.tabs {
                     let Some(why) = &tab.verdict else {
                         continue;
@@ -3757,12 +3865,14 @@ impl Kyde {
                     .is_some_and(|s| self.agents_wt_cleanup(&s.path, wt).2)
             })
             .count();
-        let closing = self.agents_cleanup_tabs_to_close().len();
+        let closing =
+            self.agents_cleanup_tabs_to_close().len() + self.agents_cleanup_subs_to_close().len();
         let cancel = btn_secondary("cleanup-cancel", "Cancel").on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, _e, _w, cx| {
                 this.agents.cleanup_checked.clear();
                 this.agents.cleanup_tabs.clear();
+                this.agents.cleanup_subs.clear();
                 this.close_modal_window(ModalKind::Cleanup, cx);
             }),
         );
@@ -7495,6 +7605,19 @@ impl Kyde {
                         .iter()
                         .filter(|t| t.verdict.is_some())
                         .map(move |t| (wt.clone(), t.spawned_at))
+                })
+                .collect();
+            // …and every stopped background agent the window lists.
+            self.agents.cleanup_subs = self
+                .agents
+                .cfg
+                .spaces
+                .iter()
+                .flat_map(kyde_config::agents::Space::rows)
+                .flat_map(|wt| {
+                    self.agents_done_in(&wt)
+                        .map(|d| d.sub.id.clone())
+                        .collect::<Vec<_>>()
                 })
                 .collect();
             self.open_modal_window(ModalKind::Cleanup, "Clean Up", 600.0, 540.0, cx);
