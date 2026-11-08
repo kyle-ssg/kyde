@@ -380,11 +380,14 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
     // process owns it.
     let listener = unsafe { UnixListener::from_raw_fd(fd) };
     let spec: HostSpec = serde_json::from_str(spec).map_err(io::Error::other)?;
+    let env = spec.env.iter().cloned().collect();
+    #[cfg(target_os = "macos")]
+    let env = crate::platform::locale::with_lang(env);
     let options = PtyOptions {
         shell: Some(Shell::new(spec.shell.clone(), Vec::new())),
         working_directory: Some(spec.cwd.clone()),
         drain_on_exit: false,
-        env: spec.env.iter().cloned().collect(),
+        env,
     };
     let ws = WindowSize {
         num_lines: spec.rows,
