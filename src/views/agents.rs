@@ -2304,13 +2304,15 @@ impl Kyde {
     }
 
     /// Keep the work of background agents that `stopped` until it's dismissed (a newer read of
-    /// one replaces the older), and drop any that are `live` again; saves when that changed.
+    /// one replaces the older; one that did nothing has nothing to keep), and drop any that are
+    /// `live` again; saves when that changed.
     fn agents_keep_done(
         &mut self,
-        stopped: Vec<crate::agents::DoneSub>,
+        mut stopped: Vec<crate::agents::DoneSub>,
         live: &[String],
         cx: &mut Context<Self>,
     ) {
+        stopped.retain(|s| !s.sub.steps.is_empty());
         let before = self.agents.done_subs.len();
         self.agents
             .done_subs
@@ -2387,7 +2389,8 @@ impl Kyde {
     }
 
     /// Bring back the stopped background agents' work saved at the last quit, off the UI
-    /// thread (any already found this launch stay).
+    /// thread (any already found this launch stay). Ones that did nothing — Claude Code's own
+    /// helpers, which older builds kept — are dropped, and the file rewritten without them.
     fn agents_load_done(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let saved: Vec<crate::agents::DoneSub> = cx
@@ -2401,10 +2404,16 @@ impl Kyde {
                 .await;
             this.update(cx, |this, cx| {
                 let mut kept = saved;
+                let before = kept.len();
+                kept.retain(|s| !s.sub.steps.is_empty());
+                let purged = kept.len() < before;
                 let now = std::mem::take(&mut this.agents.done_subs);
                 kept.retain(|s| !now.iter().any(|d| d.sub.id == s.sub.id));
                 kept.extend(now);
                 this.agents.done_subs = kept;
+                if purged {
+                    this.agents_save_done(cx);
+                }
                 cx.notify();
             })
             .ok();

@@ -167,7 +167,9 @@ pub(crate) struct SubReport {
     pub agent_transcript: Option<std::path::PathBuf>,
 }
 
-/// Read a subagent's hook event. `None` for unreadable text or the session's own event.
+/// Read a subagent's hook event. `None` for unreadable text, the session's own event, or an
+/// untyped one: Claude Code's own helpers (its next-prompt suggestion, each turn) report as
+/// subagents with no `agent_type` and no transcript — not agents the session sent.
 pub(crate) fn parse_sub(json: &str) -> Option<SubReport> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let id = agent_of(&v)?.to_string();
@@ -176,7 +178,7 @@ pub(crate) fn parse_sub(json: &str) -> Option<SubReport> {
     };
     Some(SubReport {
         id,
-        kind: s(&v, "agent_type").unwrap_or_else(|| "agent".into()),
+        kind: s(&v, "agent_type")?,
         ended: s(&v, "hook_event_name").as_deref() == Some("SubagentStop"),
         session: s(&v, "session_id"),
         cwd: s(&v, "cwd").map(Into::into),
@@ -2007,6 +2009,12 @@ mod tests {
         assert_eq!(parse_hook(&start), None, "not the tab's own event");
         let sub = parse_sub(&start).unwrap();
         assert_eq!((sub.id.as_str(), sub.ended), ("a1", false));
+        let helper = start.replace("general-purpose", "");
+        assert_eq!(
+            parse_sub(&helper),
+            None,
+            "Claude Code's own helper, not an agent"
+        );
         assert_eq!(sub_worktree(&sub, None, &[]), Some(own.clone()));
         // Started in the checkout, it works in the other worktree by path — runs commands and
         // reads there before it writes anything: it's at work there.
