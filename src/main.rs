@@ -3068,29 +3068,13 @@ impl Render for ModalWindow {
             .text_color(theme::get().text)
             .font_family(theme::font::ui_family())
             .text_size(px(theme::get().ui_font_size))
-            // Escape closes (cancels) the window; Enter triggers the confirm-style
-            // dialogs' primary action (New Branch / Rollback / Clear Data), IDE
-            // default-button style. Non-confirm windows (Settings, Plugins, Merge, …)
-            // deliberately ignore Enter.
+            // Escape closes (cancels) the window; Enter triggers a confirm-style dialog's
+            // primary action, IDE default-button style (see `Kyde::modal_confirm`).
             .on_key_down(
                 cx.listener(move |this, ev: &gpui::KeyDownEvent, window, cx| {
                     match ev.keystroke.key.as_str() {
                         "escape" => window.remove_window(),
-                        "enter" if kind == ModalKind::NewBranch => {
-                            this.kyde.update(cx, Kyde::do_create_branch);
-                        }
-                        "enter" if kind == ModalKind::Rollback => {
-                            this.kyde.update(cx, Kyde::do_rollback);
-                        }
-                        "enter" if kind == ModalKind::ClearData => {
-                            this.kyde.update(cx, Kyde::do_clear_data);
-                        }
-                        "enter" if kind == ModalKind::ClearLocalHistory => {
-                            this.kyde.update(cx, Kyde::do_clear_local_history);
-                        }
-                        "enter" if kind == ModalKind::ConfirmGitInit => {
-                            this.kyde.update(cx, Kyde::confirm_git_init);
-                        }
+                        "enter" => this.kyde.update(cx, |k, kcx| k.modal_confirm(kind, kcx)),
                         _ => {}
                     }
                 }),
@@ -4784,6 +4768,49 @@ mod gpui_smoke_tests {
         let handle = cx.add_window(move |_w, cx| Kyde::new(root.clone(), km.clone(), false, cx));
         cx.run_until_parked();
         (handle, dir)
+    }
+
+    /// Enter in a confirmation window does what its primary button does (issue #162): the
+    /// "Remove worktree?" window removes the worktree and closes.
+    #[gpui::test]
+    fn enter_confirms_the_remove_worktree_window(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = PathBuf::from(format!("{}-wt", dir.display()));
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "agent/enter"])
+            .arg(&wt)
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(added.success());
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.removing = Some((dir.clone(), wt.clone()));
+                k.open_modal_window(
+                    ModalKind::RemoveWorktree,
+                    "Remove Worktree",
+                    480.0,
+                    250.0,
+                    cx,
+                );
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let modal = handle
+            .update(cx, |k, _w, _cx| k.remove_wt_win)
+            .unwrap()
+            .expect("the confirmation window is open");
+        cx.update_window(modal.into(), |_, window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("enter").unwrap(), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.remove_wt_win.is_none(), "window closed");
+            })
+            .unwrap();
+        assert!(!wt.exists(), "Enter removed the worktree");
     }
 
     /// A select's open list closes on a click outside it — and a click on the control while
