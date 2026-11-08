@@ -279,6 +279,72 @@ impl Kyde {
         cx.notify();
     }
 
+    /// A file path ⌘-clicked in a terminal: a text file opens in the editor (at its line, if
+    /// it named one) — in its project, when it lives in one; a folder or a binary shows in
+    /// Finder; a path that isn't there does nothing. The disk is read off the UI thread.
+    #[cfg(feature = "terminal")]
+    pub(crate) fn open_terminal_file(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let probe = cx.background_executor().spawn({
+            let path = path.clone();
+            async move { probe_path(&path) }
+        });
+        cx.spawn(async move |_, cx| {
+            let found = probe.await;
+            let main = cx
+                .update(|cx| cx.windows().into_iter().find_map(|w| w.downcast::<Kyde>()))
+                .ok()
+                .flatten();
+            let Some(main) = main else {
+                return;
+            };
+            let _ = main.update(cx, |this, window, cx| match found {
+                Probe::Missing => {}
+                Probe::Reveal => cx.reveal_path(&path),
+                Probe::Text { root } => this.show_terminal_file(&path, root, line, window, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Open a text file from a terminal in the editor — a tab of the open project when it's
+    /// in it, else of its own project (`root`), else a loose tab.
+    #[cfg(feature = "terminal")]
+    fn show_terminal_file(
+        &mut self,
+        path: &std::path::Path,
+        root: Option<PathBuf>,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let here = self.repo_root.clone().filter(|r| path.starts_with(r));
+        let root = here.or(root);
+        if let Some(r) = root
+            .as_ref()
+            .filter(|r| self.repo_root.as_ref() != Some(*r))
+        {
+            self.open_project(r.clone(), cx);
+        }
+        let rel = root
+            .as_ref()
+            .and_then(|r| path.strip_prefix(r).ok())
+            .unwrap_or(path)
+            .to_path_buf();
+        self.agents_set_only(false, cx);
+        self.switch_mode(Mode::Browse, cx);
+        if let Some(n) = line {
+            self.open_file_at_line(rel, n, window, cx);
+        } else {
+            self.open_file(rel, cx);
+            self.focus_editor(window, cx);
+        }
+    }
+
     /// Spawn a new terminal tab rooted at the open project (or `$HOME`) and make it active.
     pub(crate) fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
         let cwd = self.repo_root.clone();
@@ -295,6 +361,9 @@ impl Kyde {
             // each burst keeps postponing the one refresh until the output settles,
             // so the tree/status pick up terminal-made changes without refocusing.
             crate::terminal::TerminalEvent::Output => this.schedule_status_refresh(cx),
+            crate::terminal::TerminalEvent::OpenFile { path, line } => {
+                this.open_terminal_file(path.clone(), *line, cx);
+            }
             crate::terminal::TerminalEvent::Submitted
             | crate::terminal::TerminalEvent::OpenScrollback => {}
         })
@@ -328,5 +397,77 @@ impl Kyde {
             window.focus(&handle);
             window.defer(cx, move |window, _cx| window.focus(&handle));
         }
+    }
+}
+
+/// What a ⌘-clicked terminal path is (see `Kyde::open_terminal_file`).
+#[cfg(feature = "terminal")]
+#[derive(Debug, PartialEq)]
+enum Probe {
+    Missing,
+    /// A folder, a binary, or a file too big for the editor: shown in Finder.
+    Reveal,
+    /// A file for the editor, and the project it's in (the nearest folder with a `.git`).
+    Text {
+        root: Option<PathBuf>,
+    },
+}
+
+/// Bigger than this opens in Finder, not the editor (which holds a file whole).
+#[cfg(feature = "terminal")]
+const TERMINAL_OPEN_MAX: u64 = 8 << 20;
+
+/// Look `path` up on disk. Blocking IO — run it off the UI thread.
+#[cfg(feature = "terminal")]
+fn probe_path(path: &std::path::Path) -> Probe {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Probe::Missing;
+    };
+    if !meta.is_file() || meta.len() > TERMINAL_OPEN_MAX {
+        return Probe::Reveal;
+    }
+    // Images and fonts the editor previews; any other file with a NUL up front is binary.
+    if !is_image(path) && !is_font_file(path) {
+        let mut head = [0u8; 8192];
+        let n = std::fs::File::open(path)
+            .and_then(|mut f| std::io::Read::read(&mut f, &mut head))
+            .unwrap_or(0);
+        if head[..n].contains(&0) {
+            return Probe::Reveal;
+        }
+    }
+    let root = path
+        .ancestors()
+        .skip(1)
+        .find(|d| d.join(".git").exists())
+        .map(std::path::Path::to_path_buf);
+    Probe::Text { root }
+}
+
+#[cfg(all(test, feature = "terminal"))]
+mod tests {
+    use super::*;
+
+    /// A ⌘-clicked path: a text file opens in the editor in its project; a binary or a
+    /// folder goes to Finder; one that isn't there, nowhere.
+    #[test]
+    fn probe_path_sorts_editor_files_from_the_rest() {
+        let base = std::env::temp_dir().join(format!("kyde-probe-{}", std::process::id()));
+        let src = base.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(base.join(".git")).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(src.join("app"), b"\x7fELF\0\0\0").unwrap();
+
+        assert_eq!(
+            probe_path(&src.join("main.rs")),
+            Probe::Text {
+                root: Some(base.clone())
+            }
+        );
+        assert_eq!(probe_path(&src.join("app")), Probe::Reveal);
+        assert_eq!(probe_path(&src), Probe::Reveal);
+        assert_eq!(probe_path(&src.join("gone.rs")), Probe::Missing);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

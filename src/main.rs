@@ -4776,6 +4776,26 @@ mod gpui_smoke_tests {
         (handle, dir)
     }
 
+    /// A file path ⌘-clicked in a terminal opens in the editor — looked up off the UI thread,
+    /// then shown as a tab of the project it's in.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn terminal_file_link_opens_in_the_editor(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_terminal_file(dir.join("app.tsx"), Some(1), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, _cx| {
+                assert!(k.mode == Mode::Browse);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
+            })
+            .unwrap();
+    }
+
     /// Enter in a confirmation window does what its primary button does (issue #162): the
     /// "Remove worktree?" window removes the worktree and closes.
     #[gpui::test]
