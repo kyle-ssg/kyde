@@ -4812,7 +4812,7 @@ impl Kyde {
             .gh_body
             .update(cx, |v, cx| v.set_text(description, None, cx));
         let mut timeline: Vec<(String, GhCard)> = Vec::new();
-        for (author, at, body) in &d.comments {
+        for (author, at, body, bot) in &d.comments {
             timeline.push((
                 at.clone(),
                 GhCard::Comment {
@@ -4820,7 +4820,7 @@ impl Kyde {
                     at: at.clone(),
                     verb: "commented",
                     body: md(body, cx),
-                    raw: Some(body.clone()),
+                    raw: (!bot).then(|| body.clone()),
                 },
             ));
         }

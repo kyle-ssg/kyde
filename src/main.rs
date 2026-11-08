@@ -1630,7 +1630,8 @@ enum GhCard {
         at: String,
         verb: &'static str,
         body: Entity<mdview::MarkdownView>,
-        /// Its markdown, to hand to an agent (`None`: the description, which isn't feedback).
+        /// Its markdown, to hand to an agent (`None`: the description or a bot's comment — a
+        /// deploy link, a CI report — which isn't feedback).
         #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
         raw: Option<String>,
     },
