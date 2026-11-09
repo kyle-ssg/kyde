@@ -90,11 +90,7 @@ pub fn select<V: 'static>(
         .justify_between()
         .hover(|d| d.bg(t.bg_mid))
         .child(SharedString::from(label))
-        .child(
-            div()
-                .text_color(t.secondary_text)
-                .child(if open { "▴" } else { "▾" }),
-        )
+        .child(div().text_color(t.secondary_text).child("▾"))
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _e, window, cx| {

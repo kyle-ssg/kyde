@@ -13,6 +13,8 @@ use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;
 
+mod ci;
+
 /// How often the status/cleanup ticker runs, and how many ticks between cleanup sweeps.
 #[cfg(feature = "terminal")]
 const TICK: Duration = Duration::from_secs(1);
@@ -955,6 +957,7 @@ impl Kyde {
                 SideTab::Code => false,
                 SideTab::Issues => !self.agents.issues.contains_key(p),
                 SideTab::Prs => !self.agents.prs.contains_key(p),
+                SideTab::Ci => !self.agents.ci.runs.contains_key(p),
             })
             .collect();
         let stale = tab != SideTab::Code
@@ -979,6 +982,11 @@ impl Kyde {
 
     /// The search changed: re-query once typing pauses (400 ms).
     pub(crate) fn agents_query_changed(&mut self, cx: &mut Context<Self>) {
+        // The CI list is filtered as it renders — nothing to re-query.
+        if self.agents.side_tab == SideTab::Ci {
+            cx.notify();
+            return;
+        }
         self.agents.gh_query_gen = self.agents.gh_query_gen.wrapping_add(1);
         let generation = self.agents.gh_query_gen;
         cx.spawn(async move |this, cx| {
@@ -1002,7 +1010,12 @@ impl Kyde {
         use kyde_git::github::{IssueFilter, PrFilter};
         let t = theme::get();
         let issues = self.agents.side_tab == SideTab::Issues;
-        let (options, selected): (&[&'static str], usize) = if issues {
+        let (options, selected): (&[&'static str], usize) = if self.agents.side_tab == SideTab::Ci {
+            (
+                &ci::CI_FILTER_LABELS,
+                ci::filter_index(self.agents.ci.filter),
+            )
+        } else if issues {
             (
                 &["Mine", "All", "Unassigned"],
                 match self.agents.issue_filter {
@@ -1031,6 +1044,11 @@ impl Kyde {
             |k: &mut Kyde| &mut k.agents.gh_filter_sel,
             |_this, _cx| {},
             move |this, i, cx| {
+                if this.agents.side_tab == SideTab::Ci {
+                    this.agents.ci.filter = ci::filter_at(i);
+                    cx.notify();
+                    return;
+                }
                 if this.agents.side_tab == SideTab::Issues {
                     this.agents.issue_filter =
                         [IssueFilter::Mine, IssueFilter::All, IssueFilter::Unassigned][i.min(2)];
@@ -1073,6 +1091,9 @@ impl Kyde {
     /// current list stays up until the new one lands) for the periodic refresh.
     fn agents_refresh_gh(&mut self, tab: SideTab, quiet: bool, cx: &mut Context<Self>) {
         self.agents.gh_fetched.insert(tab, Instant::now());
+        if tab == SideTab::Ci {
+            self.agents_reload_run(!quiet, cx);
+        }
         let all: Vec<PathBuf> = self
             .agents
             .cfg
@@ -1097,6 +1118,7 @@ impl Kyde {
         let reason = |e: kyde_git::GitError| crate::agents::git_reason(&e.to_string()).to_string();
         match tab {
             SideTab::Code => {}
+            SideTab::Ci => self.agents_fetch_runs(space, quiet, cx),
             SideTab::Issues => {
                 let (filter, query) = (self.agents.issue_filter, self.agents_gh_query(cx));
                 let shown = matches!(self.agents.issues.get(&space), Some(GhList::Ready(_)));
@@ -2543,10 +2565,13 @@ impl Kyde {
             self.agents_refresh_contexts(cx);
         }
         let gh_tab = self.agents.side_tab;
-        if self.mode == Mode::Agents
-            && gh_tab != SideTab::Code
-            && ticks.is_multiple_of(GH_EVERY_TICKS)
-        {
+        // CI runs change by the second while one is under way.
+        let every = if gh_tab == SideTab::Ci && self.agents_ci_busy() {
+            ci::CI_EVERY_TICKS
+        } else {
+            GH_EVERY_TICKS
+        };
+        if self.mode == Mode::Agents && gh_tab != SideTab::Code && ticks.is_multiple_of(every) {
             self.agents_refresh_gh(gh_tab, true, cx);
         }
         if self.mode == Mode::Agents
@@ -4207,6 +4232,8 @@ impl Kyde {
                         Some(GhList::Ready(v)) => v.len(),
                         _ => 0,
                     },
+                    // What's running: the number worth a glance whatever the filter.
+                    SideTab::Ci => self.agents_ci_running(&s.path),
                 })
                 .sum()
         };
@@ -4220,6 +4247,35 @@ impl Kyde {
                         cx.listener(move |this, _e, _w, cx| this.agents_show_tab(which, cx)),
                     )
             };
+        // Each tab's pill width (full label, short label), measured: a pill's padding +
+        // border, its label, and its count badge when it has one.
+        let pill_w = {
+            let ts = cx.text_system().clone();
+            let font = ts.resolve_font(&gpui::font(ui));
+            let text_w = move |s: &str, size: f32| -> f32 {
+                s.chars()
+                    .map(|c| {
+                        ts.advance(font, px(size), c)
+                            .map_or(size * 0.6, |a| f32::from(a.width))
+                    })
+                    .sum()
+            };
+            move |label: &str, count: usize| {
+                let badge = if count > 0 {
+                    6.0 + 10.0 + text_w(&count.to_string(), 10.0)
+                } else {
+                    0.0
+                };
+                18.0 + text_w(label, fs) + badge
+            }
+        };
+        let widths: Vec<(f32, f32)> = SIDE_TABS
+            .iter()
+            .map(|(which, _, full, short)| {
+                let n = total(*which);
+                (pill_w(full, n), pill_w(short, n))
+            })
+            .collect();
         let icon = |id: &'static str, path: &'static str, tip: SharedString| {
             ui::icon_btn(id, 22.0)
                 .tooltip(ui::tip(tip))
@@ -4277,7 +4333,32 @@ impl Kyde {
                 .into_any_element(),
             ]
         };
-        // Code | Issues | Pull Requests, this tab's tools, and the Agents-only toggle.
+        // What room the tabs have beside the tools + the Agents-only toggle (22 px icons,
+        // 2 px gaps, 6 px padding each side); the ones that don't fit go behind a ▾ menu.
+        #[allow(clippy::cast_precision_loss)]
+        let avail = self.agents.sidebar_w - 12.0 - (tools.len() + 1) as f32 * 24.0 - 4.0;
+        let active = SIDE_TABS.iter().position(|t| t.0 == tab).unwrap_or(0);
+        let (shown, short) = fit_tabs(avail, &widths, active, 2.0, 22.0);
+        let hidden: Vec<SideTab> = (0..SIDE_TABS.len())
+            .filter(|i| !shown.contains(i))
+            .map(|i| SIDE_TABS[i].0)
+            .collect();
+        let more = (!hidden.is_empty()).then(|| {
+            icon(
+                "agents-tab-more",
+                "icons/chevron-down.svg",
+                "More tabs".into(),
+            )
+            .flex_none()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    let at = gpui::point(e.position.x - px(8.0), e.position.y + px(12.0));
+                    this.open_menu(at, MenuTarget::SideTabs(hidden.clone()), cx);
+                }),
+            )
+        });
+        // Code | Issues | Pull Requests | CI, this tab's tools, and the Agents-only toggle.
         let header = div()
             .flex()
             .flex_row()
@@ -4296,9 +4377,11 @@ impl Kyde {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .child(tab_btn("agents-tab-code", "Code", SideTab::Code, cx))
-                    .child(tab_btn("agents-tab-issues", "Issues", SideTab::Issues, cx))
-                    .child(tab_btn("agents-tab-prs", "Pull Requests", SideTab::Prs, cx)),
+                    .children(shown.into_iter().map(|i| {
+                        let (which, id, full, brief) = SIDE_TABS[i];
+                        tab_btn(id, if short { brief } else { full }, which, cx)
+                    }))
+                    .children(more),
             )
             .children(tools)
             .child({
@@ -4545,18 +4628,21 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// The Issues / Pull Requests tabs: the same project tree as Code, with each project's
-    /// issues (or PRs) as its children.
+    /// The Issues / Pull Requests / CI tabs: the same project tree as Code, with each
+    /// project's issues (or PRs, or runs) as its children.
     fn agents_gh_tree(&self, tab: SideTab, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut any_loading = false;
         let mut failed: Vec<String> = Vec::new();
+        // CI filters as it renders: the search, lowercased once.
+        let query = self.agents_gh_query(cx).to_lowercase();
         for (si, space) in self.agents.cfg.spaces.iter().enumerate() {
             if !self.agents.git_spaces.contains(&space.path) {
                 continue;
             }
             let (ready, loading, why) = match tab {
                 SideTab::Issues => gh_status(self.agents.issues.get(&space.path)),
+                SideTab::Ci => self.agents_ci_status(&space.path, &query),
                 _ => gh_status(self.agents.prs.get(&space.path)),
             };
             // Only projects with something to show (no empty / issues-disabled headers).
@@ -4573,6 +4659,7 @@ impl Kyde {
             }
             rows.extend(match tab {
                 SideTab::Issues => self.agents_issue_rows(si, &space.path, cx),
+                SideTab::Ci => self.agents_ci_rows(si, &space.path, &query, cx),
                 _ => self.agents_pr_rows(si, &space.path, cx),
             });
         }
@@ -4581,6 +4668,8 @@ impl Kyde {
                 "Loading…"
             } else if tab == SideTab::Issues {
                 "No open issues match."
+            } else if tab == SideTab::Ci {
+                "No workflow runs match."
             } else {
                 "No open pull requests match."
             }));
@@ -4634,9 +4723,10 @@ impl Kyde {
                     i + 1 == len,
                     self.agents.gh_selected.as_ref()
                         == Some(&(space.to_path_buf(), SideTab::Issues, n)),
+                    None,
                     issue.title.clone(),
                     sub,
-                    self.agents_action_label(space, &folder, open, "Start"),
+                    RowAct::starting(self.agents_action_label(space, &folder, open, "Start")),
                     move |this, cx| this.agents_start_issue(sp.clone(), it.clone(), cx),
                     move |this, cx| {
                         this.agents_select_gh(sel_space.clone(), SideTab::Issues, n, cx);
@@ -4680,15 +4770,16 @@ impl Kyde {
                     i + 1 == len,
                     self.agents.gh_selected.as_ref()
                         == Some(&(space.to_path_buf(), SideTab::Prs, n)),
+                    None,
                     pr.title.clone(),
                     sub,
-                    match self.agents_review_state(space, pr) {
+                    RowAct::starting(match self.agents_review_state(space, pr) {
                         ReviewState::InProgress(_) => Some("In progress"),
                         ReviewState::Done(_) => Some("Re-review"),
                         ReviewState::None => {
                             self.agents_action_label(space, &folder, open, "Review")
                         }
-                    },
+                    }),
                     move |this, cx| this.agents_start_review(sp.clone(), it.clone(), cx),
                     move |this, cx| this.agents_select_gh(sel_space.clone(), SideTab::Prs, n, cx),
                     cx,
@@ -4720,17 +4811,18 @@ impl Kyde {
         }
     }
 
-    /// One issue / PR row: title over `#n · …`, an open-on-GitHub link and the action button
-    /// (`action` = `None` → disabled while a worktree is being made).
+    /// One issue / PR / run row: an optional `lead` (a run's status glyph), title over
+    /// `#n · …`, and the action button shown on hover (or disabled while it's under way).
     #[allow(clippy::too_many_arguments)]
     fn agents_gh_row(
         &self,
         id: (&'static str, usize),
         last: bool,
         selected: bool,
+        lead: Option<gpui::AnyElement>,
         title: String,
         sub: String,
-        action: Option<&'static str>,
+        action: RowAct,
         on_action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         on_select: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -4740,8 +4832,9 @@ impl Kyde {
         let hovered = self.agents.hovered_row.as_ref() == Some(&key);
         let btn_id = SharedString::from(format!("{}-act-{}", id.0, id.1));
         let button = match action {
-            Some(_) if !hovered => None,
-            Some(label) => Some(
+            RowAct::Hidden => None,
+            RowAct::Go(_) if !hovered => None,
+            RowAct::Go(label) => Some(
                 btn_secondary(btn_id, label)
                     .px_2()
                     .py_0()
@@ -4758,8 +4851,8 @@ impl Kyde {
                         }),
                     ),
             ),
-            None => Some(
-                btn_secondary_state(btn_id, "Starting…", true)
+            RowAct::Busy(label) => Some(
+                btn_secondary_state(btn_id, label, true)
                     .px_2()
                     .py_0()
                     .h(px(TITLE_H))
@@ -4799,7 +4892,11 @@ impl Kyde {
                     .flex_col()
                     .flex_1()
                     .min_w_0()
-                    .child(title_line().child(div().flex_1().min_w_0().truncate().child(title)))
+                    .child(
+                        title_line()
+                            .children(lead)
+                            .child(div().flex_1().min_w_0().truncate().child(title)),
+                    )
                     .child(sub_line(sub.into(), selected)),
             )
             .children(button)
@@ -4827,6 +4924,10 @@ impl Kyde {
         n: u64,
         cx: &mut Context<Self>,
     ) {
+        if tab == SideTab::Ci {
+            self.agents_select_run(space, n, cx);
+            return;
+        }
         let key = (space.clone(), tab, n);
         if self.agents.gh_selected.as_ref() == Some(&key) {
             return;
@@ -4891,7 +4992,7 @@ impl Kyde {
     /// Take issue / PR `n` out of `space`'s cached open list.
     fn agents_drop_from_list(&mut self, space: &Path, tab: SideTab, n: u64) {
         match tab {
-            SideTab::Code => {}
+            SideTab::Code | SideTab::Ci => {}
             SideTab::Issues => {
                 if let Some(GhList::Ready(v)) = self.agents.issues.get_mut(space) {
                     v.retain(|i| i.number != n);
@@ -5165,6 +5266,9 @@ impl Kyde {
         let t = theme::get();
         let fs = t.ui_font_size;
         let tab = self.agents.side_tab;
+        if tab == SideTab::Ci {
+            return self.render_agents_ci_detail(ui, cx);
+        }
         let picked = self
             .agents
             .gh_selected
@@ -7667,6 +7771,71 @@ fn agents_pending_row(name: String, last: bool) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// The sidebar's tabs, in order: (tab, element id, label, short label for a narrow sidebar).
+pub(crate) const SIDE_TABS: [(SideTab, &str, &str, &str); 4] = [
+    (SideTab::Code, "agents-tab-code", "Code", "Code"),
+    (SideTab::Issues, "agents-tab-issues", "Issues", "Issues"),
+    (SideTab::Prs, "agents-tab-prs", "Pull Requests", "PRs"),
+    (SideTab::Ci, "agents-tab-ci", "CI", "CI"),
+];
+
+/// Which sidebar tabs fit in `avail` px, given each one's (full, short) pill width, `gap`
+/// between pills and the width of the ▾ that holds the rest: every tab at full width if
+/// they fit, else every tab short, else the `active` one plus as many others as fit (in
+/// order), short. Returns the shown tabs' indices in order, and whether they're short.
+fn fit_tabs(
+    avail: f32,
+    widths: &[(f32, f32)],
+    active: usize,
+    gap: f32,
+    more: f32,
+) -> (Vec<usize>, bool) {
+    #[allow(clippy::cast_precision_loss)]
+    let span = |tabs: &[usize], short: bool| -> f32 {
+        let pills: f32 = tabs
+            .iter()
+            .filter_map(|&i| widths.get(i))
+            .map(|&(full, brief)| if short { brief } else { full })
+            .sum();
+        pills + gap * tabs.len().saturating_sub(1) as f32
+    };
+    let all: Vec<usize> = (0..widths.len()).collect();
+    if span(&all, false) <= avail {
+        return (all, false);
+    }
+    if span(&all, true) <= avail {
+        return (all, true);
+    }
+    let room = avail - more - gap;
+    let mut shown = vec![active];
+    for i in all.into_iter().filter(|&i| i != active) {
+        shown.push(i);
+        if span(&shown, true) > room {
+            shown.pop();
+        }
+    }
+    shown.sort_unstable();
+    (shown, true)
+}
+
+/// A GitHub list row's action button (`agents_gh_row`).
+#[derive(Clone, Copy)]
+enum RowAct {
+    /// Shown on hover, with this label.
+    Go(&'static str),
+    /// Under way: shown disabled, with this label.
+    Busy(&'static str),
+    /// None.
+    Hidden,
+}
+
+impl RowAct {
+    /// An issue / PR row's action: `label`, or "Starting…" while its worktree is being made.
+    fn starting(label: Option<&'static str>) -> Self {
+        label.map_or(Self::Busy("Starting…"), Self::Go)
+    }
+}
+
 /// Where a pull request's review stands (see `agents_review_state`).
 enum ReviewState {
     /// No review worktree yet.
@@ -8510,4 +8679,21 @@ fn leaf_name(p: &Path) -> String {
         || p.display().to_string(),
         |n| n.to_string_lossy().into_owned(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A narrowing sidebar shortens the tab labels, then tucks tabs behind the ▾ — never
+    /// the one you're on.
+    #[test]
+    fn sidebar_tabs_shorten_then_overflow_keeping_the_active_one() {
+        // Code, Issues, Pull Requests | PRs, CI.
+        let w = [(50.0, 50.0), (60.0, 60.0), (110.0, 45.0), (30.0, 30.0)];
+        assert_eq!(fit_tabs(300.0, &w, 3, 2.0, 22.0), (vec![0, 1, 2, 3], false));
+        assert_eq!(fit_tabs(200.0, &w, 3, 2.0, 22.0), (vec![0, 1, 2, 3], true));
+        // Room for two short tabs beside the ▾: CI (active) stays, PRs + Issues go.
+        assert_eq!(fit_tabs(110.0, &w, 3, 2.0, 22.0), (vec![0, 3], true));
+    }
 }

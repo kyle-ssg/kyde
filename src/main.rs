@@ -791,6 +791,8 @@ enum MenuTarget {
     Tab(usize),
     /// The tab-bar overflow chooser (`▾`): a flat list of every open tab to jump to.
     TabList,
+    /// The Agents sidebar's `▾`: the tabs too narrow a sidebar has no room for.
+    SideTabs(Vec<SideTab>),
     /// A commit row in the History list (by index into `history.commits`) — its menu offers
     /// the same compare modes as the header dropdown.
     HistoryCompare(usize),
@@ -1371,7 +1373,7 @@ struct AgentsView {
     git: std::collections::HashMap<PathBuf, agents::WtGit>,
     /// A git refresh is in flight (the periodic one skips rather than piling up).
     git_refreshing: bool,
-    /// The sidebar's list: Code (spaces) / Issues / Pull Requests.
+    /// The sidebar's list: Code (spaces) / Issues / Pull Requests / CI.
     side_tab: SideTab,
     /// Assigned issues / open PRs per project.
     issues: std::collections::HashMap<PathBuf, GhList<kyde_git::github::Issue>>,
@@ -1524,6 +1526,37 @@ struct AgentsView {
     /// `contexts` has been read at least once — so auto-start knows each worktree's latest
     /// Claude session and can resume it.
     contexts_loaded: bool,
+    /// The CI tab: each project's GitHub Actions runs and the selected one's jobs + log.
+    ci: CiView,
+}
+
+/// The Agents sidebar's CI tab (see `views/agents/ci.rs`). The selected run is the shared
+/// `gh_selected` (its id in the number slot).
+struct CiView {
+    /// The latest workflow runs per project.
+    runs: std::collections::HashMap<PathBuf, GhList<kyde_git::github::WorkflowRun>>,
+    /// Which runs the list shows (`None` = all) — filtered as it renders, no re-fetch.
+    filter: Option<kyde_git::github::RunState>,
+    /// The selected run's jobs — `None` while loading, `Err` = gh's reason.
+    detail: Option<Result<kyde_git::github::RunDetail, String>>,
+    /// Its failed steps' output, row by row — `None` while loading, `Err` = gh's reason.
+    log: Option<Result<std::sync::Arc<Vec<kyde_git::github::LogRow>>, String>>,
+    log_scroll: gpui::UniformListScrollHandle,
+    /// Runs whose re-run is being asked for.
+    rerunning: std::collections::HashSet<u64>,
+}
+
+impl CiView {
+    fn new() -> Self {
+        Self {
+            runs: std::collections::HashMap::new(),
+            filter: None,
+            detail: None,
+            log: None,
+            log_scroll: gpui::UniformListScrollHandle::new(),
+            rerunning: std::collections::HashSet::new(),
+        }
+    }
 }
 
 /// Which list the Agents sidebar shows.
@@ -1535,6 +1568,8 @@ enum SideTab {
     Issues,
     /// Open pull requests, for the chosen project.
     Prs,
+    /// GitHub Actions runs, for the chosen project.
+    Ci,
 }
 
 /// A GitHub list for one project, fetched with `gh` in the background.
@@ -1977,6 +2012,7 @@ impl AgentsView {
             focus_pending: false,
             autostarted: false,
             contexts_loaded: false,
+            ci: CiView::new(),
         }
     }
 }
@@ -4362,6 +4398,25 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 .and_then(|n| n.parse().ok())
             {
                 view.agents_select_gh(root, SideTab::Prs, n, cx);
+            }
+            cx.notify();
+        }
+        // (manual: needs `gh` + network) The CI tab on the open project's workflow runs, and
+        // run KYDE_SHOT_RUN's jobs + failure log.
+        "agents-ci" => {
+            let root = view.repo_root.clone().unwrap_or_default();
+            view.agents.cfg.setup_done = true;
+            view.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                path: root.clone(),
+                ..Default::default()
+            }];
+            view.switch_mode(Mode::Agents, cx);
+            view.agents_show_tab(SideTab::Ci, cx);
+            if let Some(id) = std::env::var("KYDE_SHOT_RUN")
+                .ok()
+                .and_then(|n| n.parse().ok())
+            {
+                view.agents_select_gh(root, SideTab::Ci, id, cx);
             }
             cx.notify();
         }
@@ -7426,6 +7481,78 @@ mod gpui_smoke_tests {
         }
         handle
             .update(&mut vcx, |k, _w, _cx| assert_eq!(k.agents.renaming, None))
+            .unwrap();
+    }
+
+    /// The CI tab: a failed run that a newer run of its workflow + branch superseded offers
+    /// no retry — only the way to the latest (an old deploy must not be re-run over a new one).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_ci_superseded_run_points_at_the_latest(cx: &mut TestAppContext) {
+        use kyde_git::github::{Job, LogLevel, LogRow, RunDetail};
+        let (handle, dir) = boot(cx);
+        let runs = kyde_git::github::parse_runs(
+            r#"[{"databaseId":2,"number":8,"workflowName":"deploy","headBranch":"main",
+                 "status":"completed","conclusion":"failure"},
+                {"databaseId":1,"number":7,"workflowName":"deploy","headBranch":"main",
+                 "status":"completed","conclusion":"failure"}]"#,
+        )
+        .unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // Seeded, so nothing asks GitHub.
+                k.agents
+                    .gh_fetched
+                    .insert(SideTab::Ci, std::time::Instant::now());
+                k.agents
+                    .ci
+                    .runs
+                    .insert(dir.clone(), GhList::Ready(runs.clone()));
+                k.agents_show_tab(SideTab::Ci, cx);
+                k.agents.gh_selected = Some((dir.clone(), SideTab::Ci, 1));
+                k.agents.ci.detail = Some(Ok(RunDetail {
+                    run: runs[1].clone(),
+                    jobs: vec![Job {
+                        id: 9,
+                        name: "deploy".into(),
+                        status: "completed".into(),
+                        conclusion: "failure".into(),
+                        started_at: String::new(),
+                        completed_at: String::new(),
+                        url: String::new(),
+                        steps: Vec::new(),
+                        errors: Vec::new(),
+                    }],
+                }));
+                k.agents.ci.log = Some(Ok(std::sync::Arc::new(vec![LogRow::Line {
+                    text: "boom".into(),
+                    level: LogLevel::Failure,
+                }])));
+                cx.notify();
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        assert!(vcx.debug_bounds("agents-ci-retry").is_none());
+        let latest = vcx
+            .debug_bounds("agents-ci-latest")
+            .expect("the way to the latest run");
+        vcx.simulate_click(latest.center(), gpui::Modifiers::none());
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                assert!(k.agents.gh_selected == Some((dir.clone(), SideTab::Ci, 2)));
+            })
             .unwrap();
     }
 
