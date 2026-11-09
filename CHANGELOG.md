@@ -45,6 +45,20 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.14.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.13.0...kyde-v2.14.0) (2026-11-09)
+
+
+### Features
+
+* **agents:** Agents first, and one active worktree across every view ([#175](https://github.com/kyle-ssg/kyde/issues/175)) ([53d02bf](https://github.com/kyle-ssg/kyde/commit/53d02bfc664cd70b0dea112cfd426b2a55f3a0d4))
+* **agents:** CI tab — GitHub Actions runs, retry failed ones, see why they failed ([#171](https://github.com/kyle-ssg/kyde/issues/171)) ([4254a8f](https://github.com/kyle-ssg/kyde/commit/4254a8fbb4ef0d5f1f9c6a9e1464d068db234416))
+* **update:** recheck for a new release on window focus once 15 min stale ([#173](https://github.com/kyle-ssg/kyde/issues/173)) ([a2bfdcb](https://github.com/kyle-ssg/kyde/commit/a2bfdcbd823d854dedcbd563de089e5ea5a27d44))
+
+
+### Bug Fixes
+
+* **agents:** hand work in another project to a new agent there ([#174](https://github.com/kyle-ssg/kyde/issues/174)) ([095bf34](https://github.com/kyle-ssg/kyde/commit/095bf34c21082016d6f1f0303e4adb5c921eea2b))
+
 ## [2.13.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.12.1...kyde-v2.13.0) (2026-11-08)
 
 
