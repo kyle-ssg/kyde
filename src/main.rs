@@ -2466,6 +2466,20 @@ impl MergeView {
     }
 }
 
+/// Self-update state, grouped out of the `Kyde` god-struct: the newer release on offer, the
+/// in-flight download, and when GitHub was last asked (a window refocus rechecks once stale).
+#[derive(Default)]
+struct SelfUpdate {
+    /// A newer release found on GitHub (drives the update banner); `None` = up to date / unknown.
+    available: Option<update::Release>,
+    /// True while a download-swap is in flight (disables the button, shows progress).
+    updating: bool,
+    /// When the last release check started; `None` = never.
+    checked_at: Option<std::time::Instant>,
+    /// The version whose banner was dismissed — a recheck only re-raises a newer one.
+    dismissed: Option<String>,
+}
+
 /// Remote-sync state (push/pull/fetch vs `origin`), grouped out of the `Kyde` god-struct:
 /// the ahead/behind counts, the in-flight operation flags, and what a push would send.
 /// Named `SyncState` (not `Sync`) so it doesn't shadow the `std::marker::Sync` trait.
@@ -2735,11 +2749,8 @@ struct Kyde {
     /// Which tab the git (Commit) view is showing — staging changes or pushing commits.
     git_tab: GitTab,
 
-    // Self-update
-    /// A newer release found on GitHub (drives the update banner); `None` = up to date / unknown.
-    update_available: Option<update::Release>,
-    /// True while a download-swap is in flight (disables the button, shows progress).
-    updating: bool,
+    /// Self-update — the update banner's state (see `SelfUpdate`).
+    self_update: SelfUpdate,
 
     // History (git log) view — all its state grouped into one sub-struct (see `HistoryView`).
     history: HistoryView,
@@ -4641,6 +4652,7 @@ fn main() {
                 cx.observe_window_activation(window, |this, window, cx| {
                     if window.is_window_active() {
                         this.reload_external(cx);
+                        this.recheck_update_if_stale(cx);
                     }
                 })
                 .detach();
@@ -5173,6 +5185,41 @@ mod gpui_smoke_tests {
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    /// A window refocus rechecks for a release only once the last check is 15+ minutes old,
+    /// and a recheck never re-raises the version the user dismissed — only a newer one.
+    #[gpui::test]
+    fn refocus_rechecks_for_an_update_once_stale(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        let rel = |v: &str| update::Release {
+            version: v.into(),
+            tag: format!("kyde-v{v}"),
+            zip_url: String::new(),
+            sha256_url: String::new(),
+            page_url: String::new(),
+        };
+        handle
+            .update(cx, |k, _w, cx| {
+                let fresh = k.self_update.checked_at.expect("launch checks");
+                k.recheck_update_if_stale(cx);
+                assert_eq!(k.self_update.checked_at, Some(fresh), "fresh: no recheck");
+                let stale = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_mins(16))
+                    .unwrap();
+                k.self_update.checked_at = Some(stale);
+                k.recheck_update_if_stale(cx);
+                assert!(k.self_update.checked_at > Some(stale), "stale: rechecks");
+
+                k.self_update.available = Some(rel("9.9.9"));
+                k.dismiss_update(cx);
+                k.offer_update(rel("9.9.9"), cx);
+                assert!(k.self_update.available.is_none(), "dismissed stays hidden");
+                k.offer_update(rel("9.9.10"), cx);
+                let offered = k.self_update.available.as_ref().map(|r| r.version.as_str());
+                assert_eq!(offered, Some("9.9.10"), "a newer release still shows");
+            })
+            .unwrap();
+    }
+
     /// The update banner's Download with no zip to fetch (every non-macOS build) opens the
     /// release page through the system's URL handler, not a shelled-out macOS `open`.
     #[gpui::test]
@@ -5181,7 +5228,7 @@ mod gpui_smoke_tests {
         let page = "https://github.com/kyle-ssg/kyde/releases/tag/kyde-v9.9.9";
         handle
             .update(cx, |k, _w, cx| {
-                k.update_available = Some(update::Release {
+                k.self_update.available = Some(update::Release {
                     version: "9.9.9".into(),
                     tag: "kyde-v9.9.9".into(),
                     zip_url: String::new(),
@@ -5189,7 +5236,7 @@ mod gpui_smoke_tests {
                     page_url: page.into(),
                 });
                 k.do_update(cx);
-                assert!(!k.updating, "nothing to download");
+                assert!(!k.self_update.updating, "nothing to download");
             })
             .unwrap();
         assert_eq!(cx.opened_url().as_deref(), Some(page));
