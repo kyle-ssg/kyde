@@ -8486,6 +8486,8 @@ mod gpui_smoke_tests {
                     MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
                     MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
                     MenuEntry::Divider => "—".into(),
+                    #[cfg(feature = "terminal")]
+                    MenuEntry::Worktree { wt, .. } => wt.display().to_string(),
                 })
                 .collect()
         };
@@ -8655,6 +8657,8 @@ mod gpui_smoke_tests {
                         MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
                         MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
                         MenuEntry::Divider => "—".into(),
+                        #[cfg(feature = "terminal")]
+                        MenuEntry::Worktree { wt, .. } => wt.display().to_string(),
                     })
                     .collect();
                 assert_eq!(
