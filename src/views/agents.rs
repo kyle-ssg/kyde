@@ -14,6 +14,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod ci;
+#[cfg(feature = "terminal")]
+mod context;
 
 /// How often the status/cleanup ticker runs, and how many ticks between cleanup sweeps.
 #[cfg(feature = "terminal")]
@@ -708,19 +710,25 @@ impl Kyde {
     /// Add `path` as a space (no-op if it already is one) and open it — its own folder is
     /// the default worktree, so selecting it starts the first agent tab.
     pub(crate) fn agents_add_space(&mut self, path: PathBuf, cx: &mut Context<Self>) {
-        if !self.agents.cfg.spaces.iter().any(|s| s.path == path) {
-            let at = self.agents.cfg.new_space_index();
-            self.agents.cfg.spaces.insert(
-                at,
-                Space {
-                    path: path.clone(),
-                    ..Space::default()
-                },
-            );
-            self.agents_save(cx);
-            self.agents_refresh_branches(cx);
-        }
+        self.agents_ensure_space(&path, cx);
         self.agents_select(path, cx);
+    }
+
+    /// Make `path` a space unless it's one already — or one of a space's worktrees.
+    pub(crate) fn agents_ensure_space(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if self.agents.cfg.space_of(path).is_some() {
+            return;
+        }
+        let at = self.agents.cfg.new_space_index();
+        self.agents.cfg.spaces.insert(
+            at,
+            Space {
+                path: path.to_path_buf(),
+                ..Space::default()
+            },
+        );
+        self.agents_save(cx);
+        self.agents_refresh_branches(cx);
     }
 
     /// Drop a space from the sidebar (its folder and worktrees stay on disk) and close its tabs.
@@ -758,7 +766,10 @@ impl Kyde {
             self.agents_save(cx);
         }
         #[cfg(feature = "terminal")]
-        self.agents_open_tabs(wt, cx);
+        self.agents_open_tabs(wt.clone(), cx);
+        // The code views follow: its folder is the open project.
+        #[cfg(feature = "terminal")]
+        self.agents_sync_project(wt, cx);
         self.agents.focus_pending = true;
         cx.notify();
     }
@@ -1585,7 +1596,20 @@ impl Kyde {
             self.agents_dismiss_subs(&gone, cx);
         }
         if self.agents.selected.as_deref() == Some(wt) {
-            self.agents.selected = owner;
+            self.agents.selected.clone_from(&owner);
+        }
+        // Its code goes too: open, its space's tab moves to the row taking its place.
+        #[cfg(feature = "terminal")]
+        if self.open_projects.iter().any(|p| p == wt) {
+            let shown = self.repo_root.as_deref() == Some(wt);
+            let agents = self.mode == Mode::Agents;
+            self.close_project(wt.to_path_buf(), cx);
+            if let Some(o) = owner.filter(|_| shown) {
+                self.open_project(o, cx);
+            }
+            if agents {
+                self.mode = Mode::Agents;
+            }
         }
         self.agents_save(cx);
         cx.notify();
@@ -6540,40 +6564,21 @@ impl Kyde {
             .into_any_element()
     }
 
-    /// A linked-worktree row under its space: tree connector, dot + name, its branch + git
-    /// badges beneath; hover → remove.
-    fn agents_worktree_row(
+    /// A worktree's line as its sidebar row draws it: the status dot, a branch glyph on the
+    /// project's own checkout, `title`, then what needs saying — "needs input" / "done", how
+    /// long ago it was active, its git badges (each per the row settings). `ns` + `id` keep
+    /// the badges' element id unique where it's drawn.
+    pub(crate) fn agents_wt_line(
         &self,
-        si: usize,
-        wi: usize,
+        ns: &'static str,
         space: &Path,
         wt: &Path,
-        last: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+        id: usize,
+        title: gpui::AnyElement,
+    ) -> gpui::Div {
         let t = theme::get();
-        let selected = self.agents.selected.as_deref() == Some(wt);
-        let id = si * 10_000 + wi;
-        let key = SharedString::from(format!("agents-wt-{id}"));
-        let hovered = self.agents.hovered_row.as_ref() == Some(&key);
-        let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
-        // The space's own folder: titled by its branch, behind a branch glyph.
-        let is_default = wt == space;
-        let scratch = self.agents.cfg.is_scratch(wt);
         let fields = self.agents.cfg.row;
-        let title: SharedString = self.agents_wt_title(space, wt).into();
-
-        let renaming = self.agents.renaming == Some(RenameTarget::Worktree(wt.to_path_buf()));
-        let title_el = if renaming {
-            self.agents_rename_field(cx)
-        } else {
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(title)
-                .into_any_element()
-        };
+        let is_default = wt == space;
         let state = self.agents_state(wt);
         // "needs input" / "done", in the dot's colour.
         let status = (fields.status && !state.label().is_empty()).then(|| {
@@ -6600,26 +6605,65 @@ impl Kyde {
             });
         let badges = fields
             .git
-            .then(|| git_badges(("agents-wt-git", id), self.agents.git.get(wt)))
+            .then(|| git_badges((ns, id), self.agents.git.get(wt)))
             .flatten();
         // One line: dot, title, then what needs saying (status, activity, git).
-        let lines = div().flex().flex_col().flex_1().min_w_0().child(
-            title_line()
-                .child(status_dot(state))
-                .when(is_default, |d| {
-                    d.child(
-                        svg()
-                            .flex_none()
-                            .path("icons/git-branch.svg")
-                            .size(px(13.0))
-                            .text_color(t.line_number),
-                    )
-                })
-                .child(title_el)
-                .children(status)
-                .children(activity)
-                .children(badges),
-        );
+        title_line()
+            .child(status_dot(state))
+            .when(is_default, |d| {
+                d.child(
+                    svg()
+                        .flex_none()
+                        .path("icons/git-branch.svg")
+                        .size(px(13.0))
+                        .text_color(t.line_number),
+                )
+            })
+            .child(title)
+            .children(status)
+            .children(activity)
+            .children(badges)
+    }
+
+    /// A linked-worktree row under its space: tree connector, dot + name, its branch + git
+    /// badges beneath; hover → remove.
+    fn agents_worktree_row(
+        &self,
+        si: usize,
+        wi: usize,
+        space: &Path,
+        wt: &Path,
+        last: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let selected = self.agents.selected.as_deref() == Some(wt);
+        let id = si * 10_000 + wi;
+        let key = SharedString::from(format!("agents-wt-{id}"));
+        let hovered = self.agents.hovered_row.as_ref() == Some(&key);
+        let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
+        // The space's own folder: titled by its branch, behind a branch glyph.
+        let is_default = wt == space;
+        let scratch = self.agents.cfg.is_scratch(wt);
+        let title: SharedString = self.agents_wt_title(space, wt).into();
+
+        let renaming = self.agents.renaming == Some(RenameTarget::Worktree(wt.to_path_buf()));
+        let title_el = if renaming {
+            self.agents_rename_field(cx)
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(title)
+                .into_any_element()
+        };
+        let lines = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .child(self.agents_wt_line("agents-wt-git", space, wt, id, title_el));
         // Any row drags to a new place in its project (the checkout too).
         let drag_item = (!self.agents.cfg.sort_attention).then(|| DragItem::Worktree {
             space: space.to_path_buf(),
@@ -7262,7 +7306,14 @@ impl Kyde {
             })
             .child(
                 ui::icon_btn("agents-open-editor", 24.0)
-                    .tooltip(ui::tip(format!("Open {} in the editor", leaf_name(wt))))
+                    .tooltip(ui::tip(format!(
+                        "Open {} in the editor{}",
+                        leaf_name(wt),
+                        self.keymap
+                            .key_for("agent_toggle_code")
+                            .map(|k| format!("  ({})", pretty_key(&k)))
+                            .unwrap_or_default()
+                    )))
                     .child(
                         svg()
                             .path("icons/folder.svg")
@@ -7272,9 +7323,7 @@ impl Kyde {
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _e, _w, cx| {
-                            this.agents_set_only(false, cx);
-                            this.open_project(open.clone(), cx);
-                            this.switch_mode(Mode::Browse, cx);
+                            this.agents_open_code(open.clone(), Some(Mode::Browse), cx);
                         }),
                     ),
             );

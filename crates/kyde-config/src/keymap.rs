@@ -163,6 +163,12 @@ pub const ACTIONS: &[ActionDef] = &[
         vscode: "cmd-alt-b",
         label: "Toggle Agents Sidebar",
     },
+    ActionDef {
+        name: "agent_toggle_code",
+        webstorm: "cmd-alt-o",
+        vscode: "cmd-alt-o",
+        label: "Switch Between an Agent and Its Code",
+    },
 ];
 
 /// A keystroke string in canonical form — modifiers in `cmd-ctrl-alt-shift-fn` order, then

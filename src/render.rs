@@ -147,11 +147,9 @@ impl Render for Kyde {
             .bg(theme::get().titlebar_bg)
             .children(menu_left)
             .children(self.render_menu_bar(cx))
-            // With ≤1 project open there's no tab strip, so show the project title (chip +
-            // name + chevron) right of the traffic lights.
-            .when(self.open_projects.len() <= 1 && !only, |d| {
-                d.child(self.render_titlebar_project(cx))
-            })
+            // What you're working on, right of the traffic lights: project › agent worktree,
+            // each a dropdown to switch.
+            .when(!only, |d| d.child(self.render_titlebar_project(cx)))
             .child(chrome::drag_area(client, &self.chrome.drag_armed))
             // Git quick-access buttons, right-aligned (issue #92).
             .children(self.render_git_toolbar(cx))
@@ -179,30 +177,9 @@ impl Render for Kyde {
             // and a matching bottom inset so the bottom-pinned terminal toggle sits symmetric.
             .pt(px(theme::FRAME_GAP))
             .pb(px(theme::FRAME_GAP))
-            .bg(theme::get().frame_bg)
-            .child(mode_btn(
-                "icons/folder.svg",
-                "Explorer",
-                self.mode == Mode::Browse,
-                Mode::Browse,
-                cx,
-            ))
-            .child(mode_btn(
-                "icons/git-branch.svg",
-                "Commit & Git",
-                self.mode == Mode::Commit,
-                Mode::Commit,
-                cx,
-            ))
-            .child(mode_btn(
-                "icons/history.svg",
-                "History",
-                self.mode == Mode::History,
-                Mode::History,
-                cx,
-            ));
-        // Agents (herdr-style spaces → worktrees → agent tabs). A green badge marks an agent
-        // that finished while you were elsewhere.
+            .bg(theme::get().frame_bg);
+        // Agents first — the view Kyde opens into (herdr-style spaces → worktrees → agent
+        // tabs). A green badge marks an agent that finished while you were elsewhere.
         #[cfg(feature = "terminal")]
         let rail = {
             let unseen = self.agents_any_unseen();
@@ -231,6 +208,28 @@ impl Render for Kyde {
                 }),
             )
         };
+        let rail = rail
+            .child(mode_btn(
+                "icons/folder.svg",
+                "Explorer",
+                self.mode == Mode::Browse,
+                Mode::Browse,
+                cx,
+            ))
+            .child(mode_btn(
+                "icons/git-branch.svg",
+                "Commit & Git",
+                self.mode == Mode::Commit,
+                Mode::Commit,
+                cx,
+            ))
+            .child(mode_btn(
+                "icons/history.svg",
+                "History",
+                self.mode == Mode::History,
+                Mode::History,
+                cx,
+            ));
         // Terminal toggle — pinned to the BOTTOM of the rail (IDE-style tool strip), only
         // when a project is open (the shell roots at the project). A flex spacer between the
         // top nav and this button pushes it down to the bottom edge.
@@ -405,7 +404,8 @@ impl Render for Kyde {
             root = root
                 .on_action(cx.listener(Self::act_toggle_terminal))
                 .on_action(cx.listener(Self::act_new_terminal_tab))
-                .on_action(cx.listener(Self::act_close_terminal_tab));
+                .on_action(cx.listener(Self::act_close_terminal_tab))
+                .on_action(cx.listener(Self::act_agent_toggle_code));
         }
         let root = root
             .on_mouse_move(

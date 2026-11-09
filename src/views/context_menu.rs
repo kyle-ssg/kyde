@@ -25,6 +25,15 @@ pub(crate) enum MenuEntry {
     Note(SharedString),
     /// A hairline between groups.
     Divider,
+    /// An agent worktree, drawn as its Agents sidebar row draws it (status, activity, git);
+    /// `current` ticks the one on screen.
+    #[cfg(feature = "terminal")]
+    Worktree {
+        space: PathBuf,
+        wt: PathBuf,
+        current: bool,
+        run: MenuRun,
+    },
     /// A "<label> ▸" row with its own flyout of entries. `icon_label` picks the icon.
     Submenu {
         kind: Submenu,
@@ -50,7 +59,12 @@ impl MenuEntry {
 
     /// Rows the highlight can land on (items + submenu headers; not notes or dividers).
     fn selectable(&self) -> bool {
-        matches!(self, Self::Item { .. } | Self::Submenu { .. })
+        match self {
+            Self::Item { .. } | Self::Submenu { .. } => true,
+            #[cfg(feature = "terminal")]
+            Self::Worktree { .. } => true,
+            Self::Note(_) | Self::Divider => false,
+        }
     }
 }
 
@@ -294,6 +308,11 @@ impl Kyde {
         };
         match picked {
             Some(MenuEntry::Item { run, .. }) => {
+                let run = run.clone();
+                self.menu_run(&run, window, cx);
+            }
+            #[cfg(feature = "terminal")]
+            Some(MenuEntry::Worktree { run, .. }) => {
                 let run = run.clone();
                 self.menu_run(&run, window, cx);
             }
@@ -642,6 +661,9 @@ impl Kyde {
             }
             // The menu bar's items, from the title strip's menu button (off macOS).
             MenuTarget::AppMenu => out = chrome::app_menu_entries(crate::app_menus(&self.recents)),
+            MenuTarget::Projects => out = self.projects_menu_entries(),
+            #[cfg(feature = "terminal")]
+            MenuTarget::Worktrees => out = self.agents_worktrees_menu(),
             // One menu of the menu bar (Linux).
             #[cfg(target_os = "linux")]
             MenuTarget::MenuBar(i) => {
@@ -869,6 +891,48 @@ impl Kyde {
                     cx.listener(move |this, _e, window, cx| run(this, window, cx)),
                 )
                 .into_any_element()
+            }
+            #[cfg(feature = "terminal")]
+            MenuEntry::Worktree {
+                space,
+                wt,
+                current,
+                run,
+            } => {
+                let title = div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(SharedString::from(self.agents_wt_title(space, wt)));
+                let line = self
+                    .agents_wt_line("menu-wt-git", space, wt, at.0, title.into_any_element())
+                    .flex_1()
+                    .min_w_0();
+                let run = run.clone();
+                div()
+                    .id(SharedString::from(format!("menu-wt-{}", at.0)))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w(px(420.0))
+                    .px_3()
+                    .py_1()
+                    .cursor(gpui::CursorStyle::Arrow)
+                    .text_color(t.text)
+                    .when(lit, |d| d.bg(t.selected_bg))
+                    .child(icon_slot(current.then_some("icons/check.svg")))
+                    .child(line)
+                    .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                        if *hovered {
+                            this.menu_hover(at.0, at.1, cx);
+                        }
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, window, cx| run(this, window, cx)),
+                    )
+                    .into_any_element()
             }
             MenuEntry::Note(label) => div()
                 .px_3()

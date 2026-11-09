@@ -519,7 +519,7 @@ impl Kyde {
                     .get(self.projects_hl.unwrap_or(0))
                     .map(|p| (*p).clone());
                 if let Some(p) = pick {
-                    self.open_project(p, cx);
+                    self.open_folder(p, cx);
                 }
             }
             _ => {}
