@@ -456,7 +456,7 @@ impl Render for Kyde {
                 d.child(self.render_project_tabs(ui, cx))
             })
             // Update-available banner sits directly under the titlebar (only when behind).
-            .when(self.update_available.is_some(), |d| {
+            .when(self.self_update.available.is_some(), |d| {
                 d.child(self.render_update_banner(ui, cx))
             })
             // Merge-in-progress banner — TOP of the window, big and conflict-tinted, so

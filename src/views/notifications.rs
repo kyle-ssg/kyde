@@ -1,8 +1,51 @@
 //! Transient banners: crash report, last-op error, update-available. Crate-root child module.
 
 use crate::*;
+use std::time::{Duration, Instant};
+
+/// A window refocus asks GitHub again once the last release check is this old.
+const UPDATE_RECHECK_EVERY: Duration = Duration::from_mins(15);
 
 impl Kyde {
+    /// Ask GitHub if there's a newer release, then surface the update banner. Network I/O off
+    /// the UI thread; failures stay silent.
+    pub(crate) fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        self.self_update.checked_at = Some(Instant::now());
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move { update::check().ok().flatten() })
+                .await;
+            if let Some(rel) = found {
+                this.update(cx, |this, cx| this.offer_update(rel, cx)).ok();
+            }
+        })
+        .detach();
+    }
+
+    /// On window refocus: recheck for a release when the last check is stale (and no update
+    /// is already downloading), so a long-running window still learns about new versions.
+    pub(crate) fn recheck_update_if_stale(&mut self, cx: &mut Context<Self>) {
+        let stale = self
+            .self_update
+            .checked_at
+            .is_none_or(|at| at.elapsed() >= UPDATE_RECHECK_EVERY);
+        if stale && !self.self_update.updating {
+            self.check_for_update(cx);
+        }
+    }
+
+    /// Show the banner for `rel` — unless that version was dismissed, or a download of the
+    /// offered one is already running.
+    pub(crate) fn offer_update(&mut self, rel: update::Release, cx: &mut Context<Self>) {
+        let su = &mut self.self_update;
+        if su.updating || su.dismissed.as_deref() == Some(rel.version.as_str()) {
+            return;
+        }
+        su.available = Some(rel);
+        cx.notify();
+    }
+
     /// Top-of-window banner shown only when a newer release exists. The action is
     /// "Update & Relaunch" when running from a `.app` bundle (downloads + swaps in place),
     /// else "Download" (opens the release page) — see `do_update`.
@@ -12,11 +55,11 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
-        let Some(rel) = self.update_available.as_ref() else {
+        let Some(rel) = self.self_update.available.as_ref() else {
             return div().into_any_element();
         };
         let can_swap = update::running_bundle().is_some() && !rel.zip_url.is_empty();
-        let action_label = if self.updating {
+        let action_label = if self.self_update.updating {
             "Updating…"
         } else if can_swap {
             "Update & Relaunch"
@@ -42,7 +85,7 @@ impl Kyde {
                     .child("↑"),
             );
 
-        let updating = self.updating;
+        let updating = self.self_update.updating;
         div()
             .flex()
             .flex_row()
@@ -97,15 +140,15 @@ impl Kyde {
     /// swap in place, relaunch. Otherwise (dev binary, or a release with no zip) → open the
     /// release page in the browser.
     pub(crate) fn do_update(&mut self, cx: &mut Context<Self>) {
-        let Some(rel) = self.update_available.clone() else {
+        let Some(rel) = self.self_update.available.clone() else {
             return;
         };
         match update::running_bundle() {
             Some(bundle) if !rel.zip_url.is_empty() => {
-                if self.updating {
+                if self.self_update.updating {
                     return;
                 }
-                self.updating = true;
+                self.self_update.updating = true;
                 cx.notify();
                 let zip = rel.zip_url.clone();
                 let sha = rel.sha256_url.clone();
@@ -118,7 +161,7 @@ impl Kyde {
                         })
                         .await;
                     this.update(cx, |this, cx| {
-                        this.updating = false;
+                        this.self_update.updating = false;
                         match res {
                             // Relaunch the freshly-swapped bundle, then quit this instance.
                             Ok(()) => {
@@ -148,10 +191,10 @@ impl Kyde {
                     cx.open_url(&url);
                     return;
                 }
-                if self.updating {
+                if self.self_update.updating {
                     return;
                 }
-                self.updating = true;
+                self.self_update.updating = true;
                 cx.notify();
                 let zip = rel.zip_url.clone();
                 cx.spawn(async move |this, cx| {
@@ -162,7 +205,7 @@ impl Kyde {
                         .spawn(async move { update::download_zip(&zip, &dir) })
                         .await;
                     this.update(cx, |this, cx| {
-                        this.updating = false;
+                        this.self_update.updating = false;
                         match res {
                             // Reveal the downloaded zip so the user can install it.
                             Ok(path) => {
@@ -182,9 +225,12 @@ impl Kyde {
         }
     }
 
-    /// Dismiss the update banner for this session (reappears on next launch if still behind).
+    /// Dismiss the update banner for this session (reappears on next launch if still behind,
+    /// or on a refocus recheck once a newer release than the dismissed one ships).
     pub(crate) fn dismiss_update(&mut self, cx: &mut Context<Self>) {
-        self.update_available = None;
+        if let Some(rel) = self.self_update.available.take() {
+            self.self_update.dismissed = Some(rel.version);
+        }
         cx.notify();
     }
 

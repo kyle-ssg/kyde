@@ -311,8 +311,7 @@ impl Kyde {
             sync: SyncState::new(),
             push_win: None,
             git_tab: GitTab::Commit,
-            update_available: None,
-            updating: false,
+            self_update: SelfUpdate::default(),
             history: HistoryView::new(cx),
             merge_win: None,
             merge: MergeView::new(cx),
@@ -345,22 +344,7 @@ impl Kyde {
                 me.read_terminal_look(cx);
             }
         }
-        // Background: ask GitHub if there's a newer release, then surface the update banner.
-        // Network I/O off the UI thread; failures stay silent.
-        cx.spawn(async move |this, cx| {
-            let found = cx
-                .background_executor()
-                .spawn(async move { update::check().ok().flatten() })
-                .await;
-            if let Some(rel) = found {
-                this.update(cx, |this, cx| {
-                    this.update_available = Some(rel);
-                    cx.notify();
-                })
-                .ok();
-            }
-        })
-        .detach();
+        me.check_for_update(cx);
         me
     }
 
