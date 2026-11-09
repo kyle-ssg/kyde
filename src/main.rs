@@ -177,7 +177,8 @@ actions!(
         AgentNewWorktree,
         AgentRename,
         AgentScrollback,
-        AgentToggleSidebar
+        AgentToggleSidebar,
+        AgentToggleCode
     ]
 );
 
@@ -411,6 +412,8 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_agents(cx, km, "agent_rename", AgentRename);
     bind_agents(cx, km, "agent_scrollback", AgentScrollback);
     bind_agents(cx, km, "agent_toggle_sidebar", AgentToggleSidebar);
+    // Kyde-wide, not just the Agents view: it flips back from a worktree's code too.
+    bind_app(cx, km, "agent_toggle_code", AgentToggleCode);
     // ⌃1…⌃9: the Nth worktree in the sidebar (fixed keys). Off macOS Ctrl+digit is the ⌘1 /
     // ⌘9 view switch, so the jump takes Alt+digit, the Linux tab-switch key.
     let jump = if cfg!(target_os = "macos") {
@@ -812,6 +815,11 @@ enum MenuTarget {
     /// The Nth menu of the menu bar on Linux (`menu_bar_menus`).
     #[cfg(target_os = "linux")]
     MenuBar(usize),
+    /// The title bar's project crumb: the open projects and agent spaces, and Open….
+    Projects,
+    /// The title bar's worktree crumb: the open agent space's worktrees.
+    #[cfg(feature = "terminal")]
+    Worktrees,
 }
 
 struct ContextMenu {
@@ -1363,7 +1371,8 @@ impl DesktopLook {
 struct AgentsView {
     /// Spaces + their worktrees, start commands, cleanup policy (`agents.json`).
     cfg: kyde_config::agents::AgentsCfg,
-    /// The worktree on screen: a space's own folder or one of its linked worktrees.
+    /// The worktree on screen: a space's own folder or one of its linked worktrees. It is also
+    /// the active worktree: Explorer / Commit / History show its code.
     selected: Option<PathBuf>,
     /// Checked-out branch per worktree, gathered off the UI thread on entering the view.
     branches: std::collections::HashMap<PathBuf, String>,
@@ -1907,18 +1916,19 @@ impl AgentsView {
             }
         })
         .detach();
+        // Reopen where you left off; else the first space.
+        let selected = cfg
+            .selected
+            .clone()
+            .filter(|w| cfg.space_of(w).is_some())
+            .or_else(|| {
+                cfg.spaces
+                    .iter()
+                    .find(|s| !s.scratch)
+                    .map(|s| s.path.clone())
+            });
         Self {
-            // Reopen where you left off; else the first space.
-            selected: cfg
-                .selected
-                .clone()
-                .filter(|w| cfg.space_of(w).is_some())
-                .or_else(|| {
-                    cfg.spaces
-                        .iter()
-                        .find(|s| !s.scratch)
-                        .map(|s| s.path.clone())
-                }),
+            selected,
             cfg,
             branches: std::collections::HashMap::new(),
             git_spaces: std::collections::HashSet::new(),
@@ -4264,7 +4274,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // last worktree on screen, its tab's background agent at work there and another one
         // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`).
         #[cfg(feature = "terminal")]
-        "agents" | "agents-background" => {
+        "agents" | "agents-background" | "agents-code" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
@@ -4390,6 +4400,14 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 // KYDE_SHOT_SUB: which of them is on screen (`a0` = the finished one).
                 view.agents.sub_shown = std::env::var("KYDE_SHOT_SUB").ok();
                 view.agents_select(there.clone(), cx);
+            }
+            // The first worktree's code, its title-bar crumb naming it — KYDE_SHOT_WT_MENU: with
+            // the crumb's worktree menu open.
+            if let (true, Some(wt)) = (name == "agents-code", wts.first()) {
+                view.agents_open_code(wt.clone(), Some(Mode::Browse), cx);
+                if std::env::var_os("KYDE_SHOT_WT_MENU").is_some() {
+                    view.open_menu(gpui::point(px(300.0), px(36.0)), MenuTarget::Worktrees, cx);
+                }
             }
             cx.notify();
         }
@@ -4555,6 +4573,8 @@ fn main() {
     // No path given (and not a screenshot run, which wants the landing view): reopen the
     // last project. After the single-instance hand-off, so a bare `ky` just brings a running
     // Kyde forward.
+    #[cfg(feature = "terminal")]
+    let given = initial.is_some();
     let initial = initial.or_else(|| {
         std::env::var_os("KYDE_SHOT")
             .is_none()
@@ -4628,6 +4648,19 @@ fn main() {
                 window.focus(&view.focus_handle(cx));
                 cx.activate(true);
 
+                // Kyde opens into the Agents view, over the project it reopened or was given
+                // (a screenshot run drives its own view). A worktree named on the command line
+                // is selected there; else the agent last selected opens as the project.
+                #[cfg(feature = "terminal")]
+                if view.repo_root.is_some() && std::env::var_os("KYDE_SHOT").is_none() {
+                    if given {
+                        view.agents_track_project(cx);
+                    } else if let Some(wt) = view.agents.selected.clone() {
+                        view.agents_sync_project(wt, cx);
+                    }
+                    view.enter_agents(cx);
+                }
+
                 // Launched straight to an empty Projects screen (no repo arg, no recents,
                 // and not mid first-run onboarding) → jump straight to the folder picker.
                 if view.repo_root.is_none()
@@ -4674,7 +4707,7 @@ fn main() {
                     while let Some(req) = futures::StreamExt::next(&mut rx).await {
                         let ok = window.update(cx, |view, window, cx| {
                             if let instance::Request::Open(path) = req {
-                                view.open_project(path, cx);
+                                view.open_folder(path, cx);
                                 window.focus(&view.focus_handle(cx));
                             }
                             // Either way the user asked for Kyde — raise it.
@@ -4861,6 +4894,65 @@ mod gpui_smoke_tests {
                 assert_eq!(k.browse.open_path, Some(PathBuf::from("app.tsx")));
             })
             .unwrap();
+    }
+
+    /// Selecting a worktree in Agents opens it as the project at once, and switching worktree
+    /// from the code views selects it in Agents — in the same project tab, the same view; ⌥⌘O
+    /// goes back to its agent; a folder you open joins Agents.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn code_views_and_agents_share_the_active_worktree(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("wt");
+        let other = dir.with_extension("other");
+        let _ = std::fs::remove_dir_all(&wt);
+        std::fs::create_dir_all(&other).unwrap();
+        let added = std::process::Command::new("git")
+            .args(["worktree", "add", "-q", "-b", "wt-branch"])
+            .arg(&wt)
+            .current_dir(&dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap();
+        assert!(added.success());
+        handle
+            .update(cx, |k, w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into();
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    worktrees: vec![wt.clone()],
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_select(wt.clone(), cx);
+                assert!(k.mode == Mode::Agents);
+                assert_eq!(k.repo_root.as_ref(), Some(&wt));
+
+                k.switch_mode(Mode::Commit, cx);
+                k.switch_project(dir.clone(), cx);
+                assert!(k.mode == Mode::Commit);
+                assert_eq!(k.agents.selected.as_ref(), Some(&dir));
+                assert_eq!(k.open_projects, vec![dir.clone()]);
+
+                k.act_agent_toggle_code(&AgentToggleCode, w, cx);
+                assert!(k.mode == Mode::Agents);
+                assert_eq!(k.agents.selected.as_ref(), Some(&dir));
+
+                // A folder opened (File → Open, the Projects view, Open… in the crumb) joins
+                // Agents and shows its code.
+                k.switch_mode(Mode::Browse, cx);
+                k.open_folder(other.clone(), cx);
+                assert!(k.mode == Mode::Browse);
+                assert_eq!(k.repo_root.as_ref(), Some(&other));
+                assert_eq!(k.agents.selected.as_ref(), Some(&other));
+                assert!(k.agents.cfg.spaces.iter().any(|s| s.path == other));
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&wt);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     /// Enter in a confirmation window does what its primary button does (issue #162): the
@@ -8441,6 +8533,8 @@ mod gpui_smoke_tests {
                     MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
                     MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
                     MenuEntry::Divider => "—".into(),
+                    #[cfg(feature = "terminal")]
+                    MenuEntry::Worktree { wt, .. } => wt.display().to_string(),
                 })
                 .collect()
         };
@@ -8610,6 +8704,8 @@ mod gpui_smoke_tests {
                         MenuEntry::Item { label, .. } | MenuEntry::Note(label) => label.to_string(),
                         MenuEntry::Submenu { label, .. } => format!("{label} ▸"),
                         MenuEntry::Divider => "—".into(),
+                        #[cfg(feature = "terminal")]
+                        MenuEntry::Worktree { wt, .. } => wt.display().to_string(),
                     })
                     .collect();
                 assert_eq!(

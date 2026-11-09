@@ -162,7 +162,7 @@ impl Kyde {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this, _e, _w, cx| this.open_project(pclone.clone(), cx)),
+                        cx.listener(move |this, _e, _w, cx| this.open_folder(pclone.clone(), cx)),
                     )
             });
         div()
@@ -308,17 +308,17 @@ impl Kyde {
 
     /// Editor tab strip: one tab per open file, left→right in open order. Click activates,
     /// the `×` closes, right-click opens the tab context menu (close / others / to the right).
-    /// The single-project title shown in the title bar, just right of the traffic lights
-    /// (only when ≤1 project is open — with more, the project-tabs strip takes over). Colored
-    /// initials chip + name + a chevron; clicking opens another project (`pick_folder`).
+    /// What you're working on, in the title bar just right of the traffic lights: the project
+    /// (colored initials chip + name + a chevron — a dropdown of the projects and Open…), then
+    /// the agent worktree it shows, when it is one (`render_worktree_crumb`).
     pub(crate) fn render_titlebar_project(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(root) = self.repo_root.as_ref() else {
             return div().into_any_element();
         };
         let t = theme::get();
-        let name = projects::name_of(root);
+        let name = self.project_label(root);
         let chip_color = gpui::rgb(projects::color_for(&name));
-        div()
+        let project = div()
             .id("titlebar-project")
             .flex()
             .flex_row()
@@ -351,16 +351,81 @@ impl Kyde {
                     .child(SharedString::from(name)),
             )
             .child(
-                div()
-                    .text_color(t.line_number)
-                    .text_size(px(10.0))
-                    .child("▾"),
+                svg()
+                    .path("icons/chevron-down.svg")
+                    .flex_none()
+                    .size(px(14.0))
+                    .text_color(t.secondary_text),
             )
+            .tooltip(ui::tip("Switch project"))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _e, _w, cx| this.pick_folder(cx)),
-            )
-            .into_any_element()
+                cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
+                    let at = gpui::point(e.position.x - px(8.0), e.position.y + px(16.0));
+                    this.open_menu(at, MenuTarget::Projects, cx);
+                }),
+            );
+        let row = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .child(project);
+        // …› the agent worktree it shows, when it is one.
+        #[cfg(feature = "terminal")]
+        let row = row.children(self.render_worktree_crumb(cx));
+        row.into_any_element()
+    }
+
+    /// The project crumb's menu: the open projects and the agent spaces (the one shown
+    /// ticked), then Open… (which adds the folder to the Agents view).
+    pub(crate) fn projects_menu_entries(&self) -> Vec<MenuEntry> {
+        let current = self.repo_root.clone();
+        let item = |root: PathBuf, label: String| {
+            let label = if current.as_ref() == Some(&root) {
+                format!("✓ {label}")
+            } else {
+                label
+            };
+            MenuEntry::item(label, move |this, _w, cx| {
+                this.switch_project(root.clone(), cx);
+            })
+        };
+        let mut out: Vec<MenuEntry> = self
+            .open_projects
+            .iter()
+            .map(|p| item(p.clone(), self.project_label(p)))
+            .collect();
+        // Agent spaces not open yet.
+        #[cfg(feature = "terminal")]
+        for s in self.agents.cfg.spaces.iter().filter(|s| !s.scratch) {
+            if !self
+                .open_projects
+                .iter()
+                .any(|p| self.same_agent_space(p, &s.path))
+            {
+                out.push(item(s.path.clone(), self.project_label(&s.path)));
+            }
+        }
+        out.push(MenuEntry::Divider);
+        out.push(MenuEntry::item("Open…", |this, _w, cx| {
+            this.pick_folder(cx);
+        }));
+        out
+    }
+
+    /// Show project `root` — an agent worktree the way the worktree crumb switches to one
+    /// (the Agents view stays up, the code views keep their view).
+    pub(crate) fn switch_project(&mut self, root: PathBuf, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        if self.agents.cfg.space_of(&root).is_some() {
+            self.agents_switch_to(root, cx);
+            return;
+        }
+        if self.repo_root.as_ref() != Some(&root) {
+            self.open_project(root, cx);
+        }
     }
 
     /// Project tabs strip: one pill per open project, above all other UI (under the title
@@ -373,7 +438,7 @@ impl Kyde {
         let t = theme::get();
         let tabs = self.open_projects.iter().enumerate().map(|(i, root)| {
             let active = self.repo_root.as_ref() == Some(root);
-            let name: SharedString = crate::projects::name_of(root).into();
+            let name: SharedString = self.project_label(root).into();
             let grp = SharedString::from(format!("projgrp-{i}"));
             let close = div()
                 .id(SharedString::from(format!("project-close-{i}")))
@@ -428,11 +493,7 @@ impl Kyde {
                     MouseButton::Left,
                     cx.listener({
                         let root = root.clone();
-                        move |this, _e, _w, cx| {
-                            if this.repo_root.as_ref() != Some(&root) {
-                                this.open_project(root.clone(), cx);
-                            }
-                        }
+                        move |this, _e, _w, cx| this.switch_project(root.clone(), cx)
                     }),
                 )
         });
@@ -464,7 +525,15 @@ impl Kyde {
         // Stash the project we're leaving so a later switch back restores it.
         self.save_active_session();
         if !self.open_projects.contains(&path) {
-            self.open_projects.push(path.clone());
+            // One tab per agent space: another of its worktrees takes over the tab.
+            match self
+                .open_projects
+                .iter()
+                .position(|p| self.same_agent_space(p, &path))
+            {
+                Some(i) => self.open_projects[i] = path.clone(),
+                None => self.open_projects.push(path.clone()),
+            }
         }
         self.load_project_state(path, cx);
         cx.notify();
@@ -492,8 +561,15 @@ impl Kyde {
     /// was open, the editor tabs, tree expansion, mode) or starting fresh otherwise.
     fn load_project_state(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.repo_root = Some(path.clone());
+        #[cfg(feature = "terminal")]
+        self.agents_track_project(cx);
         if let Some(s) = self.project_sessions.remove(&path) {
-            self.mode = s.mode;
+            // A session left from the Agents view comes back to the code.
+            self.mode = if s.mode == Mode::Agents {
+                Mode::Browse
+            } else {
+                s.mode
+            };
             self.browse.expanded = s.expanded;
             self.browse.open_tabs = s.open_tabs;
             self.browse.preview_tab = s.preview_tab;
@@ -522,6 +598,22 @@ impl Kyde {
             self.browse.expanded.insert(PathBuf::new()); // root folder visible by default
             self.refresh(cx);
         }
+    }
+
+    /// Two folders are rows of the same agent space (never in a build without agents).
+    fn same_agent_space(&self, a: &std::path::Path, b: &std::path::Path) -> bool {
+        let space = |p| self.agents.cfg.space_of(p).map(|s| &s.path);
+        cfg!(feature = "terminal") && space(a).is_some() && space(a) == space(b)
+    }
+
+    /// What a project tab / the title bar calls `root`: an agent space's name for any of its
+    /// worktrees (the worktree bar names which), else the folder's.
+    fn project_label(&self, root: &std::path::Path) -> String {
+        #[cfg(feature = "terminal")]
+        if let Some(name) = self.agents_space_label(root) {
+            return name;
+        }
+        projects::name_of(root)
     }
 
     /// Close an open-project tab. Switches to a neighbour if it was active; closing the last
@@ -562,7 +654,7 @@ impl Kyde {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_project(PathBuf::from(&a.0), cx);
+        self.open_folder(PathBuf::from(&a.0), cx);
     }
 
     /// File → Open… — pick a folder and open it as a new project tab.
@@ -577,7 +669,16 @@ impl Kyde {
 
     /// Native folder picker for the "Open" / "New Project" buttons.
     pub(crate) fn pick_folder(&mut self, cx: &mut Context<Self>) {
-        self.prompt_folder("Open", cx, Self::open_project);
+        self.prompt_folder("Open", cx, Self::open_folder);
+    }
+
+    /// Open a folder you chose — File → Open, the Projects view, Recent Projects, `ky <path>`:
+    /// it joins the Agents view as a project too.
+    pub(crate) fn open_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        self.agents_open_folder(path, cx);
+        #[cfg(not(feature = "terminal"))]
+        self.open_project(path, cx);
     }
 
     /// The native folder picker, then `then` with the folder picked — unless a picker is

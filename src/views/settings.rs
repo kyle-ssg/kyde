@@ -1843,6 +1843,7 @@ fn keymap_groups() -> Vec<(&'static str, Vec<&'static str>)> {
                 "agent_rename",
                 "agent_scrollback",
                 "agent_toggle_sidebar",
+                "agent_toggle_code",
             ],
         ),
         ("General", vec!["open_keymap"]),
