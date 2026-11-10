@@ -1148,6 +1148,17 @@ pub(crate) fn shell_quote(s: &str) -> String {
     out
 }
 
+/// The line typed into a fresh shell to start `cmd` on a seed `prompt`. The shell echoes what
+/// is typed (twice when it arrives before the prompt is drawn), and a seed prompt is a
+/// paragraph, so the line first wipes the screen and scrollback: the agent starts on a clean
+/// terminal. `printf` rather than `clear`, which leaves the scrollback on macOS.
+pub(crate) fn seeded_line(cmd: &str, prompt: &str) -> String {
+    format!(
+        r"printf '\033[H\033[2J\033[3J'; {cmd} {}",
+        shell_quote(prompt)
+    )
+}
+
 /// Review feedback for an agent to act on: one comment, or a thread's worth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Feedback {
@@ -1749,6 +1760,16 @@ mod tests {
         );
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote(r"a\'b"), r"'a'\\''\''b'");
+    }
+
+    /// A seeded start line wipes the echoed prompt off the screen, then runs the command on it.
+    #[test]
+    fn seeded_line_clears_the_echo_then_runs() {
+        let out = std::process::Command::new("sh")
+            .args(["-c", &seeded_line("printf %s", "it's a review")])
+            .output()
+            .unwrap();
+        assert_eq!(out.stdout, b"\x1b[H\x1b[2J\x1b[3Jit's a review");
     }
 
     #[test]
