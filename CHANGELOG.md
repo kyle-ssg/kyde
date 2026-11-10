@@ -45,6 +45,13 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.14.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.14.0...kyde-v2.14.1) (2026-11-10)
+
+
+### Bug Fixes
+
+* **agents:** start a seeded agent on a clean terminal ([#178](https://github.com/kyle-ssg/kyde/issues/178)) ([e733f48](https://github.com/kyle-ssg/kyde/commit/e733f48c5666714d5b417cdc311e4b404c4b8aaa))
+
 ## [2.14.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.13.0...kyde-v2.14.0) (2026-11-09)
 
 
