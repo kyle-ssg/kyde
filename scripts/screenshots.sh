@@ -279,7 +279,9 @@ shoot() {
         kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
         return 1
     fi
-    focus_only_kyde "$pid" # Kyde frontmost + every other app hidden → nothing else in frame
+    # Kyde frontmost + every other app hidden → nothing else in frame. Only a region grab reads
+    # raw screen pixels; a window grab is unaffected by what's around it.
+    if [ "$mode" = region ]; then focus_only_kyde "$pid"; fi
     sleep 1  # let the hide settle + async layout / modal open / first paint settle
     # The agents' dots settle from "working" (fresh output) to idle / done.
     if [ "$name" = agents ]; then sleep 2; fi

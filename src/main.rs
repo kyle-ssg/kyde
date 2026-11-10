@@ -3961,6 +3961,10 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             // so the diff pane always has content to show.
             if let Ok(repo) = std::env::var("KYDE_SHOT_REPO") {
                 view.open_project(PathBuf::from(repo), cx);
+                // Only the fixture's tab: the repo Kyde was launched on would read as a second
+                // "kyde" project.
+                let root = view.repo_root.clone();
+                view.open_projects.retain(|p| Some(p) == root.as_ref());
             }
             view.enter_commit(cx);
             // Click a changed file so the main content shows a side-by-side diff.
@@ -4316,6 +4320,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             view.switch_mode(Mode::Agents, cx);
             view.agents_select(root, cx);
             for wt in wts.iter().rev() {
+                // Selecting a linked worktree doesn't start an agent there.
+                view.agents_new_tab(wt.clone(), true, None, cx);
                 view.agents_select(wt.clone(), cx);
             }
             for (i, wt) in wts.iter().enumerate() {
