@@ -6877,6 +6877,7 @@ impl Kyde {
             .flex_col()
             .p_3()
             .bg(t.panel_bg)
+            .rounded_r(px(theme::ISLAND_RADIUS))
             .text_size(px(fs))
             .child(
                 div()
@@ -7002,6 +7003,14 @@ impl Kyde {
             .px_2()
             .flex_none()
             .bg(t.panel_bg)
+            // `overflow_hidden` clips to the island's rectangle, not its rounded corners, so
+            // the strip rounds its own to match (the context panel takes the right one).
+            .when(!bare, |d| {
+                d.rounded_tl(px(theme::ISLAND_RADIUS))
+                    .when(!self.agents.context_open, |d| {
+                        d.rounded_tr(px(theme::ISLAND_RADIUS))
+                    })
+            })
             .when(bare, |d| {
                 d.absolute()
                     .top_0()
