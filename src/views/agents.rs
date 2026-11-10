@@ -1996,7 +1996,7 @@ impl Kyde {
         let line = agent.then(|| {
             let cmd = self.agents.cfg.default_command();
             match &prompt {
-                Some(p) => format!("{cmd} {}", crate::agents::shell_quote(p)),
+                Some(p) => crate::agents::seeded_line(cmd, p),
                 None => cmd.to_string(),
             }
         });

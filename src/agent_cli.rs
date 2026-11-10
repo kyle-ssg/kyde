@@ -308,11 +308,7 @@ fn new(rest: &[String]) -> Res {
     let prompt = flag(rest, "--prompt");
     let cfg = kyde_config::agents::AgentsCfg::load();
     let line = (!shell_only).then(|| match &prompt {
-        Some(p) => format!(
-            "{} {}",
-            cfg.default_command(),
-            crate::agents::shell_quote(p)
-        ),
+        Some(p) => crate::agents::seeded_line(cfg.default_command(), p),
         None => cfg.default_command().to_string(),
     });
     let id = crate::agents::tab_id();
