@@ -2993,7 +2993,7 @@ dependencies = [
 
 [[package]]
 name = "kyde"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -3031,14 +3031,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-color"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "gpui",
 ]
 
 [[package]]
 name = "kyde-config"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3047,14 +3047,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-diff"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "similar",
 ]
 
 [[package]]
 name = "kyde-git"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-local-history"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -3073,14 +3073,14 @@ dependencies = [
 
 [[package]]
 name = "kyde-markdown"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "pulldown-cmark",
 ]
 
 [[package]]
 name = "kyde-syntax"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "codebook-tree-sitter-latex",
  "kyde-color",
@@ -3105,7 +3105,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-theme"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "kyde-color",
  "serde",
@@ -3114,11 +3114,11 @@ dependencies = [
 
 [[package]]
 name = "kyde-tree"
-version = "2.14.0"
+version = "2.14.1"
 
 [[package]]
 name = "kyde-ui"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "gpui",
  "kyde-color",
@@ -3127,7 +3127,7 @@ dependencies = [
 
 [[package]]
 name = "kyde-update"
-version = "2.14.0"
+version = "2.14.1"
 dependencies = [
  "serde_json",
  "sha2 0.11.1",
