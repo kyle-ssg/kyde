@@ -273,6 +273,7 @@ impl Kyde {
             remove_wt_win: None,
             scrollback_win: None,
             cleanup_win: None,
+            close_tabs_win: None,
             settings_win: None,
             settings_section: SettingsSection::Appearance,
             settings_theme: ui::SelectState::new(cx),

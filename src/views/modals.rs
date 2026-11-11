@@ -455,6 +455,7 @@ impl Kyde {
             ModalKind::Changelog => &mut self.changelog_win,
             ModalKind::RemoveWorktree => &mut self.remove_wt_win,
             ModalKind::Cleanup => &mut self.cleanup_win,
+            ModalKind::CloseTabs => &mut self.close_tabs_win,
             ModalKind::Scrollback => &mut self.scrollback_win,
         }
     }
@@ -569,6 +570,7 @@ impl Kyde {
             ModalKind::ClearLocalHistory => self.do_clear_local_history(cx),
             ModalKind::ConfirmGitInit => self.confirm_git_init(cx),
             ModalKind::RemoveWorktree => self.agents_remove_confirmed(cx),
+            ModalKind::CloseTabs => self.agents_close_confirmed(cx),
             ModalKind::Plugins
             | ModalKind::Fonts
             | ModalKind::Settings

@@ -737,6 +737,9 @@ impl Kyde {
             return;
         };
         let removed = self.agents.cfg.spaces.remove(i);
+        for wt in std::iter::once(&removed.path).chain(&removed.worktrees) {
+            self.agents.cfg.pinned.remove(wt);
+        }
         #[cfg(feature = "terminal")]
         for wt in std::iter::once(&removed.path).chain(&removed.worktrees) {
             if let Some(g) = self.agents.tabs.remove(wt) {
@@ -1598,6 +1601,7 @@ impl Kyde {
         if self.agents.selected.as_deref() == Some(wt) {
             self.agents.selected.clone_from(&owner);
         }
+        self.agents.cfg.pinned.remove(wt);
         // Its code goes too: open, its space's tab moves to the row taking its place.
         #[cfg(feature = "terminal")]
         if self.open_projects.iter().any(|p| p == wt) {
@@ -1615,12 +1619,14 @@ impl Kyde {
         cx.notify();
     }
 
-    /// A scratch row's ×: close its tabs — the row (and its folder, if empty) goes with the
-    /// last one.
+    /// A scratch row's ×: close its tabs (asking first while an agent there isn't done) — the
+    /// row (and its folder, if empty) goes with the last one.
     fn agents_close_scratch(&mut self, wt: &Path, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
-        while self.agents_has_tabs(wt) {
-            self.agents_close_tab(wt, 0, cx);
+        if let Some(g) = self.agents.tabs.get(wt).filter(|g| !g.tabs.is_empty()) {
+            let ids = g.tabs.iter().map(|t| t.id.clone()).collect();
+            self.agents_ask_close(ids, cx);
+            return;
         }
         // Closing its last tab forgot it already; a row without tabs goes now.
         if self.agents.cfg.is_scratch(wt) {
@@ -2244,13 +2250,20 @@ impl Kyde {
                     this.open_terminal_file(path.clone(), *line, cx);
                 }
                 terminal::TerminalEvent::CloseRequested => {
-                    if let Some(i) = this
+                    let Some(i) = this
                         .agents
                         .tabs
                         .get(&key)
                         .and_then(|g| g.tabs.iter().position(|t| t.view == v))
-                    {
+                    else {
+                        return;
+                    };
+                    // Its shell exited: nothing left to lose. Its own menu's Close asks.
+                    if v.read(cx).exited {
                         this.agents_close_tab(&key, i, cx);
+                    } else {
+                        let id = this.agents.tabs[&key].tabs[i].id.clone();
+                        this.agents_ask_close(vec![id], cx);
                     }
                 }
             }
@@ -2347,6 +2360,177 @@ impl Kyde {
         self.agents.focus_pending = true;
         self.agents_save(cx);
         cx.notify();
+    }
+
+    /// Close the tabs `ids` — asking first, in a native window, when any of them isn't seen as
+    /// done (`tab_unfinished`). The tab ×, ⌘W, the tab menu and a scratch row's × all come
+    /// through here; the cleanup doesn't (it only closes finished tabs).
+    pub(crate) fn agents_ask_close(&mut self, ids: Vec<String>, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let unfinished = self
+            .agents
+            .tabs
+            .values()
+            .flat_map(|g| &g.tabs)
+            .any(|t| ids.contains(&t.id) && tab_unfinished(t, now, cx));
+        if !unfinished {
+            self.agents_close_ids(&ids, cx);
+            return;
+        }
+        let title = if ids.len() == 1 {
+            "Close Tab"
+        } else {
+            "Close Tabs"
+        };
+        self.agents.closing = ids;
+        self.open_modal_window(ModalKind::CloseTabs, title, 460.0, 220.0, cx);
+    }
+
+    /// Close the tabs `ids`, wherever each is now (a tab follows its agent between worktrees).
+    fn agents_close_ids(&mut self, ids: &[String], cx: &mut Context<Self>) {
+        for id in ids {
+            let at = self.agents.tabs.iter().find_map(|(wt, g)| {
+                let i = g.tabs.iter().position(|t| &t.id == id)?;
+                Some((wt.clone(), i))
+            });
+            if let Some((wt, i)) = at {
+                self.agents_close_tab(&wt, i, cx);
+            }
+        }
+    }
+
+    /// The "Close tab?" window's confirm (its primary button, or Enter): close it and the
+    /// tabs it asked about.
+    pub(crate) fn agents_close_confirmed(&mut self, cx: &mut Context<Self>) {
+        self.close_modal_window(ModalKind::CloseTabs, cx);
+        let ids = std::mem::take(&mut self.agents.closing);
+        self.agents_close_ids(&ids, cx);
+    }
+
+    /// Body of the "Close tab?" window: the tabs it would close, and which of them aren't
+    /// done — closing a tab ends its agent.
+    pub(crate) fn render_close_tabs_body(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        let now = Instant::now();
+        let closing = &self.agents.closing;
+        let tabs: Vec<&AgentTab> = self
+            .agents
+            .tabs
+            .values()
+            .flat_map(|g| &g.tabs)
+            .filter(|t| closing.contains(&t.id))
+            .collect();
+        let name = |t: &AgentTab| t.name.clone().unwrap_or_else(|| tab_auto_title(t, cx));
+        let busy: Vec<String> = tabs
+            .iter()
+            .filter(|t| tab_unfinished(t, now, cx))
+            .map(|t| {
+                let state = AgentState::of_tab(&tab_signals(t, cx), now);
+                let what = match state {
+                    AgentState::Blocked => "needs input",
+                    AgentState::Working => "working",
+                    _ => "stopped mid-task",
+                };
+                format!("{} — {what}", name(t))
+            })
+            .collect();
+        let (heading, about, confirm) = match tabs.as_slice() {
+            [] => return div().into_any_element(),
+            [one] => (
+                format!("Close “{}”?", name(one)),
+                "Its agent isn't done. Closing the tab ends it.".to_string(),
+                "Close Tab".to_string(),
+            ),
+            many => (
+                format!("Close {} tabs?", many.len()),
+                "Closing a tab ends its agent — and these aren't done:".to_string(),
+                format!("Close {} Tabs", many.len()),
+            ),
+        };
+        let cancel = btn_secondary("close-tabs-cancel", "Cancel").on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| {
+                this.agents.closing.clear();
+                this.close_modal_window(ModalKind::CloseTabs, cx);
+            }),
+        );
+        let confirm = btn_primary("close-tabs-confirm", confirm).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _e, _w, cx| this.agents_close_confirmed(cx)),
+        );
+        ui::confirm_body(heading, about)
+            .when(tabs.len() > 1, |d| {
+                d.child(
+                    div()
+                        .id("close-tabs-list")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_color(t.secondary_text)
+                        .children(
+                            busy.into_iter()
+                                .map(|line| div().truncate().child(SharedString::from(line))),
+                        ),
+                )
+            })
+            .child(ui::modal_footer().child(cancel).child(confirm))
+            .into_any_element()
+    }
+
+    /// A tab's right-click menu: close it, the others, or the ones to its right (each asks
+    /// first while a tab it would close isn't done), rename it, pin its worktree.
+    pub(crate) fn agents_tab_menu(&self, wt: &Path, id: &str) -> Vec<MenuEntry> {
+        let Some(g) = self.agents.tabs.get(wt) else {
+            return Vec::new();
+        };
+        let Some(at) = g.tabs.iter().position(|t| t.id == id) else {
+            return Vec::new();
+        };
+        let ids = |keep: &dyn Fn(usize) -> bool| -> Vec<String> {
+            g.tabs
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| keep(*i))
+                .map(|(_, t)| t.id.clone())
+                .collect()
+        };
+        let (others, right) = (ids(&|i| i != at), ids(&|i| i > at));
+        let (one, rename) = (id.to_string(), id.to_string());
+        let mut out = vec![MenuEntry::item("Close", move |this, _w, cx| {
+            this.agents_ask_close(vec![one.clone()], cx);
+        })];
+        if !others.is_empty() {
+            out.push(MenuEntry::item("Close Others", move |this, _w, cx| {
+                this.agents_ask_close(others.clone(), cx);
+            }));
+        }
+        if !right.is_empty() {
+            out.push(MenuEntry::item(
+                "Close Tabs to the Right",
+                move |this, _w, cx| this.agents_ask_close(right.clone(), cx),
+            ));
+        }
+        out.push(MenuEntry::Divider);
+        let wt = wt.to_path_buf();
+        out.push(MenuEntry::item("Rename…", {
+            let wt = wt.clone();
+            move |this, window, cx| {
+                let target = RenameTarget::Tab(wt.clone(), rename.clone());
+                this.agents_start_rename(target, window, cx);
+            }
+        }));
+        out.push(self.agents_pin_entry(&wt, true));
+        out
+    }
+
+    /// Whether stopped background agent `d`'s work sits in a pinned worktree (the cleanup
+    /// leaves it there).
+    fn agents_sub_pinned(&self, d: &crate::agents::DoneSub) -> bool {
+        let at = d.sub.worktree.as_ref().unwrap_or(&d.home);
+        self.agents.cfg.pinned.contains(at)
     }
 
     /// Keep the work of background agents that `stopped` until it's dismissed (a newer read of
@@ -3394,9 +3578,11 @@ impl Kyde {
         let mut probes: Vec<Probe> = Vec::new();
         let mut budget = MAX_AI_CHECKS;
         for (wt, g) in &self.agents.tabs {
+            let pinned = self.agents.cfg.pinned.contains(wt);
             for (i, t) in g.tabs.iter().enumerate() {
                 let on_screen = visible.as_ref().is_some_and(|(w, vi)| w == wt && *vi == i);
                 let ask = rules.ai_done
+                    && !pinned
                     && budget > 0
                     && t.agent
                     && !on_screen
@@ -3540,6 +3726,7 @@ impl Kyde {
         let mut finished: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         let mut newly: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for (wt, g) in &mut self.agents.tabs {
+            let pinned = self.agents.cfg.pinned.contains(wt);
             for (i, t) in g.tabs.iter_mut().enumerate() {
                 let facts = crate::agents::TabFacts {
                     on_screen: visible.as_ref().is_some_and(|(w, vi)| w == wt && *vi == i),
@@ -3555,8 +3742,9 @@ impl Kyde {
                     ai_done: t.ai.as_ref().and_then(|a| a.done.clone()),
                 };
                 let was = t.verdict.is_some();
-                // Closing it would end its background agents too.
-                t.verdict = if t.subs.is_empty() {
+                // Closing it would end its background agents too; a pinned worktree's tabs
+                // are never finished.
+                t.verdict = if t.subs.is_empty() && !pinned {
                     crate::agents::closable(&facts, rules, hours)
                 } else {
                     None
@@ -3596,6 +3784,7 @@ impl Kyde {
                     .iter()
                     .filter(|d| shown != Some(d.sub.id.as_str()))
                     .filter(|d| d.sub.at.elapsed().is_ok_and(|e| e >= rules.quiet()))
+                    .filter(|d| !self.agents_sub_pinned(d))
                     .map(|d| d.sub.id.clone())
                     .collect();
                 closed += self.agents_dismiss_subs(&stale, cx);
@@ -3760,8 +3949,12 @@ impl Kyde {
                 .into_any_element()
         };
         let mut tab_rows: Vec<gpui::AnyElement> = Vec::new();
+        let pinned = &self.agents.cfg.pinned;
         for space in &self.agents.cfg.spaces {
             for wt in space.rows() {
+                if pinned.contains(&wt) {
+                    continue;
+                }
                 let removing = self.agents.cleanup_checked.contains(&wt);
                 // Stopped background agents: finished by definition.
                 for d in self.agents_done_in(&wt) {
@@ -3873,7 +4066,7 @@ impl Kyde {
                     .child(leaf_name(&space.path))
                     .into_any_element(),
             );
-            for wt in &space.worktrees {
+            for wt in space.worktrees.iter().filter(|w| !pinned.contains(*w)) {
                 let (status, _, danger) = self.agents_wt_cleanup(&space.path, wt);
                 let checked = self.agents.cleanup_checked.contains(wt);
                 let title = self
@@ -3973,6 +4166,13 @@ impl Kyde {
                  finished — nothing uncommitted, nothing unpushed — so removing them loses no \
                  work. Their tabs close; their branches are kept.",
             ))
+            .when(!pinned.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_color(t.line_number)
+                        .child("Pinned worktrees are left alone — they aren't listed."),
+                )
+            })
             .child(
                 div()
                     .id("cleanup-list")
@@ -4024,10 +4224,13 @@ impl Kyde {
         }
     }
 
-    /// ⌘W in an agent tab: close it.
+    /// ⌘W in an agent tab: close it (asking first while its agent isn't done).
     pub(crate) fn agents_close_visible_tab(&mut self, cx: &mut Context<Self>) {
-        if let Some((wt, i)) = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i)) {
-            self.agents_close_tab(&wt, i, cx);
+        if let Some(id) = self
+            .agents_visible_tab()
+            .map(|(wt, i)| self.agents.tabs[wt].tabs[i].id.clone())
+        {
+            self.agents_ask_close(vec![id], cx);
         }
     }
 
@@ -4041,6 +4244,52 @@ impl Kyde {
         let handle = self.agents.tabs[wt].tabs[i].view.read(cx).handle();
         window.focus(&handle);
         window.defer(cx, move |window, _cx| window.focus(&handle));
+    }
+}
+
+// ── pinning ──────────────────────────────────────────────────────────────────────────────
+impl Kyde {
+    /// Pin / unpin worktree `wt`. Pinned, it's long-running work the cleanup leaves alone:
+    /// its tabs are never found finished (or closed), and the Clean Up window doesn't list it.
+    pub(crate) fn agents_toggle_pin(&mut self, wt: &Path, cx: &mut Context<Self>) {
+        if !self.agents.cfg.pinned.remove(wt) {
+            self.agents.cfg.pinned.insert(wt.to_path_buf());
+            #[cfg(feature = "terminal")]
+            {
+                // What the cleanup already found there no longer stands.
+                for t in self
+                    .agents
+                    .tabs
+                    .get_mut(wt)
+                    .into_iter()
+                    .flat_map(|g| &mut g.tabs)
+                {
+                    t.verdict = None;
+                }
+                self.agents.cleanup_checked.remove(wt);
+                self.agents.cleanup_tabs.retain(|(w, _)| w != wt);
+            }
+        }
+        self.agents_save(cx);
+        cx.notify();
+    }
+
+    /// The menu item that pins / unpins `wt` — named for the worktree where the menu is a
+    /// tab's (`named`), plainly on the row's own.
+    fn agents_pin_entry(&self, wt: &Path, named: bool) -> MenuEntry {
+        let label = match (self.agents.cfg.pinned.contains(wt), named) {
+            (false, false) => "Pin",
+            (false, true) => "Pin Worktree",
+            (true, false) => "Unpin",
+            (true, true) => "Unpin Worktree",
+        };
+        let wt = wt.to_path_buf();
+        MenuEntry::item(label, move |this, _w, cx| this.agents_toggle_pin(&wt, cx))
+    }
+
+    /// A sidebar worktree row's right-click menu.
+    pub(crate) fn agents_row_menu(&self, wt: &Path) -> Vec<MenuEntry> {
+        vec![self.agents_pin_entry(wt, false)]
     }
 }
 
@@ -6620,6 +6869,21 @@ impl Kyde {
                 )
             })
             .child(title)
+            // Pinned: the cleanup leaves it alone.
+            .when(self.agents.cfg.pinned.contains(wt), |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("{ns}-pin-{id}")))
+                        .flex_none()
+                        .tooltip(ui::tip("Pinned — the cleanup leaves it alone"))
+                        .child(
+                            svg()
+                                .path("icons/pin.svg")
+                                .size(px(11.0))
+                                .text_color(t.line_number),
+                        ),
+                )
+            })
             .children(status)
             .children(activity)
             .children(badges)
@@ -6642,6 +6906,7 @@ impl Kyde {
         let key = SharedString::from(format!("agents-wt-{id}"));
         let hovered = self.agents.hovered_row.as_ref() == Some(&key);
         let (sel, rm_space, rm_wt) = (wt.to_path_buf(), space.to_path_buf(), wt.to_path_buf());
+        let menu_wt = wt.to_path_buf();
         // The space's own folder: titled by its branch, behind a branch glyph.
         let is_default = wt == space;
         let scratch = self.agents.cfg.is_scratch(wt);
@@ -6739,6 +7004,12 @@ impl Kyde {
                         this.agents_drag_press(item.clone(), e);
                     }
                     this.agents_select(sel.clone(), cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    this.open_menu(e.position, MenuTarget::AgentRow(menu_wt.clone()), cx);
                 }),
             )
             .into_any_element()
@@ -7024,8 +7295,8 @@ impl Kyde {
             let renaming =
                 self.agents.renaming == Some(RenameTarget::Tab(wt.to_path_buf(), tab.id.clone()));
             let grp = SharedString::from(format!("agents-tab-{i}"));
-            let (sel, close) = (wt.to_path_buf(), wt.to_path_buf());
-            let tab_id = tab.id.clone();
+            let (sel, menu_wt) = (wt.to_path_buf(), wt.to_path_buf());
+            let (tab_id, close, menu_id) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
             strip = strip.child(
                 div()
                     .id(("agents-tab", i))
@@ -7116,7 +7387,7 @@ impl Kyde {
                                 MouseButton::Left,
                                 cx.listener(move |this, _e, _w, cx| {
                                     cx.stop_propagation();
-                                    this.agents_close_tab(&close, i, cx);
+                                    this.agents_ask_close(vec![close.clone()], cx);
                                 }),
                             ),
                     )
@@ -7141,6 +7412,13 @@ impl Kyde {
                             this.agents.sub_shown = None;
                             this.agents.focus_pending = true;
                             cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                            let target = MenuTarget::AgentTab(menu_wt.clone(), menu_id.clone());
+                            this.open_menu(e.position, target, cx);
                         }),
                     ),
             );
@@ -7743,6 +8021,16 @@ impl Kyde {
         div().into_any_element()
     }
 
+    /// No terminal, no tabs to close.
+    #[cfg(not(feature = "terminal"))]
+    pub(crate) fn render_close_tabs_body(&mut self, _cx: &mut Context<Self>) -> gpui::AnyElement {
+        div().into_any_element()
+    }
+
+    /// No terminal, no tabs to close.
+    #[cfg(not(feature = "terminal"))]
+    pub(crate) fn agents_close_confirmed(&mut self, _cx: &mut Context<Self>) {}
+
     /// The eraser button: the Clean Up window — close finished tabs, remove finished
     /// worktrees.
     fn agents_cleanup_now(&mut self, cx: &mut Context<Self>) {
@@ -7758,6 +8046,7 @@ impl Kyde {
                 .iter()
                 .filter(|s| !s.scratch)
                 .flat_map(|s| s.worktrees.iter().map(move |w| (s.path.clone(), w.clone())))
+                .filter(|(_, wt)| !self.agents.cfg.pinned.contains(wt))
                 .filter(|(space, wt)| self.agents_wt_cleanup(space, wt).1)
                 .map(|(_, wt)| wt)
                 .collect();
@@ -7779,6 +8068,7 @@ impl Kyde {
                 .spaces
                 .iter()
                 .flat_map(kyde_config::agents::Space::rows)
+                .filter(|wt| !self.agents.cfg.pinned.contains(wt))
                 .flat_map(|wt| {
                     self.agents_done_in(&wt)
                         .map(|d| d.sub.id.clone())
@@ -8182,6 +8472,19 @@ fn tab_signals(t: &AgentTab, cx: &gpui::App) -> crate::agents::Signals {
         unseen: t.unseen,
         background: !t.subs.is_empty(),
     }
+}
+
+/// Whether closing tab `t` should ask first: an agent given work that isn't seen as done —
+/// not by its own report (`agents::close_asks`), not by the cleanup.
+#[cfg(feature = "terminal")]
+fn tab_unfinished(t: &AgentTab, now: Instant, cx: &gpui::App) -> bool {
+    t.agent
+        && t.used
+        && t.verdict.is_none()
+        && crate::agents::close_asks(
+            AgentState::of_tab(&tab_signals(t, cx), now),
+            t.hook.as_ref().map(|(h, _)| h),
+        )
 }
 
 /// A tab's automatic title: what its terminal calls itself, else "agent" / "shell".
