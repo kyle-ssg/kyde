@@ -45,6 +45,24 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.15.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.14.1...kyde-v2.15.0) (2026-11-11)
+
+
+### Features
+
+* **agents:** group sidebar projects into foldable, draggable groups ([#187](https://github.com/kyle-ssg/kyde/issues/187)) ([478acf9](https://github.com/kyle-ssg/kyde/commit/478acf9fb8ef4276925a47956cf629c8a03b8f44))
+* **agents:** jump from a project to its issues, PRs and CI ([#186](https://github.com/kyle-ssg/kyde/issues/186)) ([0975540](https://github.com/kyle-ssg/kyde/commit/09755402485e26a025b09399515f14b1b13e3b3d))
+* **agents:** pin Scratch to the bottom of the sidebar ([#188](https://github.com/kyle-ssg/kyde/issues/188)) ([1ebe903](https://github.com/kyle-ssg/kyde/commit/1ebe90310ba6428cd33ab9f34711f9a7bfed2a44))
+* **agents:** pin worktrees, tab close menu, and a close confirmation ([#181](https://github.com/kyle-ssg/kyde/issues/181)) ([479398d](https://github.com/kyle-ssg/kyde/commit/479398d0aec635f26e5c76b440c5cbf68e3f322e))
+* drag editor and agent tabs to reorder them ([#185](https://github.com/kyle-ssg/kyde/issues/185)) ([966c769](https://github.com/kyle-ssg/kyde/commit/966c7694a69de24c831859dd392a5bfd9574a65d))
+
+
+### Bug Fixes
+
+* **agents:** round the corners of the agent panel ([#180](https://github.com/kyle-ssg/kyde/issues/180)) ([d891ee8](https://github.com/kyle-ssg/kyde/commit/d891ee8a0a59013c72401c031d1a8ed5e9e80377))
+* **agents:** scroll the tab strip when its tabs outgrow the pane ([#184](https://github.com/kyle-ssg/kyde/issues/184)) ([c9226fc](https://github.com/kyle-ssg/kyde/commit/c9226fc967c40fa00e0958e86920fd89dc57c82b))
+* **agents:** tell an agent how to leave a worktree it entered before the next one ([#183](https://github.com/kyle-ssg/kyde/issues/183)) ([e6635a5](https://github.com/kyle-ssg/kyde/commit/e6635a5cade4d6f4db2637f822a32a08e8ee4602))
+
 ## [2.14.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.14.0...kyde-v2.14.1) (2026-11-10)
 
 
