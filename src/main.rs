@@ -1450,6 +1450,13 @@ struct AgentsView {
     /// Its work's scroll — kept at the newest step while you're there.
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     sub_scroll: ScrollHandle,
+    /// The tab strip's sideways scroll — its tabs can outgrow the pane.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    tab_scroll: ScrollHandle,
+    /// The tab (or background agent) the strip last scrolled into view: its worktree and id.
+    /// The strip follows the shown tab only when this changes (`agents_reveal_tab`).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    tab_revealed: Option<(PathBuf, String)>,
     /// Background agents that stopped: their work stays in the worktree each worked in until
     /// you dismiss it (saved, so a relaunch keeps it too — `agents::done_path`).
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
@@ -1982,6 +1989,8 @@ impl AgentsView {
             hooks_polling: false,
             sub_shown: None,
             sub_scroll: ScrollHandle::new(),
+            tab_scroll: ScrollHandle::new(),
+            tab_revealed: None,
             done_subs: Vec::new(),
             hooks_synced: false,
             renaming: None,
@@ -8084,6 +8093,62 @@ mod gpui_smoke_tests {
                 // The one left is done: it closes without asking.
                 k.agents_ask_close(vec![ids[0].clone()], cx);
                 assert!(!k.agents.tabs.contains_key(&dir));
+            })
+            .unwrap();
+    }
+
+    /// More tabs than the pane is wide: the strip scrolls instead of clipping them, and the
+    /// shown tab is always in view — the newest (last) one, then the first when you go back.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_strip_scrolls_to_the_shown_tab(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                for _ in 0..11 {
+                    k.agents_new_tab(dir.clone(), false, None, cx);
+                }
+                for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                    t.name = Some("a tab with a long enough name".into());
+                }
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        // (An item's bounds are where it's laid out — before the scroll moves it.)
+        let in_view = |k: &Kyde, i: usize| {
+            let scroll = &k.agents.tab_scroll;
+            let (strip, tab, by) = (
+                scroll.bounds(),
+                scroll.bounds_for_item(i).unwrap(),
+                scroll.offset().x,
+            );
+            tab.left() + by >= strip.left() && tab.right() + by <= strip.right()
+        };
+        handle
+            .update(&mut vcx, |k, _w, cx| {
+                assert!(
+                    k.agents.tab_scroll.max_offset().width > gpui::px(0.0),
+                    "the tabs outgrow the strip, which scrolls"
+                );
+                assert!(in_view(k, 11), "the newest tab is in view");
+                assert!(!in_view(k, 0));
+                k.agents.tabs.get_mut(&dir).unwrap().active = 0;
+                cx.notify();
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                assert!(in_view(k, 0), "back to the first");
             })
             .unwrap();
     }
