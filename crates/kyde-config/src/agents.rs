@@ -354,15 +354,18 @@ impl AgentsCfg {
         c
     }
 
-    /// Add the Scratch space (last) when there isn't one — every layout has it.
+    /// Add the Scratch space when there isn't one — every layout has it — and keep it last
+    /// (the sidebar pins it to the bottom; an older layout may have it among the projects).
     pub fn ensure_scratch(&mut self) {
-        if !self.spaces.iter().any(|s| s.scratch) {
-            self.spaces.push(Space {
+        let scratch = match self.spaces.iter().position(|s| s.scratch) {
+            Some(i) => self.spaces.remove(i),
+            None => Space {
                 path: scratch_dir(),
                 scratch: true,
                 ..Space::default()
-            });
-        }
+            },
+        };
+        self.spaces.push(scratch);
     }
 
     /// Where a newly added project goes: after the last project, so Scratch stays below them.
@@ -501,5 +504,19 @@ mod tests {
             c.space_of(Path::new("/w")).map(|s| s.path.as_path()),
             Some(Path::new("/r"))
         );
+    }
+
+    /// A layout saved with Scratch among the projects (dragged there before it was pinned)
+    /// loads with it last, its rows kept.
+    #[test]
+    fn scratch_moves_below_the_projects() {
+        let mut c: AgentsCfg = serde_json::from_str(
+            r#"{"spaces":[{"path":"/a"},{"path":"/s","worktrees":["/s/x"],"scratch":true},{"path":"/b"}]}"#,
+        )
+        .unwrap();
+        c.ensure_scratch();
+        let order: Vec<_> = c.spaces.iter().map(|s| s.path.as_path()).collect();
+        assert_eq!(order, ["/a", "/b", "/s"].map(Path::new));
+        assert!(c.is_scratch(Path::new("/s/x")));
     }
 }

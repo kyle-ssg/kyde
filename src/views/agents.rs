@@ -1776,7 +1776,15 @@ impl Kyde {
         let Some(d) = self.agents.drag.as_mut().filter(|d| d.active) else {
             return;
         };
+        let scratch = self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .any(|s| s.scratch && s.path == space);
         let over = match &d.item {
+            // A project can't go below Scratch, which stays at the bottom.
+            DragItem::Space(_) if scratch => None,
             DragItem::Space(_) => Some(space.to_path_buf()),
             DragItem::Worktree { space: s, .. } if s == space => {
                 Some(wt.unwrap_or(space).to_path_buf())
@@ -4935,19 +4943,7 @@ impl Kyde {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let sort = self.agents.cfg.sort_attention;
         let urgency = |w: &Path| self.agents_state(w).urgency();
-        // Needs-you-first: spaces by their most urgent worktree (stable — ties keep order).
-        let mut spaces: Vec<(usize, &Space)> = self.agents.cfg.spaces.iter().enumerate().collect();
-        if sort {
-            spaces.sort_by_key(|(_, s)| {
-                std::cmp::Reverse(
-                    std::iter::once(&s.path)
-                        .chain(&s.worktrees)
-                        .map(|w| urgency(w))
-                        .max()
-                        .unwrap_or(0),
-                )
-            });
-        }
+        let spaces = self.agents_space_order();
         let line = self.agents_drop_line();
         let drop_line = || {
             div()
@@ -4959,6 +4955,11 @@ impl Kyde {
                 .into_any_element()
         };
         for (si, space) in spaces {
+            // Scratch sits at the bottom, just above Add project: the list's spare room
+            // goes above it (none once the list scrolls).
+            if space.scratch {
+                rows.push(div().flex_1().into_any_element());
+            }
             if line.as_ref() == Some(&DropLine::BeforeSpace(space.path.clone())) {
                 rows.push(drop_line());
             }
@@ -6804,7 +6805,8 @@ impl Kyde {
         let renaming = self.agents.renaming == Some(RenameTarget::Space(space.path.clone()));
         let (toggle, new_wt, rm) = (space.path.clone(), space.path.clone(), space.path.clone());
         let drop_space = space.path.clone();
-        let draggable = items.is_none() && !self.agents.cfg.sort_attention;
+        // Scratch is pinned to the bottom.
+        let draggable = items.is_none() && !self.agents.cfg.sort_attention && !space.scratch;
         let dragged = self
             .agents
             .drag
@@ -8758,24 +8760,37 @@ fn tab_auto_title(t: &AgentTab, cx: &gpui::App) -> String {
 
 // ── keyboard navigation, renaming, scrollback ────────────────────────────────────────────
 impl Kyde {
+    /// The spaces in the sidebar's order, with their index in the config: needs-you-first
+    /// when that's on (stable — ties keep your order), and Scratch always last.
+    fn agents_space_order(&self) -> Vec<(usize, &Space)> {
+        let sort = self.agents.cfg.sort_attention;
+        let urgency = |s: &Space| {
+            std::iter::once(&s.path)
+                .chain(&s.worktrees)
+                .map(|w| self.agents_state(w).urgency())
+                .max()
+                .unwrap_or(0)
+        };
+        let mut spaces: Vec<(usize, &Space)> = self.agents.cfg.spaces.iter().enumerate().collect();
+        spaces.sort_by_key(|(_, s)| {
+            (
+                s.scratch,
+                std::cmp::Reverse(if sort { urgency(s) } else { 0 }),
+            )
+        });
+        spaces
+    }
+
     /// The worktrees in the sidebar's order (unfolded spaces only, attention order if on).
     fn agents_row_order(&self) -> Vec<PathBuf> {
         let sort = self.agents.cfg.sort_attention;
         let urgency = |w: &Path| self.agents_state(w).urgency();
-        let mut spaces: Vec<&Space> = self.agents.cfg.spaces.iter().collect();
-        if sort {
-            spaces.sort_by_key(|s| {
-                std::cmp::Reverse(
-                    std::iter::once(&s.path)
-                        .chain(&s.worktrees)
-                        .map(|w| urgency(w))
-                        .max()
-                        .unwrap_or(0),
-                )
-            });
-        }
         let mut out = Vec::new();
-        for s in spaces.into_iter().filter(|s| !s.collapsed) {
+        for (_, s) in self
+            .agents_space_order()
+            .into_iter()
+            .filter(|(_, s)| !s.collapsed)
+        {
             let mut wts = s.rows();
             if sort {
                 wts.sort_by_key(|w| std::cmp::Reverse(urgency(w)));
