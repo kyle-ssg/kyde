@@ -820,6 +820,12 @@ enum MenuTarget {
     /// The title bar's worktree crumb: the open agent space's worktrees.
     #[cfg(feature = "terminal")]
     Worktrees,
+    /// A worktree's row in the Agents sidebar — pin it (the cleanup then leaves it alone).
+    AgentRow(PathBuf),
+    /// A tab in a worktree's strip (worktree, tab id) — close it / the others / those to
+    /// its right.
+    #[cfg(feature = "terminal")]
+    AgentTab(PathBuf, String),
 }
 
 struct ContextMenu {
@@ -1477,6 +1483,9 @@ struct AgentsView {
     context_open: bool,
     /// The worktree the "Remove worktree?" window is asking about: (space, worktree).
     removing: Option<(PathBuf, PathBuf)>,
+    /// The tabs (by id) the "Close tab?" window is asking about.
+    #[cfg(feature = "terminal")]
+    closing: Vec<String>,
     /// Worktrees being removed in the background — hidden from the sidebar meanwhile.
     hiding: std::collections::HashSet<PathBuf>,
     /// Worktrees whose tabs were opened this launch (their saved tabs are now the live ones).
@@ -1989,6 +1998,8 @@ impl AgentsView {
             contexts: std::collections::HashMap::new(),
             context_open: false,
             removing: None,
+            #[cfg(feature = "terminal")]
+            closing: Vec::new(),
             hiding: std::collections::HashSet::new(),
             #[cfg(feature = "terminal")]
             restored: std::collections::HashSet::new(),
@@ -2670,6 +2681,8 @@ struct Kyde {
     scrollback_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Agents view: the Clean Up window.
     cleanup_win: Option<gpui::WindowHandle<ModalWindow>>,
+    /// Agents view: the "Close tab?" confirmation window.
+    close_tabs_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// "What's New" changelog — a native modal window mirroring GitHub Releases (issue #71).
     changelog_win: Option<gpui::WindowHandle<ModalWindow>>,
     /// Its state: the fetched release list, the selected row, and the markdown pane.
@@ -2826,6 +2839,9 @@ enum ModalKind {
     /// Agents view: pick which tabs to close; finished ones come pre-ticked.
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     Cleanup,
+    /// "Close tab?" confirmation (Agents view) — for tabs whose agent isn't done.
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    CloseTabs,
     /// An agent tab's scrollback in an editor (search it, copy from it).
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     Scrollback,
@@ -3077,6 +3093,7 @@ impl Render for ModalWindow {
             ModalKind::Changelog => k.render_changelog_body(kcx),
             ModalKind::RemoveWorktree => k.render_remove_worktree_body(kcx),
             ModalKind::Cleanup => k.render_cleanup_body(kcx),
+            ModalKind::CloseTabs => k.render_close_tabs_body(kcx),
             ModalKind::Scrollback => k.render_scrollback_body(kcx),
         });
         // ⌘F over a pane here: the body floats the find bar over its panes (`find_bar`).
@@ -3669,6 +3686,8 @@ impl gpui::AssetSource for Assets {
             // Agents view (rail icon, add-space, clean-up-idle-tabs).
             "icons/bot.svg" => include_bytes!("../assets/icons/bot.svg"),
             "icons/eraser.svg" => include_bytes!("../assets/icons/eraser.svg"),
+            "icons/pin.svg" => include_bytes!("../assets/icons/pin.svg"),
+            "icons/pin-off.svg" => include_bytes!("../assets/icons/pin-off.svg"),
             "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             // Window chrome off macOS (see `chrome`): the menu button, and minimize / maximize
@@ -7918,6 +7937,110 @@ mod gpui_smoke_tests {
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
+            })
+            .unwrap();
+    }
+
+    /// A pinned worktree is left alone by the cleanup: a tab there the rules would close
+    /// stays open, unmarked — until it's unpinned.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_spares_a_pinned_worktree(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // A shell tab beside the agent's: the agent's is off screen, so closable.
+                k.agents_new_tab(dir.clone(), false, None, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let hour_ago = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                let quit = |k: &mut Kyde| {
+                    let mut found = agents::SweepFound::default();
+                    for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                        t.unseen = false;
+                        t.last_active = hour_ago;
+                        found.at_prompt.push(((dir.clone(), t.spawned_at), true));
+                    }
+                    found
+                };
+                k.agents_toggle_pin(&dir, cx);
+                let found = quit(k);
+                assert_eq!(k.agents_apply_sweep(found, false, cx), 0, "pinned: kept");
+                let g = &k.agents.tabs[&dir];
+                assert!(g.tabs.len() == 2 && g.tabs.iter().all(|t| t.verdict.is_none()));
+                k.agents_toggle_pin(&dir, cx);
+                let found = quit(k);
+                assert_eq!(
+                    k.agents_apply_sweep(found, false, cx),
+                    1,
+                    "unpinned: closed"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Closing tabs asks first while one of them isn't done: nothing closes until the "Close
+    /// tab?" window is confirmed. Tabs seen as done close at once.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_closing_an_unfinished_tab_asks_first(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents_new_tab(dir.clone(), true, None, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let ids = handle
+            .update(cx, |k, _w, cx| {
+                let now = std::time::Instant::now();
+                let tabs = &mut k.agents.tabs.get_mut(&dir).unwrap().tabs;
+                for t in tabs.iter_mut() {
+                    t.used = true;
+                    t.hook = Some((agents::Hook::Done, now));
+                }
+                // The middle one is mid-task.
+                tabs[1].hook = Some((agents::Hook::Working, now));
+                let ids: Vec<String> = tabs.iter().map(|t| t.id.clone()).collect();
+                // "Close Tabs to the Right" of the first: one of the two isn't done.
+                k.agents_ask_close(ids[1..].to_vec(), cx);
+                assert_eq!(k.agents.tabs[&dir].tabs.len(), 3, "nothing closes unasked");
+                assert_eq!(k.agents.closing, ids[1..]);
+                ids
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.close_tabs_win.is_some(), "it asked, in a window");
+                k.agents_close_confirmed(cx);
+                let left: Vec<&String> = k.agents.tabs[&dir].tabs.iter().map(|t| &t.id).collect();
+                assert_eq!(left, [&ids[0]], "confirmed: both go");
+                // The one left is done: it closes without asking.
+                k.agents_ask_close(vec![ids[0].clone()], cx);
+                assert!(!k.agents.tabs.contains_key(&dir));
             })
             .unwrap();
     }

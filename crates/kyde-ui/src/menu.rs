@@ -43,6 +43,9 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         "What's New" => "icons/info.svg",
         "Clear Data & Restart" => "icons/eraser.svg",
         "Quit Kyde" => "icons/x.svg",
+        // Agents view: a worktree row / one of its tabs.
+        "Pin" | "Pin Worktree" => "icons/pin.svg",
+        "Unpin" | "Unpin Worktree" => "icons/pin-off.svg",
         _ if l.starts_with("Close") => "icons/x.svg",
         _ if l.starts_with("Compare") => "icons/git-branch.svg",
         _ => return None,

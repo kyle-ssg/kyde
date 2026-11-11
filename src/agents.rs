@@ -664,6 +664,15 @@ impl AgentState {
     }
 }
 
+/// Whether closing an agent tab should ask first — it isn't seen as done: it's working or
+/// waiting on you, or its agent last reported that and nothing since (an interrupted turn).
+/// A finished turn, a session waiting for its first prompt and a quiet tab without the hook
+/// don't ask.
+pub(crate) fn close_asks(state: AgentState, hook: Option<&Hook>) -> bool {
+    matches!(state, AgentState::Working | AgentState::Blocked)
+        || matches!(hook, Some(Hook::Working | Hook::Blocked(_)))
+}
+
 /// What the cleanup knows about one tab when it decides.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TabFacts {
@@ -1672,6 +1681,19 @@ pub(crate) fn random_seed() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Closing asks while the agent is at work or waiting on you — also when it last said so
+    /// and went quiet (interrupted) — not once its turn is finished or before its first.
+    #[test]
+    fn closing_asks_only_while_an_agent_is_not_done() {
+        let blocked = Hook::Blocked("a question".into());
+        assert!(close_asks(AgentState::Working, None));
+        assert!(close_asks(AgentState::Blocked, Some(&blocked)));
+        assert!(close_asks(AgentState::Idle, Some(&Hook::Working)));
+        assert!(!close_asks(AgentState::Unseen, Some(&Hook::Done)));
+        assert!(!close_asks(AgentState::Idle, Some(&Hook::Ready)));
+        assert!(!close_asks(AgentState::Idle, None));
+    }
 
     #[test]
     fn context_reads_latest_title_and_first_human_prompt() {
