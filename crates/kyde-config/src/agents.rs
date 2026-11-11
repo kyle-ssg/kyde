@@ -145,6 +145,10 @@ pub struct AgentsCfg {
     /// Each worktree's open tabs, reopened (sessions resumed) when it's next selected.
     #[serde(default)]
     pub tabs: std::collections::BTreeMap<PathBuf, Vec<SavedTab>>,
+    /// Worktrees you pinned — long-running work the cleanup leaves alone: it never closes
+    /// their tabs, and never offers to remove them.
+    #[serde(default)]
+    pub pinned: std::collections::BTreeSet<PathBuf>,
     /// Keep the Claude Code hook installed that reports each agent's state (needs input /
     /// working / done) and session to Kyde.
     #[serde(default = "yes")]
@@ -323,6 +327,7 @@ impl Default for AgentsCfg {
             spaces: Vec::new(),
             selected: None,
             tabs: std::collections::BTreeMap::new(),
+            pinned: std::collections::BTreeSet::new(),
             claude_hooks: true,
             sound: true,
             dock_alerts: true,

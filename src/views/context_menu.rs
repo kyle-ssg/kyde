@@ -664,6 +664,9 @@ impl Kyde {
             MenuTarget::Projects => out = self.projects_menu_entries(),
             #[cfg(feature = "terminal")]
             MenuTarget::Worktrees => out = self.agents_worktrees_menu(),
+            MenuTarget::AgentRow(wt) => out = self.agents_row_menu(wt),
+            #[cfg(feature = "terminal")]
+            MenuTarget::AgentTab(wt, id) => out = self.agents_tab_menu(wt, id),
             // One menu of the menu bar (Linux).
             #[cfg(target_os = "linux")]
             MenuTarget::MenuBar(i) => {

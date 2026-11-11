@@ -1,10 +1,13 @@
 //! Editor tab strip (tab bar, overflow menu, empty state) + tab close logic. Crate-root child.
 
 use crate::{
-    badge_inner, div, file_badge, pretty_key, px, status_color, svg, theme, Context, FluentBuilder,
-    InteractiveElement, IntoElement, Kyde, MenuTarget, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled,
+    badge_inner, div, file_badge, pretty_key, px, status_color, svg, theme, ui, Context,
+    FluentBuilder, InteractiveElement, IntoElement, Kyde, MenuTarget, MouseButton, ParentElement,
+    SharedString, StatefulInteractiveElement, Styled,
 };
+
+/// Space between two tabs of the strip (px) — the drop line sits in the middle of it.
+const TAB_GAP: f32 = 8.0;
 
 impl Kyde {
     pub(crate) fn render_tab_bar(
@@ -57,11 +60,30 @@ impl Kyde {
                         this.close_tab(i, cx);
                     }),
                 );
+            // Dragged along the strip to reorder: it dims, and the tab under the cursor
+            // shows the line it would land on.
+            let dragged = self.browse.tab_drag.dragging(p);
+            let drop_line = self
+                .browse
+                .tab_drag
+                .line(p, |k| self.browse.open_tabs.iter().position(|t| t == k));
+            let (press, hover) = (p.clone(), p.clone());
             // Rounded pill per tab: active = accent border + faint accent fill; inactive =
             // transparent (no bg/border) until hovered. border_1 stays so widths don't shift.
             div()
                 .id(SharedString::from(format!("tab-{i}")))
+                .debug_selector(|| format!("tab-{name}"))
                 .group(grp.clone())
+                .relative()
+                .when(dragged, |d| d.opacity(0.4))
+                .when_some(drop_line, |d, side| {
+                    d.child(ui::reorder::drop_line(side, TAB_GAP))
+                })
+                .on_mouse_move(cx.listener(move |this, _e: &gpui::MouseMoveEvent, _w, cx| {
+                    if this.browse.tab_drag.hover(&hover) {
+                        cx.notify();
+                    }
+                }))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -98,7 +120,8 @@ impl Kyde {
                 .child(close)
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(move |this, _e, _w, cx| {
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                        this.browse.tab_drag.press(press.clone(), e);
                         if let Some(p) = this.browse.open_tabs.get(i).cloned() {
                             this.open_file(p, cx);
                             cx.notify();
@@ -149,8 +172,23 @@ impl Kyde {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap(px(TAB_GAP))
                     .px_2()
+                    // A pressed tab drags along the strip; released anywhere, it lands where
+                    // the drop line shows.
+                    .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _w, cx| {
+                        if this.browse.tab_drag.moved(e) {
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.drop_dragged_tab(cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _e, _w, cx| this.drop_dragged_tab(cx)),
+                    )
                     // Keep the last tab clear of the button's solid right edge; the rest of
                     // the button is a transparent fade tabs can scroll under.
                     .pr(px(34.0))
@@ -297,6 +335,23 @@ impl Kyde {
                     .child("Right-click a file to Commit or Rollback"),
             )
             .into_any_element()
+    }
+
+    /// The mouse was released with a tab pressed: a dragged one moves to where the drop
+    /// line was.
+    fn drop_dragged_tab(&mut self, cx: &mut Context<Self>) {
+        if !self.browse.tab_drag.pressed() {
+            return;
+        }
+        if let Some((item, onto)) = self.browse.tab_drag.release() {
+            let tabs = &mut self.browse.open_tabs;
+            let pos = |p: &std::path::Path| tabs.iter().position(|t| t == p);
+            if let (Some(from), Some(to)) = (pos(&item), pos(&onto)) {
+                let tab = tabs.remove(from);
+                tabs.insert(to, tab);
+            }
+        }
+        cx.notify();
     }
 
     /// Close the tab at `idx`. If it was active, fall to its right neighbour (else left,
