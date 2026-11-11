@@ -1448,14 +1448,18 @@ pub(crate) struct Busy {
 /// worktree (and the tab with it, see [`moved_worktree`]); a shell `cd` leaves both behind.
 /// `EnterWorktree` refuses another repository's worktrees, so work in another project is
 /// handed to a new agent there (`ky agent new`, which Kyde adopts as a tab of that project) —
-/// not done by path from a tab Kyde can't move.
+/// not done by path from a tab Kyde can't move. A session that has already entered a worktree
+/// is refused too — a new one by `name`, and by `path` any outside `.claude/worktrees/`
+/// (Kyde's own are in `~/.kyde/worktrees/`) — until it steps back out with `ExitWorktree`.
 const MOVE_HOW: &str = "To work in another worktree of this repository, call EnterWorktree — \
      `name` for a new one, `path` for one that exists (e.g. made with `git worktree add`) — so \
-     this session moves there and Kyde moves this tab with it. A `cd` in the shell leaves both \
-     behind. EnterWorktree refuses another repository's worktrees: for work in another \
-     project, start an agent there with `\"$KYDE_BIN\" agent new <folder> --prompt \"<the \
-     task>\"` (Kyde opens it as a tab of that project) and tell the user, instead of doing it \
-     from here.";
+     this session moves there and Kyde moves this tab with it. If it refuses because this \
+     session is already in a worktree it entered, call ExitWorktree with `action: \"keep\"` \
+     (that worktree and its work stay as they are), then EnterWorktree again. A `cd` in the \
+     shell leaves both behind. EnterWorktree refuses another repository's worktrees: for work \
+     in another project, start an agent there with `\"$KYDE_BIN\" agent new <folder> --prompt \
+     \"<the task>\"` (Kyde opens it as a tab of that project) and tell the user, instead of \
+     doing it from here.";
 
 /// The note a new agent tab's first prompt carries (see [`brief_path`]): always how to move
 /// to another worktree ([`MOVE_HOW`]); and when its worktree is busy (changes, unpushed
@@ -1872,6 +1876,8 @@ mod tests {
         assert!(only_how.contains("`path` for one that exists") && !only_how.contains("old work"));
         // Another project's worktree is out of EnterWorktree's reach: hand the task off.
         assert!(only_how.contains("\"$KYDE_BIN\" agent new <folder> --prompt"));
+        // A session already in a worktree it entered has to step out before the next one.
+        assert!(only_how.contains("ExitWorktree with `action: \"keep\"`"));
         let busy = Busy {
             branch: Some("feat/linux".into()),
             changed: 3,
