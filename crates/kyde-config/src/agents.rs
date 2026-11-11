@@ -31,6 +31,23 @@ pub struct Space {
     /// ad-hoc agent, and its own folder is never a row.
     #[serde(default)]
     pub scratch: bool,
+    /// The [`Group`] it's listed under, by [`Group::id`] (`None`: ungrouped — below the
+    /// groups).
+    #[serde(default)]
+    pub group: Option<u32>,
+}
+
+/// A named group of spaces in the sidebar ("Work", "Personal"): it folds away and drags as
+/// one.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub struct Group {
+    /// What its spaces' [`Space::group`] names it by — stable across renames.
+    pub id: u32,
+    /// What the sidebar calls it.
+    pub name: String,
+    /// Its spaces are folded away.
+    #[serde(default)]
+    pub collapsed: bool,
 }
 
 impl Space {
@@ -136,9 +153,12 @@ pub struct AgentsCfg {
     /// (clamped to 1..=720).
     #[serde(default = "default_idle_hours")]
     pub idle_hours: u32,
-    /// The spaces, in sidebar order.
+    /// The spaces — in sidebar order within each group, and among the ungrouped.
     #[serde(default)]
     pub spaces: Vec<Space>,
+    /// The groups of spaces, in sidebar order (above the ungrouped spaces).
+    #[serde(default)]
+    pub groups: Vec<Group>,
     /// The worktree last on screen — reopened on the next launch.
     #[serde(default)]
     pub selected: Option<PathBuf>,
@@ -325,6 +345,7 @@ impl Default for AgentsCfg {
             cleanup: CleanupRules::default(),
             idle_hours: default_idle_hours(),
             spaces: Vec::new(),
+            groups: Vec::new(),
             selected: None,
             tabs: std::collections::BTreeMap::new(),
             pinned: std::collections::BTreeSet::new(),
@@ -355,9 +376,10 @@ impl AgentsCfg {
     }
 
     /// Add the Scratch space when there isn't one — every layout has it — and keep it last
-    /// (the sidebar pins it to the bottom; an older layout may have it among the projects).
+    /// and out of any group (the sidebar pins it to the bottom; an older layout may have it
+    /// among the projects, or in a group).
     pub fn ensure_scratch(&mut self) {
-        let scratch = match self.spaces.iter().position(|s| s.scratch) {
+        let mut scratch = match self.spaces.iter().position(|s| s.scratch) {
             Some(i) => self.spaces.remove(i),
             None => Space {
                 path: scratch_dir(),
@@ -365,7 +387,13 @@ impl AgentsCfg {
                 ..Space::default()
             },
         };
+        scratch.group = None;
         self.spaces.push(scratch);
+    }
+
+    /// Whether space `path` is Scratch.
+    fn is_scratch_space(&self, path: &Path) -> bool {
+        self.spaces.iter().any(|s| s.scratch && s.path == path)
     }
 
     /// Where a newly added project goes: after the last project, so Scratch stays below them.
@@ -440,6 +468,160 @@ impl AgentsCfg {
             .iter()
             .find(|s| (s.path == wt && !s.scratch) || s.worktrees.iter().any(|w| w == wt))
     }
+
+    /// The group `space` is listed under (`None`: ungrouped — also when its group is gone).
+    #[must_use]
+    pub fn group_of(&self, space: &Space) -> Option<&Group> {
+        let id = space.group?;
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    /// The sidebar's sections, top to bottom: each group with its spaces, then the ungrouped
+    /// spaces (`None`). Spaces are indices into [`Self::spaces`], in their order there.
+    ///
+    /// ```
+    /// use kyde_config::agents::{AgentsCfg, Group, Space};
+    /// let space = |p: &str, group| Space { path: p.into(), group, ..Space::default() };
+    /// let group = |id, name: &str| Group { id, name: name.into(), ..Group::default() };
+    /// let c = AgentsCfg {
+    ///     spaces: vec![space("/a", None), space("/b", Some(2)), space("/c", Some(1)),
+    ///                  space("/d", Some(2)), space("/e", Some(9))],
+    ///     groups: vec![group(2, "Work"), group(1, "Personal")],
+    ///     ..AgentsCfg::default()
+    /// };
+    /// let s: Vec<_> = c.sections().into_iter().map(|(g, v)| (g.map(|g| g.id), v)).collect();
+    /// // A space naming a group that's gone (/e) is ungrouped.
+    /// assert_eq!(s, [(Some(2), vec![1, 3]), (Some(1), vec![2]), (None, vec![0, 4])]);
+    /// ```
+    #[must_use]
+    pub fn sections(&self) -> Vec<(Option<&Group>, Vec<usize>)> {
+        let mut out: Vec<(Option<&Group>, Vec<usize>)> =
+            self.groups.iter().map(|g| (Some(g), Vec::new())).collect();
+        let mut loose = Vec::new();
+        for (i, s) in self.spaces.iter().enumerate() {
+            match s
+                .group
+                .and_then(|id| self.groups.iter().position(|g| g.id == id))
+            {
+                Some(gi) => out[gi].1.push(i),
+                None => loose.push(i),
+            }
+        }
+        out.push((None, loose));
+        out
+    }
+
+    /// The spaces in sidebar order (see [`Self::sections`]), as indices into [`Self::spaces`].
+    #[must_use]
+    pub fn space_order(&self) -> Vec<usize> {
+        self.sections().into_iter().flat_map(|(_, v)| v).collect()
+    }
+
+    /// Move space `from` to where space `onto` is in the sidebar: into `onto`'s group, above
+    /// it when moving up, below it when moving down. `false`: nothing moved — also for
+    /// Scratch either way, which stays at the bottom.
+    ///
+    /// ```
+    /// use kyde_config::agents::{AgentsCfg, Group, Space};
+    /// use std::path::{Path, PathBuf};
+    /// let space = |p: &str, group| Space { path: p.into(), group, ..Space::default() };
+    /// let mut c = AgentsCfg {
+    ///     spaces: vec![space("/a", Some(1)), space("/b", None), space("/c", None)],
+    ///     groups: vec![Group { id: 1, name: "Work".into(), ..Group::default() }],
+    ///     ..AgentsCfg::default()
+    /// };
+    /// // Work [/a], then /b and /c. Drag /c up onto /a: it joins Work, above /a.
+    /// assert!(c.move_space(Path::new("/c"), Path::new("/a")));
+    /// let order: Vec<_> = c.space_order().into_iter().map(|i| c.spaces[i].path.clone()).collect();
+    /// assert_eq!(order, ["/c", "/a", "/b"].map(PathBuf::from));
+    /// assert_eq!(c.spaces[0].group, Some(1));
+    /// ```
+    pub fn move_space(&mut self, from: &Path, onto: &Path) -> bool {
+        if self.is_scratch_space(from) || self.is_scratch_space(onto) {
+            return false;
+        }
+        let order = self.space_order();
+        let at = |p: &Path| order.iter().position(|&i| self.spaces[i].path == p);
+        let (Some(df), Some(dt)) = (at(from), at(onto)) else {
+            return false;
+        };
+        if df == dt {
+            return false;
+        }
+        let group = self.group_of(&self.spaces[order[dt]]).map(|g| g.id);
+        let mut s = self.spaces.remove(order[df]);
+        s.group = group;
+        let o = self
+            .spaces
+            .iter()
+            .position(|x| x.path == onto)
+            .unwrap_or(self.spaces.len());
+        self.spaces
+            .insert(if df < dt { o + 1 } else { o }.min(self.spaces.len()), s);
+        true
+    }
+
+    /// Move space `path` into group `group` (`None`: out of any group) — first in it.
+    /// `false`: no such space, or it's Scratch (never in a group).
+    pub fn move_space_to_group(&mut self, path: &Path, group: Option<u32>) -> bool {
+        let Some(f) = self
+            .spaces
+            .iter()
+            .position(|s| s.path == path && !s.scratch)
+        else {
+            return false;
+        };
+        let group = group.filter(|id| self.groups.iter().any(|g| g.id == *id));
+        let mut s = self.spaces.remove(f);
+        s.group = group;
+        let at = self
+            .spaces
+            .iter()
+            .position(|o| self.group_of(o).map(|g| g.id) == group)
+            .unwrap_or(f);
+        self.spaces.insert(at, s);
+        true
+    }
+
+    /// Add a group named `name`, below the others. Returns its id.
+    pub fn add_group(&mut self, name: &str) -> u32 {
+        let id = self
+            .groups
+            .iter()
+            .map(|g| g.id)
+            .max()
+            .map_or(1, |m| m.saturating_add(1));
+        self.groups.push(Group {
+            id,
+            name: name.into(),
+            collapsed: false,
+        });
+        id
+    }
+
+    /// Remove group `id`. Its spaces stay, ungrouped.
+    pub fn remove_group(&mut self, id: u32) {
+        self.groups.retain(|g| g.id != id);
+        for s in &mut self.spaces {
+            if s.group == Some(id) {
+                s.group = None;
+            }
+        }
+    }
+
+    /// Move group `from` to where group `onto` is. `false`: nothing moved.
+    pub fn move_group(&mut self, from: u32, onto: u32) -> bool {
+        let pos = |id: u32| self.groups.iter().position(|g| g.id == id);
+        let (Some(f), Some(t)) = (pos(from), pos(onto)) else {
+            return false;
+        };
+        if f == t {
+            return false;
+        }
+        let g = self.groups.remove(f);
+        self.groups.insert(t, g);
+        true
+    }
 }
 
 fn or_default<'a>(mine: &'a str, default: &'a str) -> &'a str {
@@ -506,17 +688,28 @@ mod tests {
         );
     }
 
-    /// A layout saved with Scratch among the projects (dragged there before it was pinned)
-    /// loads with it last, its rows kept.
+    /// A layout saved with Scratch among the projects, or in a group (both possible before
+    /// it was pinned), loads with it last and ungrouped, its rows kept — and no move puts
+    /// it anywhere else.
     #[test]
-    fn scratch_moves_below_the_projects() {
+    fn scratch_stays_below_the_projects() {
         let mut c: AgentsCfg = serde_json::from_str(
-            r#"{"spaces":[{"path":"/a"},{"path":"/s","worktrees":["/s/x"],"scratch":true},{"path":"/b"}]}"#,
+            r#"{"spaces":[{"path":"/a"},{"path":"/s","worktrees":["/s/x"],"scratch":true,"group":1},{"path":"/b"}],
+                "groups":[{"id":1,"name":"Work"}]}"#,
         )
         .unwrap();
         c.ensure_scratch();
-        let order: Vec<_> = c.spaces.iter().map(|s| s.path.as_path()).collect();
-        assert_eq!(order, ["/a", "/b", "/s"].map(Path::new));
+        let order = |c: &AgentsCfg| -> Vec<PathBuf> {
+            c.space_order()
+                .into_iter()
+                .map(|i| c.spaces[i].path.clone())
+                .collect()
+        };
+        assert_eq!(order(&c), ["/a", "/b", "/s"].map(PathBuf::from));
         assert!(c.is_scratch(Path::new("/s/x")));
+        assert!(!c.move_space(Path::new("/s"), Path::new("/a")));
+        assert!(!c.move_space(Path::new("/a"), Path::new("/s")));
+        assert!(!c.move_space_to_group(Path::new("/s"), Some(1)));
+        assert_eq!(order(&c), ["/a", "/b", "/s"].map(PathBuf::from));
     }
 }
