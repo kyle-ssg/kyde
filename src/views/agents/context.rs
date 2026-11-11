@@ -78,6 +78,7 @@ impl Kyde {
     pub(crate) fn agents_back_to(&mut self, wt: PathBuf, cx: &mut Context<Self>) {
         self.switch_mode(Mode::Agents, cx);
         self.agents.side_tab = SideTab::Code;
+        self.agents.gh_scope = None;
         self.agents.sub_shown = None;
         self.agents_select(wt, cx);
     }
