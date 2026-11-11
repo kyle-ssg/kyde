@@ -7207,6 +7207,7 @@ impl Kyde {
             .flex_col()
             .p_3()
             .bg(t.panel_bg)
+            .rounded_r(px(theme::ISLAND_RADIUS))
             .text_size(px(fs))
             .child(
                 div()
@@ -7333,6 +7334,14 @@ impl Kyde {
             .px_2()
             .flex_none()
             .bg(t.panel_bg)
+            // `overflow_hidden` clips to the island's rectangle, not its rounded corners, so
+            // the strip rounds its own to match (the context panel takes the right one).
+            .when(!bare, |d| {
+                d.rounded_tl(px(theme::ISLAND_RADIUS))
+                    .when(!self.agents.context_open, |d| {
+                        d.rounded_tr(px(theme::ISLAND_RADIUS))
+                    })
+            })
             // A pressed tab drags along the strip; released anywhere, it lands where the
             // drop line shows.
             .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _w, cx| {
@@ -7730,6 +7739,11 @@ impl Kyde {
                 .min_h_0()
                 .pl_2()
                 .pt_1()
+                // The terminal paints a square background; this inset keeps it inside the
+                // island's rounded bottom-right corner (and the top-right one when the strip
+                // is hidden).
+                .pr_1()
+                .pb_1()
                 .child(tab.view.clone())
                 .into_any_element()
         } else {
