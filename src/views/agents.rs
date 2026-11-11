@@ -4302,7 +4302,10 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         #[cfg(feature = "terminal")]
-        self.agents_mark_seen();
+        {
+            self.agents_mark_seen();
+            self.agents_reveal_tab();
+        }
         if self
             .agents
             .cfg
@@ -4404,6 +4407,36 @@ impl Kyde {
                 };
                 tab.shown = AgentState::of_tab(&signals, now);
             }
+        }
+    }
+
+    /// Keep the shown tab in sight. The strip scrolls sideways once its tabs outgrow the pane
+    /// (`render_agents_tabs`), so the tab or background agent that just came on screen —
+    /// clicked, cycled to, opened, jumped to — is scrolled into view. Only when that changes:
+    /// in between, the wheel is free to look along the strip.
+    #[cfg(feature = "terminal")]
+    fn agents_reveal_tab(&mut self) {
+        let Some(wt) = self.agents.selected.clone() else {
+            return;
+        };
+        let group = self.agents.tabs.get(&wt);
+        // Its place in the strip: the tabs first, then the background agents.
+        let shown = match self.agents_visible_sub() {
+            Some(id) => self
+                .agents_subs_in(&wt)
+                .map(|(.., s)| s)
+                .chain(self.agents_done_in(&wt).map(|d| &d.sub))
+                .position(|s| s.id == id)
+                .map(|k| (group.map_or(0, |g| g.tabs.len()) + k, id.to_string())),
+            None => group.and_then(|g| Some((g.active, g.tabs.get(g.active)?.id.clone()))),
+        };
+        let Some((ix, id)) = shown else {
+            return;
+        };
+        let now = (wt, id);
+        if self.agents.tab_revealed.as_ref() != Some(&now) {
+            self.agents.tab_scroll.scroll_to_item(ix);
+            self.agents.tab_revealed = Some(now);
         }
     }
 
@@ -7285,6 +7318,19 @@ impl Kyde {
         } else {
             group.map(|g| g.tabs.as_slice()).unwrap_or_default()
         };
+        // The tabs scroll sideways once they outgrow the pane, so the strip's tools (`+`, the
+        // context toggle, …) stay put on the right and no tab is ever out of reach.
+        // `agents_reveal_tab` keeps the shown one in view.
+        let mut pills = div()
+            .id("agents-tabs-scroll")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .overflow_x_scroll()
+            // (gpui scrolls it with a plain mouse's vertical wheel too.)
+            .track_scroll(&self.agents.tab_scroll);
         for (i, tab) in tabs.iter().enumerate() {
             let active = group.is_some_and(|g| g.active == i) && shown_sub.is_none();
             let title: SharedString = tab
@@ -7297,12 +7343,13 @@ impl Kyde {
             let grp = SharedString::from(format!("agents-tab-{i}"));
             let (sel, menu_wt) = (wt.to_path_buf(), wt.to_path_buf());
             let (tab_id, close, menu_id) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
-            strip = strip.child(
+            pills = pills.child(
                 div()
                     .id(("agents-tab", i))
                     .group(grp.clone())
                     .flex()
                     .flex_row()
+                    .flex_none()
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))
@@ -7446,12 +7493,13 @@ impl Kyde {
                 bg.status(),
                 sub.what
             );
-            strip = strip.child(
+            pills = pills.child(
                 div()
                     .id(("agents-sub-tab", k))
                     .group(grp.clone())
                     .flex()
                     .flex_row()
+                    .flex_none()
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))
@@ -7519,6 +7567,9 @@ impl Kyde {
                         }),
                     ),
             );
+        }
+        if !bare {
+            strip = strip.child(pills);
         }
         let (new_agent, new_shell, open) = (wt.to_path_buf(), wt.to_path_buf(), wt.to_path_buf());
         let cmd = self.agents.cfg.default_command().to_string();
