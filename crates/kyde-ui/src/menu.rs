@@ -46,6 +46,10 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         // Agents view: a worktree row / one of its tabs.
         "Pin" | "Pin Worktree" => "icons/pin.svg",
         "Unpin" | "Unpin Worktree" => "icons/pin-off.svg",
+        // …a project / group header.
+        "New Group" => "icons/folder-plus.svg",
+        "Remove Group" | "Remove from Group" => "icons/x.svg",
+        _ if l.starts_with("Move to") => "icons/folder.svg",
         _ if l.starts_with("Close") => "icons/x.svg",
         _ if l.starts_with("Compare") => "icons/git-branch.svg",
         _ => return None,

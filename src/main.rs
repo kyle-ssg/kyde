@@ -822,6 +822,10 @@ enum MenuTarget {
     Worktrees,
     /// A worktree's row in the Agents sidebar — pin it (the cleanup then leaves it alone).
     AgentRow(PathBuf),
+    /// A project's header in the Agents sidebar — move it to a group, rename it.
+    AgentSpace(PathBuf),
+    /// A group's header in the Agents sidebar — rename it, remove it.
+    AgentGroup(u32),
     /// A tab in a worktree's strip (worktree, tab id) — close it / the others / those to
     /// its right.
     #[cfg(feature = "terminal")]
@@ -1621,6 +1625,8 @@ enum WtSource {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum DragItem {
     Space(PathBuf),
+    /// A group of projects, by id.
+    Group(u32),
     /// A linked worktree (a project's own checkout stays first).
     Worktree {
         space: PathBuf,
@@ -1629,13 +1635,22 @@ enum DragItem {
 }
 
 /// A sidebar drag: pressed on a row, active once the mouse has moved, over a drop target
-/// (a project for a project; a worktree — or the project's own checkout, meaning the top —
-/// for a worktree).
+/// (a project — or a group's header, meaning into it — for a project; a group for a group; a
+/// worktree, or the project's own checkout, for a worktree).
 struct SideDrag {
     item: DragItem,
     from: gpui::Point<gpui::Pixels>,
     active: bool,
-    over: Option<PathBuf>,
+    over: Option<DropOver>,
+}
+
+/// What a sidebar drag is over.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum DropOver {
+    /// A project's header or one of its worktree rows (that project / that worktree).
+    Path(PathBuf),
+    /// A group's header (or its empty-group hint).
+    Group(u32),
 }
 
 /// Where the drop line goes.
@@ -1643,6 +1658,10 @@ struct SideDrag {
 enum DropLine {
     BeforeSpace(PathBuf),
     AfterSpace(PathBuf),
+    BeforeGroup(u32),
+    AfterGroup(u32),
+    /// A project dropped on a group's header goes into it (the header lights up).
+    IntoGroup(u32),
     BeforeRow(PathBuf),
     AfterRow(PathBuf),
 }
@@ -1673,6 +1692,8 @@ struct WtStart {
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum RenameTarget {
     Space(PathBuf),
+    /// A group of projects, by id.
+    Group(u32),
     Worktree(PathBuf),
     /// A worktree's tab, by its id.
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
@@ -3695,6 +3716,8 @@ impl gpui::AssetSource for Assets {
     fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
             "icons/folder.svg" => include_bytes!("../assets/icons/folder.svg"),
+            // Agents sidebar: New group.
+            "icons/folder-plus.svg" => include_bytes!("../assets/icons/folder-plus.svg"),
             "icons/git-branch.svg" => include_bytes!("../assets/icons/git-branch.svg"),
             "icons/history.svg" => include_bytes!("../assets/icons/history.svg"),
             "icons/layers.svg" => include_bytes!("../assets/icons/layers.svg"),
@@ -4312,9 +4335,11 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // working, the second waiting on you, the third working, the fourth done. Nothing is
         // saved (shots share one config dir). `agents-background` (manual, validation): the
         // last worktree on screen, its tab's background agent at work there and another one
-        // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`).
+        // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`). `agents-groups`
+        // (manual, validation): the project in a Work group, a folded Personal group of two
+        // more, and one ungrouped — mid-drag onto Work's header.
         #[cfg(feature = "terminal")]
-        "agents" | "agents-background" | "agents-code" => {
+        "agents" | "agents-background" | "agents-code" | "agents-groups" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
@@ -4338,6 +4363,38 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 ..Default::default()
             }];
             view.agents.cfg.ensure_scratch();
+            if name == "agents-groups" {
+                let cfg = &mut view.agents.cfg;
+                cfg.groups.clear();
+                let work = cfg.add_group("Work");
+                let personal = cfg.add_group("Personal");
+                cfg.spaces[0].group = Some(work);
+                for (folder, group) in [
+                    ("blog", Some(personal)),
+                    ("dotfiles", Some(personal)),
+                    ("side-project", None),
+                ] {
+                    let p = std::env::temp_dir().join("kyde-shot-groups").join(folder);
+                    let _ = std::fs::create_dir_all(&p);
+                    let at = cfg.new_space_index();
+                    cfg.spaces.insert(
+                        at,
+                        kyde_config::agents::Space {
+                            path: real(p),
+                            group,
+                            ..Default::default()
+                        },
+                    );
+                }
+                cfg.groups[1].collapsed = true;
+                let dragged = cfg.spaces.iter().find(|s| s.group.is_none() && !s.scratch);
+                view.agents.drag = dragged.map(|s| SideDrag {
+                    item: DragItem::Space(s.path.clone()),
+                    from: gpui::point(px(0.0), px(0.0)),
+                    active: true,
+                    over: Some(DropOver::Group(work)),
+                });
+            }
             for (wt, title) in wts.iter().zip([
                 "Ease the shimmer with smoothstep",
                 "Set upstream on first push",
@@ -7836,7 +7893,11 @@ mod gpui_smoke_tests {
                 k.agents.drag.as_ref().map(|d| (d.active, d.over.clone()))
             })
             .unwrap();
-        assert_eq!(state, Some((true, Some(a.clone()))), "dragging b over a");
+        assert_eq!(
+            state,
+            Some((true, Some(DropOver::Path(a.clone())))),
+            "dragging b over a"
+        );
         vcx.simulate_mouse_up(ra.center(), gpui::MouseButton::Left, none);
         handle
             .update(&mut vcx, |k, _w, _cx| {
@@ -7864,6 +7925,90 @@ mod gpui_smoke_tests {
             .unwrap();
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    /// Project groups, through real mouse events on the sidebar: a group's header drags above
+    /// another group's, a project dropped on a group's header joins that group, and folding
+    /// the group hides its projects (the ungrouped project below moves up).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_groups_drag_and_fold(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let (loose, tail) = (dir.with_extension("loose"), dir.with_extension("tail"));
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::create_dir_all(&tail).unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into();
+                let work = k.agents.cfg.add_group("Work");
+                k.agents.cfg.add_group("Personal");
+                k.agents.cfg.spaces = vec![
+                    kyde_config::agents::Space {
+                        path: dir.clone(),
+                        group: Some(work),
+                        ..Default::default()
+                    },
+                    kyde_config::agents::Space {
+                        path: loose.clone(),
+                        ..Default::default()
+                    },
+                    kyde_config::agents::Space {
+                        path: tail.clone(),
+                        ..Default::default()
+                    },
+                ];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let sel = |what: &str, p: &std::path::Path| -> &'static str {
+            let name = p.file_name().unwrap().to_string_lossy();
+            Box::leak(format!("agents-{what}-{name}").into_boxed_str())
+        };
+        let none = gpui::Modifiers::none();
+        let drag = |vcx: &mut gpui::VisualTestContext, from: &'static str, to: &'static str| {
+            let f = vcx.debug_bounds(from).expect(from);
+            let t = vcx.debug_bounds(to).expect(to);
+            vcx.simulate_mouse_down(f.center(), gpui::MouseButton::Left, none);
+            let step = gpui::point(f.center().x, f.center().y + gpui::px(8.0));
+            vcx.simulate_mouse_move(step, gpui::MouseButton::Left, none);
+            vcx.simulate_mouse_move(t.center(), gpui::MouseButton::Left, none);
+            vcx.simulate_mouse_up(t.center(), gpui::MouseButton::Left, none);
+            vcx.run_until_parked();
+        };
+        // Personal (id 2) up above Work (id 1); then the ungrouped project into Work.
+        drag(&mut vcx, "agents-group-2", "agents-group-1");
+        drag(&mut vcx, sel("space", &loose), "agents-group-1");
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                let ids: Vec<u32> = k.agents.cfg.groups.iter().map(|g| g.id).collect();
+                assert_eq!(ids, [2, 1], "Personal dragged above Work");
+                let s = k
+                    .agents
+                    .cfg
+                    .spaces
+                    .iter()
+                    .find(|s| s.path == loose)
+                    .unwrap();
+                assert_eq!(s.group, Some(1), "dropped on Work's header, it joined Work");
+            })
+            .unwrap();
+        // Folding Work hides its projects' rows: the ungrouped project below moves up.
+        let y = |vcx: &mut gpui::VisualTestContext| {
+            vcx.debug_bounds(sel("space", &tail)).unwrap().top()
+        };
+        let open = y(&mut vcx);
+        let header = vcx.debug_bounds("agents-group-1").unwrap();
+        vcx.simulate_click(header.center(), none);
+        // Paint the folded sidebar (the click alone doesn't redraw).
+        vcx.update(|w, _| w.refresh());
+        vcx.run_until_parked();
+        assert!(y(&mut vcx) < open, "Work's projects folded away");
+        let _ = std::fs::remove_dir_all(&loose);
+        let _ = std::fs::remove_dir_all(&tail);
     }
 
     /// Agents view end-to-end: adding a space opens its default worktree (the folder itself)
