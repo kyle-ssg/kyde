@@ -20,6 +20,9 @@ mod panel;
 /// Shared list-picker mechanics (bounded nav + the selected/hover row pill). Call sites
 /// use the explicit `ui::picker::…`.
 pub mod picker;
+/// Drag-to-reorder for tab strips (the drag state + its drop line). Call sites use the
+/// explicit `ui::reorder::…`.
+pub mod reorder;
 mod scrollbar;
 mod select;
 mod stats;
