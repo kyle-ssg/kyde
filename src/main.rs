@@ -1521,6 +1521,9 @@ struct AgentsView {
     creating: Vec<Creating>,
     /// A project / worktree row being dragged to a new place in the sidebar.
     drag: Option<SideDrag>,
+    /// A tab (by id) being dragged to a new place in its worktree's strip.
+    #[cfg(feature = "terminal")]
+    tab_drag: ui::reorder::Reorder<String>,
     /// The issue / review / re-review prompt templates (Settings → Agents).
     issue_prompt_input: Entity<CodeEditor>,
     review_prompt_input: Entity<CodeEditor>,
@@ -2021,6 +2024,8 @@ impl AgentsView {
             tabs: std::collections::HashMap::new(),
             creating: Vec::new(),
             drag: None,
+            #[cfg(feature = "terminal")]
+            tab_drag: ui::reorder::Reorder::default(),
             issue_prompt_input,
             review_prompt_input,
             rereview_prompt_input,
@@ -2065,6 +2070,8 @@ struct BrowseView {
     /// single-click in the tree opens here, reusing this same slot for the next single-click;
     /// a double-click (or editing the file) promotes it to a permanent tab (`= None`).
     preview_tab: Option<PathBuf>,
+    /// A tab being dragged to a new place in the strip.
+    tab_drag: ui::reorder::Reorder<PathBuf>,
     /// Project-scoped scratch files (absolute paths, outside the repo), shown in the tree.
     scratches: Vec<PathBuf>,
     /// Scroll position of the (horizontally scrollable) tab strip, so opening a
@@ -2168,6 +2175,7 @@ impl BrowseView {
             open_path: None,
             open_tabs: Vec::new(),
             preview_tab: None,
+            tab_drag: ui::reorder::Reorder::default(),
             scratches: Vec::new(),
             tab_scroll: ScrollHandle::new(),
             selected_path: None,
@@ -5642,6 +5650,41 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Dragging an editor tab onto another moves it there — through real mouse events on the
+    /// rendered tab strip — and the active tab stays active.
+    #[gpui::test]
+    fn dragging_an_editor_tab_reorders_the_strip(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.open_file(PathBuf::from("new.txt"), cx);
+                k.browse.preview_tab = None;
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        // Paint a frame with both tabs in it (opening them alone doesn't redraw).
+        vcx.update(|w, _| w.refresh());
+        vcx.run_until_parked();
+        let from = vcx.debug_bounds("tab-new.txt").expect("new.txt's tab");
+        let onto = vcx.debug_bounds("tab-app.tsx").expect("app.tsx's tab");
+        let none = gpui::Modifiers::none();
+        vcx.simulate_mouse_down(from.center(), gpui::MouseButton::Left, none);
+        let step = gpui::point(from.center().x - gpui::px(8.0), from.center().y);
+        vcx.simulate_mouse_move(step, gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_move(onto.center(), gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_up(onto.center(), gpui::MouseButton::Left, none);
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                let order = [PathBuf::from("new.txt"), PathBuf::from("app.tsx")];
+                assert_eq!(k.browse.open_tabs, order);
+                assert_eq!(k.browse.open_path, Some(PathBuf::from("new.txt")));
+            })
+            .unwrap();
+    }
+
     /// Tab state machine: opening files appends unique permanent tabs and activates the last;
     /// closing a non-active tab leaves the active one; closing the active tab falls back to a
     /// neighbour; closing the last empties the editor.
@@ -8041,6 +8084,62 @@ mod gpui_smoke_tests {
                 // The one left is done: it closes without asking.
                 k.agents_ask_close(vec![ids[0].clone()], cx);
                 assert!(!k.agents.tabs.contains_key(&dir));
+            })
+            .unwrap();
+    }
+
+    /// Dragging an agent tab onto another moves it there — through real mouse events on the
+    /// rendered strip — and the tab on screen stays on screen.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_drag_reorders_tabs(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents_new_tab(dir.clone(), true, None, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let ids = handle
+            .update(cx, |k, _w, _cx| {
+                let ids: Vec<String> = k.agents.tabs[&dir]
+                    .tabs
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect();
+                assert_eq!(ids.len(), 3);
+                ids
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let from = vcx.debug_bounds("agents-tab-2").expect("the last tab");
+        let onto = vcx.debug_bounds("agents-tab-0").expect("the first tab");
+        let none = gpui::Modifiers::none();
+        vcx.simulate_mouse_down(from.center(), gpui::MouseButton::Left, none);
+        let step = gpui::point(from.center().x - gpui::px(8.0), from.center().y);
+        vcx.simulate_mouse_move(step, gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_move(onto.center(), gpui::MouseButton::Left, none);
+        vcx.simulate_mouse_up(onto.center(), gpui::MouseButton::Left, none);
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                let g = &k.agents.tabs[&dir];
+                let now: Vec<&String> = g.tabs.iter().map(|t| &t.id).collect();
+                assert_eq!(now, [&ids[2], &ids[0], &ids[1]]);
+                assert_eq!(
+                    g.tabs[g.active].id, ids[2],
+                    "the dragged tab is still shown"
+                );
             })
             .unwrap();
     }

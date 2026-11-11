@@ -77,6 +77,9 @@ const ROW_PAD_Y: f32 = 1.0;
 const CHEVRON_W: f32 = 14.0;
 const DOT: f32 = 10.0;
 const GAP: f32 = 8.0;
+/// Space between two tabs of a worktree's strip (px) — the drop line sits in the middle.
+#[cfg(feature = "terminal")]
+const AGENT_TAB_GAP: f32 = 4.0;
 /// A worktree row's tree line sits under its space's dot centre…
 const WT_LINE_X: f32 = ROW_PAD_X + CHEVRON_W + GAP + DOT / 2.0;
 /// …and its own dot starts a stub's length to the right.
@@ -3163,6 +3166,29 @@ impl Kyde {
         }
         self.agents_save(cx);
         self.agents_refresh_branches(cx);
+        cx.notify();
+    }
+
+    /// The mouse was released with a tab of worktree `wt` pressed: a dragged one moves to
+    /// where the drop line was, and the tab on screen stays on screen.
+    #[cfg(feature = "terminal")]
+    fn agents_drop_tab(&mut self, wt: &Path, cx: &mut Context<Self>) {
+        if !self.agents.tab_drag.pressed() {
+            return;
+        }
+        let moved = self.agents.tab_drag.release();
+        if let (Some((item, onto)), Some(g)) = (moved, self.agents.tabs.get_mut(wt)) {
+            let pos = |g: &AgentTabs, id: &str| g.tabs.iter().position(|t| t.id == id);
+            if let (Some(from), Some(to)) = (pos(g, &item), pos(g, &onto)) {
+                let shown = g.tabs.get(g.active).map(|t| t.id.clone());
+                let tab = g.tabs.remove(from);
+                g.tabs.insert(to, tab);
+                if let Some(a) = shown.and_then(|id| pos(g, &id)) {
+                    g.active = a;
+                }
+                self.agents_save(cx);
+            }
+        }
         cx.notify();
     }
 
@@ -7264,15 +7290,31 @@ impl Kyde {
             && group.is_some_and(|g| g.tabs.len() == 1)
             && subs.is_empty()
             && !renaming_tab;
+        let drop_wt = wt.to_path_buf();
         let mut strip = div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_1()
+            .gap(px(AGENT_TAB_GAP))
             .h(px(30.0))
             .px_2()
             .flex_none()
             .bg(t.panel_bg)
+            // A pressed tab drags along the strip; released anywhere, it lands where the
+            // drop line shows.
+            .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, _w, cx| {
+                if this.agents.tab_drag.moved(e) {
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(MouseButton::Left, {
+                let wt = drop_wt.clone();
+                cx.listener(move |this, _e, _w, cx| this.agents_drop_tab(&wt, cx))
+            })
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _e, _w, cx| this.agents_drop_tab(&drop_wt, cx)),
+            )
             .when(bare, |d| {
                 d.absolute()
                     .top_0()
@@ -7287,6 +7329,14 @@ impl Kyde {
         };
         for (i, tab) in tabs.iter().enumerate() {
             let active = group.is_some_and(|g| g.active == i) && shown_sub.is_none();
+            // Dragged along the strip to reorder: it dims, and the tab under the cursor
+            // shows the line it would land on.
+            let dragged = self.agents.tab_drag.dragging(&tab.id);
+            let drop_line = self
+                .agents
+                .tab_drag
+                .line(&tab.id, |k| tabs.iter().position(|t| &t.id == k));
+            let (press, hover) = (tab.id.clone(), tab.id.clone());
             let title: SharedString = tab
                 .name
                 .clone()
@@ -7300,7 +7350,18 @@ impl Kyde {
             strip = strip.child(
                 div()
                     .id(("agents-tab", i))
+                    .debug_selector(|| format!("agents-tab-{i}"))
                     .group(grp.clone())
+                    .relative()
+                    .when(dragged, |d| d.opacity(0.4))
+                    .when_some(drop_line, |d, side| {
+                        d.child(ui::reorder::drop_line(side, AGENT_TAB_GAP))
+                    })
+                    .on_mouse_move(cx.listener(move |this, _e: &gpui::MouseMoveEvent, _w, cx| {
+                        if this.agents.tab_drag.hover(&hover) {
+                            cx.notify();
+                        }
+                    }))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -7406,6 +7467,7 @@ impl Kyde {
                                 );
                                 return;
                             }
+                            this.agents.tab_drag.press(press.clone(), e);
                             if let Some(g) = this.agents.tabs.get_mut(&sel) {
                                 g.active = i;
                             }
