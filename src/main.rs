@@ -8105,7 +8105,7 @@ mod gpui_smoke_tests {
         vcx.run_until_parked();
         handle
             .update(&mut vcx, |k, _w, _cx| {
-                assert!(in_view(k, 0), "back to the first")
+                assert!(in_view(k, 0), "back to the first");
             })
             .unwrap();
     }
