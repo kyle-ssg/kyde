@@ -742,6 +742,9 @@ impl Kyde {
             return;
         };
         let removed = self.agents.cfg.spaces.remove(i);
+        if self.agents.gh_scope.as_ref() == Some(&removed.path) {
+            self.agents.gh_scope = None;
+        }
         for wt in std::iter::once(&removed.path).chain(&removed.worktrees) {
             self.agents.cfg.pinned.remove(wt);
         }
@@ -966,6 +969,9 @@ impl Kyde {
     /// Switch the sidebar list; Issues / Pull Requests load their project's list if needed.
     pub(crate) fn agents_show_tab(&mut self, tab: SideTab, cx: &mut Context<Self>) {
         self.agents.side_tab = tab;
+        if tab == SideTab::Code {
+            self.agents.gh_scope = None;
+        }
         let missing: Vec<PathBuf> = self
             .agents
             .cfg
@@ -992,6 +998,40 @@ impl Kyde {
             self.agents_fetch_gh(space, tab, false, cx);
         }
         cx.notify();
+    }
+
+    /// A project row's jump: `tab` narrowed to `space` alone, unfolded, listing everyone's
+    /// (this project's PRs — not only the ones waiting on you; every run, not only failures).
+    fn agents_jump_gh(&mut self, space: PathBuf, tab: SideTab, cx: &mut Context<Self>) {
+        use kyde_git::github::{IssueFilter, PrFilter};
+        let widened = match tab {
+            SideTab::Issues => {
+                std::mem::replace(&mut self.agents.issue_filter, IssueFilter::All)
+                    != IssueFilter::All
+            }
+            SideTab::Prs => {
+                std::mem::replace(&mut self.agents.pr_filter, PrFilter::All) != PrFilter::All
+            }
+            // CI filters as it renders — nothing to refetch.
+            SideTab::Ci => {
+                self.agents.ci.filter = None;
+                false
+            }
+            SideTab::Code => false,
+        };
+        // A new filter makes what's loaded stale: `agents_show_tab` refetches it.
+        if widened {
+            self.agents.gh_fetched.remove(&tab);
+        }
+        self.agents_reveal(&space);
+        self.agents_save(cx);
+        self.agents.gh_scope = Some(space);
+        self.agents_show_tab(tab, cx);
+    }
+
+    /// Whether the Issues / Pull Requests / CI tabs show `space` (all, unless narrowed).
+    fn agents_in_scope(&self, space: &Path) -> bool {
+        self.agents.gh_scope.as_deref().is_none_or(|s| s == space)
     }
 
     /// The Issues / Pull Requests search text.
@@ -1079,7 +1119,52 @@ impl Kyde {
                 this.agents_refresh_gh(tab, false, cx);
             },
         );
-        // One row: whose (dropdown) + a GitHub search box.
+        // Narrowed to one project (a project row's jump): its name, click to show them all.
+        let scope = self.agents.gh_scope.as_ref().map(|p| {
+            let name = self
+                .agents
+                .cfg
+                .spaces
+                .iter()
+                .find(|s| &s.path == p)
+                .map_or_else(|| leaf_name(p), |s| self.agents_space_name(s));
+            div()
+                .id("agents-gh-scope")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_shrink()
+                .min_w_0()
+                .max_w(px(120.0))
+                .pl_2()
+                .pr_1p5()
+                .py_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(t.divider)
+                .bg(t.bg_light)
+                .text_color(t.text)
+                .cursor_pointer()
+                .hover(|d| d.bg(t.bg_mid))
+                .tooltip(ui::tip("Show every project"))
+                .child(div().min_w_0().truncate().child(SharedString::from(name)))
+                .child(
+                    svg()
+                        .flex_none()
+                        .path("icons/x.svg")
+                        .size(px(11.0))
+                        .text_color(t.secondary_text),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _e, _w, cx| {
+                        this.agents.gh_scope = None;
+                        cx.notify();
+                    }),
+                )
+        });
+        // One row: the project it's narrowed to, whose (dropdown) + a GitHub search box.
         div()
             .flex()
             .flex_row()
@@ -1089,6 +1174,7 @@ impl Kyde {
             .pb_2()
             .flex_none()
             .text_size(px(t.ui_font_size - 1.0))
+            .children(scope)
             .child(div().flex_none().child(filter))
             .child(
                 div()
@@ -4416,25 +4502,41 @@ impl Kyde {
         vec![self.agents_pin_entry(wt, false)]
     }
 
-    /// A sidebar project header's right-click menu: move it to another group (or out of its
-    /// own), into a new group, rename it.
+    /// A project's menu (its `…`, or a right-click on its header): jump to its Issues / Pull
+    /// Requests / CI (each tab, narrowed to it), move it to another group (or out of its own),
+    /// into a new group, rename it.
     pub(crate) fn agents_space_menu(&self, space: &Path) -> Vec<MenuEntry> {
         let cfg = &self.agents.cfg;
         let Some(s) = cfg.spaces.iter().find(|s| s.path == space) else {
             return Vec::new();
         };
+        let mut out: Vec<MenuEntry> = Vec::new();
+        if self.agents.git_spaces.contains(&s.path) {
+            out.extend(
+                SIDE_TABS
+                    .iter()
+                    .filter(|(tab, ..)| *tab != SideTab::Code)
+                    .map(|&(tab, _, label, _)| {
+                        let space = space.to_path_buf();
+                        MenuEntry::item(label, move |this, _w, cx| {
+                            this.agents_jump_gh(space.clone(), tab, cx);
+                        })
+                    }),
+            );
+            out.push(MenuEntry::Divider);
+        }
         let current = cfg.group_of(s).map(|g| g.id);
-        let mut out: Vec<MenuEntry> = cfg
-            .groups
-            .iter()
-            .filter(|g| Some(g.id) != current)
-            .map(|g| {
-                let (id, p) = (g.id, space.to_path_buf());
-                MenuEntry::item(format!("Move to “{}”", g.name), move |this, _w, cx| {
-                    this.agents_move_to_group(&p, Some(id), cx);
-                })
-            })
-            .collect();
+        out.extend(
+            cfg.groups
+                .iter()
+                .filter(|g| Some(g.id) != current)
+                .map(|g| {
+                    let (id, p) = (g.id, space.to_path_buf());
+                    MenuEntry::item(format!("Move to “{}”", g.name), move |this, _w, cx| {
+                        this.agents_move_to_group(&p, Some(id), cx);
+                    })
+                }),
+        );
         if current.is_some() {
             let p = space.to_path_buf();
             out.push(MenuEntry::item("Remove from Group", move |this, _w, cx| {
@@ -4701,6 +4803,7 @@ impl Kyde {
                 .cfg
                 .spaces
                 .iter()
+                .filter(|s| which == SideTab::Code || self.agents_in_scope(&s.path))
                 .map(|s| match which {
                     SideTab::Code => 0,
                     SideTab::Issues => match self.agents.issues.get(&s.path) {
@@ -5356,7 +5459,9 @@ impl Kyde {
             let (mut block, mut total) = (Vec::new(), 0);
             for si in idxs {
                 let space = &cfg.spaces[si];
-                if !self.agents.git_spaces.contains(&space.path) {
+                if !self.agents.git_spaces.contains(&space.path)
+                    || !self.agents_in_scope(&space.path)
+                {
                     continue;
                 }
                 let (ready, loading, why) = match tab {
@@ -5598,8 +5703,10 @@ impl Kyde {
                     .text_size(px(t.ui_font_size - 2.0)),
             ),
         };
+        let sel = key.clone();
         div()
             .id(id)
+            .debug_selector(move || sel.to_string())
             .relative()
             .flex()
             .flex_row()
@@ -7111,11 +7218,35 @@ impl Kyde {
             .drag
             .as_ref()
             .is_some_and(|d| d.active && d.item == DragItem::Space(space.path.clone()));
+        // `…`: jump to this project's issues / pull requests / CI (those tabs, narrowed to it).
+        let more = space.path.clone();
+        let jump = ui::icon_btn(("agents-space-more", si), 20.0)
+            .debug_selector(move || format!("agents-space-more-{si}"))
+            .tooltip(ui::tip("Issues, pull requests, CI and more"))
+            .child(
+                svg()
+                    .path("icons/ellipsis.svg")
+                    .size(px(13.0))
+                    .text_color(t.secondary_text),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    cx.stop_propagation();
+                    let at = gpui::point(e.position.x - px(8.0), e.position.y + px(12.0));
+                    this.open_menu(at, MenuTarget::AgentSpace(more.clone()), cx);
+                }),
+            );
+        // Its `…` menu is open: the pointer has left the row, the buttons stay.
+        let menu_open = self
+            .context_menu
+            .as_ref()
+            .is_some_and(|m| matches!(&m.target, MenuTarget::AgentSpace(p) if *p == space.path));
         let actions = div()
             .flex()
             .flex_row()
             .flex_none()
-            .opacity(0.0)
+            .opacity(if menu_open { 1.0 } else { 0.0 })
             .group_hover(grp.clone(), |s| s.opacity(1.0))
             .when(space.scratch, |d| {
                 d.child(
@@ -7137,7 +7268,7 @@ impl Kyde {
                 )
             })
             .when(is_git, |d| {
-                d.child(
+                d.child(jump).child(
                     ui::icon_btn(("agents-new-wt", si), 20.0)
                         .tooltip(ui::tip("New worktree (from the latest main)"))
                         .child(

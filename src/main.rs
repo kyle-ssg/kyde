@@ -822,7 +822,8 @@ enum MenuTarget {
     Worktrees,
     /// A worktree's row in the Agents sidebar — pin it (the cleanup then leaves it alone).
     AgentRow(PathBuf),
-    /// A project's header in the Agents sidebar — move it to a group, rename it.
+    /// A project row's `…` (or a right-click on it) in the Agents sidebar — its issues / pull
+    /// requests / CI, move it to a group, rename it.
     AgentSpace(PathBuf),
     /// A group's header in the Agents sidebar — rename it, remove it.
     AgentGroup(u32),
@@ -1404,6 +1405,9 @@ struct AgentsView {
     gh_query_gen: u64,
     /// When each GitHub tab's lists were last (re)fetched — they go stale as PRs merge.
     gh_fetched: std::collections::HashMap<SideTab, std::time::Instant>,
+    /// The one project the Issues / Pull Requests / CI tabs are narrowed to — set by a
+    /// project row's jump buttons, cleared by its chip or going back to Code.
+    gh_scope: Option<PathBuf>,
     /// The Issues / Pull Requests filter dropdown.
     gh_filter_sel: ui::SelectState,
     /// The issue / PR the main panel shows on those tabs: (project, tab, number).
@@ -1981,6 +1985,7 @@ impl AgentsView {
             gh_query,
             gh_query_gen: 0,
             gh_fetched: std::collections::HashMap::new(),
+            gh_scope: None,
             gh_filter_sel: ui::SelectState::new(cx),
             gh_selected: None,
             gh_detail: None,
@@ -3730,6 +3735,13 @@ impl gpui::AssetSource for Assets {
             "icons/pin-off.svg" => include_bytes!("../assets/icons/pin-off.svg"),
             "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+            // A project row's `…` menu: jump to its issues / pull requests / CI.
+            "icons/ellipsis.svg" => include_bytes!("../assets/icons/ellipsis.svg"),
+            "icons/circle-dot.svg" => include_bytes!("../assets/icons/circle-dot.svg"),
+            "icons/git-pull-request.svg" => {
+                include_bytes!("../assets/icons/git-pull-request.svg")
+            }
+            "icons/circle-play.svg" => include_bytes!("../assets/icons/circle-play.svg"),
             // Window chrome off macOS (see `chrome`): the menu button, and minimize / maximize
             // for a window that draws its own title bar.
             #[cfg(not(target_os = "macos"))]
@@ -7826,6 +7838,109 @@ mod gpui_smoke_tests {
             .update(&mut vcx, |k, _w, _cx| {
                 assert!(k.agents.gh_selected == Some((dir.clone(), SideTab::Ci, 2)));
             })
+            .unwrap();
+    }
+
+    /// A project row's `…` → Pull Requests opens that tab narrowed to the project, unfolded;
+    /// going back to Code lifts the narrowing.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_project_row_jumps_to_its_prs(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let other = dir.with_extension("other");
+        let _ = std::fs::remove_dir_all(&other);
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q"]);
+        let pr = |number| kyde_git::github::PullRequest {
+            number,
+            title: "t".into(),
+            url: String::new(),
+            author: "a".into(),
+            head: "h".into(),
+            draft: false,
+        };
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                // The one jumped to starts folded; the other is open.
+                k.agents.cfg.spaces = vec![
+                    kyde_config::agents::Space {
+                        path: dir.clone(),
+                        collapsed: true,
+                        ..Default::default()
+                    },
+                    kyde_config::agents::Space {
+                        path: other.clone(),
+                        ..Default::default()
+                    },
+                ];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                // Seeded, so nothing asks GitHub.
+                k.agents.pr_filter = kyde_git::github::PrFilter::All;
+                k.agents
+                    .gh_fetched
+                    .insert(SideTab::Prs, std::time::Instant::now());
+                k.agents.prs.insert(dir.clone(), GhList::Ready(vec![pr(1)]));
+                k.agents
+                    .prs
+                    .insert(other.clone(), GhList::Ready(vec![pr(2)]));
+                cx.notify();
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let more = vcx
+            .debug_bounds("agents-space-more-0")
+            .expect("the project row's … button");
+        vcx.simulate_click(more.center(), gpui::Modifiers::none());
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                let m = k.context_menu.as_mut().expect("the … menu");
+                let labels: Vec<String> = m
+                    .entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        MenuEntry::Item { label, .. } => Some(label.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                // The jumps first, then (no groups yet) the project's own entries.
+                assert_eq!(
+                    labels,
+                    ["Issues", "Pull Requests", "CI", "New Group…", "Rename…"]
+                );
+            })
+            .unwrap();
+        handle
+            .update(&mut vcx, |k, w, cx| {
+                if let Some(m) = k.context_menu.as_mut() {
+                    m.hl = Some(1);
+                }
+                k.menu_confirm(&MenuConfirm, w, cx);
+            })
+            .unwrap();
+        vcx.run_until_parked();
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                assert!(k.agents.side_tab == SideTab::Prs);
+                assert_eq!(k.agents.gh_scope.as_ref(), Some(&dir));
+                assert!(!k.agents.cfg.spaces[0].collapsed);
+            })
+            .unwrap();
+        // Its PR is listed (unfolded); the other project's isn't. (Neither row was ever drawn
+        // before — gpui keeps a selector's bounds once it has been.)
+        assert!(vcx.debug_bounds("agents-pr-0").is_some());
+        assert!(vcx.debug_bounds("agents-pr-10000").is_none());
+        handle
+            .update(&mut vcx, |k, _w, cx| k.agents_show_tab(SideTab::Code, cx))
+            .unwrap();
+        handle
+            .update(&mut vcx, |k, _w, _cx| assert!(k.agents.gh_scope.is_none()))
             .unwrap();
     }
 
