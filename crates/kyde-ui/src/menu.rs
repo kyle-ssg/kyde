@@ -46,10 +46,14 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         // Agents view: a worktree row / one of its tabs.
         "Pin" | "Pin Worktree" => "icons/pin.svg",
         "Unpin" | "Unpin Worktree" => "icons/pin-off.svg",
-        // Agents view: a project's `…` (and the sidebar's ▾ of tabs that don't fit).
+        // Agents view: a project's `…` (and the sidebar's ▾ of tabs that don't fit) / a
+        // group header.
         "Issues" => "icons/circle-dot.svg",
         "Pull Requests" => "icons/git-pull-request.svg",
         "CI" => "icons/circle-play.svg",
+        "New Group" => "icons/folder-plus.svg",
+        "Remove Group" | "Remove from Group" => "icons/x.svg",
+        _ if l.starts_with("Move to") => "icons/folder.svg",
         _ if l.starts_with("Close") => "icons/x.svg",
         _ if l.starts_with("Compare") => "icons/git-branch.svg",
         _ => return None,

@@ -84,6 +84,8 @@ const AGENT_TAB_GAP: f32 = 4.0;
 const WT_LINE_X: f32 = ROW_PAD_X + CHEVRON_W + GAP + DOT / 2.0;
 /// …and its own dot starts a stub's length to the right.
 const WT_DOT_X: f32 = WT_LINE_X + 16.0;
+/// How far a group's projects sit in from its header.
+const GROUP_INDENT: f32 = 12.0;
 
 impl Kyde {
     /// Enter the Agents view: refresh the branch labels off-thread and focus the visible tab.
@@ -1740,7 +1742,6 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Fold / unfold one space's worktrees in the sidebar.
     /// Pressed on a draggable row: a drag may start once the mouse moves.
     fn agents_drag_press(&mut self, item: DragItem, e: &gpui::MouseDownEvent) {
         if e.click_count == 1 {
@@ -1771,21 +1772,62 @@ impl Kyde {
     }
 
     /// The mouse is over a row of project `space` (worktree `wt`, or its header): that's
-    /// where a dragged project — or one of this project's worktrees — would go.
+    /// where a dragged project — or one of this project's worktrees — would go. A dragged
+    /// group would go where this project's group is.
     fn agents_drag_hover(&mut self, space: &Path, wt: Option<&Path>, cx: &mut Context<Self>) {
-        let Some(d) = self.agents.drag.as_mut().filter(|d| d.active) else {
+        let Some(item) = self
+            .agents
+            .drag
+            .as_ref()
+            .filter(|d| d.active)
+            .map(|d| &d.item)
+        else {
             return;
         };
-        let over = match &d.item {
-            DragItem::Space(_) => Some(space.to_path_buf()),
+        let over = match item {
+            DragItem::Space(_) => Some(DropOver::Path(space.to_path_buf())),
+            DragItem::Group(_) => {
+                let cfg = &self.agents.cfg;
+                cfg.spaces
+                    .iter()
+                    .find(|s| s.path == space)
+                    .and_then(|s| cfg.group_of(s))
+                    .map(|g| DropOver::Group(g.id))
+            }
             DragItem::Worktree { space: s, .. } if s == space => {
-                Some(wt.unwrap_or(space).to_path_buf())
+                Some(DropOver::Path(wt.unwrap_or(space).to_path_buf()))
             }
             DragItem::Worktree { .. } => None,
         };
-        if over != d.over {
-            d.over = over;
-            cx.notify();
+        self.agents_drag_over(over, cx);
+    }
+
+    /// The mouse is over group `id`'s header: a dragged project would go into the group, a
+    /// dragged group where it is.
+    fn agents_drag_hover_group(&mut self, id: u32, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .agents
+            .drag
+            .as_ref()
+            .filter(|d| d.active)
+            .map(|d| &d.item)
+        else {
+            return;
+        };
+        let over = match item {
+            DragItem::Space(_) | DragItem::Group(_) => Some(DropOver::Group(id)),
+            DragItem::Worktree { .. } => None,
+        };
+        self.agents_drag_over(over, cx);
+    }
+
+    /// Where the drag in progress would drop (repaints when that changes).
+    fn agents_drag_over(&mut self, over: Option<DropOver>, cx: &mut Context<Self>) {
+        if let Some(d) = self.agents.drag.as_mut() {
+            if d.over != over {
+                d.over = over;
+                cx.notify();
+            }
         }
     }
 
@@ -1795,11 +1837,18 @@ impl Kyde {
             return;
         };
         if let (true, Some(onto)) = (d.active, d.over) {
-            match d.item {
-                DragItem::Space(p) => self.agents_move_space(&p, &onto, cx),
-                DragItem::Worktree { space, wt } => {
-                    self.agents_move_worktree(&space, &wt, &onto, cx);
+            let cfg = &mut self.agents.cfg;
+            let moved = match (d.item, onto) {
+                (DragItem::Space(p), DropOver::Path(onto)) => cfg.move_space(&p, &onto),
+                (DragItem::Space(p), DropOver::Group(g)) => cfg.move_space_to_group(&p, Some(g)),
+                (DragItem::Group(g), DropOver::Group(onto)) => cfg.move_group(g, onto),
+                (DragItem::Worktree { space, wt }, DropOver::Path(onto)) => {
+                    self.agents_move_worktree(&space, &wt, &onto)
                 }
+                _ => false,
+            };
+            if moved {
+                self.agents_save(cx);
             }
         }
         cx.notify();
@@ -1808,76 +1857,65 @@ impl Kyde {
     /// Where the drop line shows for the drag in progress (`None`: no move).
     fn agents_drop_line(&self) -> Option<DropLine> {
         let d = self.agents.drag.as_ref().filter(|d| d.active)?;
-        let onto = d.over.clone()?;
-        match &d.item {
-            DragItem::Space(p) => {
-                let spaces = &self.agents.cfg.spaces;
-                let f = spaces.iter().position(|s| &s.path == p)?;
-                let t = spaces.iter().position(|s| s.path == onto)?;
-                match t.cmp(&f) {
-                    std::cmp::Ordering::Less => Some(DropLine::BeforeSpace(onto)),
-                    std::cmp::Ordering::Greater => Some(DropLine::AfterSpace(onto)),
-                    std::cmp::Ordering::Equal => None,
-                }
+        let cfg = &self.agents.cfg;
+        match (&d.item, d.over.as_ref()?) {
+            (DragItem::Space(p), DropOver::Path(onto)) => {
+                let order = cfg.space_order();
+                let at = |q: &Path| order.iter().position(|&i| cfg.spaces[i].path == q);
+                drop_side(
+                    at(p)?,
+                    at(onto)?,
+                    DropLine::BeforeSpace(onto.clone()),
+                    DropLine::AfterSpace(onto.clone()),
+                )
             }
-            DragItem::Worktree { space, wt } => {
-                let rows = self.agents.cfg.space_of(space)?.rows();
-                let f = rows.iter().position(|w| w == wt)?;
-                let t = rows.iter().position(|w| *w == onto)?;
-                match t.cmp(&f) {
-                    std::cmp::Ordering::Less => Some(DropLine::BeforeRow(onto)),
-                    std::cmp::Ordering::Greater => Some(DropLine::AfterRow(onto)),
-                    std::cmp::Ordering::Equal => None,
-                }
+            (DragItem::Space(_), DropOver::Group(g)) => Some(DropLine::IntoGroup(*g)),
+            (DragItem::Group(g), DropOver::Group(onto)) => {
+                let at = |id: u32| cfg.groups.iter().position(|x| x.id == id);
+                drop_side(
+                    at(*g)?,
+                    at(*onto)?,
+                    DropLine::BeforeGroup(*onto),
+                    DropLine::AfterGroup(*onto),
+                )
             }
-        }
-    }
-
-    /// Move project `from` to where `onto` is (dragged in the sidebar).
-    fn agents_move_space(&mut self, from: &Path, onto: &Path, cx: &mut Context<Self>) {
-        let spaces = &mut self.agents.cfg.spaces;
-        let (Some(f), Some(t)) = (
-            spaces.iter().position(|s| s.path == from),
-            spaces.iter().position(|s| s.path == onto),
-        ) else {
-            return;
-        };
-        if f != t {
-            let s = spaces.remove(f);
-            spaces.insert(t, s);
-            self.agents_save(cx);
-            cx.notify();
+            (DragItem::Worktree { space, wt }, DropOver::Path(onto)) => {
+                let rows = cfg.space_of(space)?.rows();
+                let at = |q: &Path| rows.iter().position(|w| w == q);
+                drop_side(
+                    at(wt)?,
+                    at(onto)?,
+                    DropLine::BeforeRow(onto.clone()),
+                    DropLine::AfterRow(onto.clone()),
+                )
+            }
+            _ => None,
         }
     }
 
     /// Move linked worktree `wt` of project `space` to where `onto` is — the project's own
-    /// checkout (always first) or its header meaning the top.
-    fn agents_move_worktree(
-        &mut self,
-        space: &Path,
-        wt: &Path,
-        onto: &Path,
-        cx: &mut Context<Self>,
-    ) {
+    /// checkout (always first) or its header meaning the top. `false`: nothing moved.
+    fn agents_move_worktree(&mut self, space: &Path, wt: &Path, onto: &Path) -> bool {
         let Some(s) = self.agents.cfg.spaces.iter_mut().find(|s| s.path == space) else {
-            return;
+            return false;
         };
         let mut rows = s.rows();
         let (Some(f), Some(t)) = (
             rows.iter().position(|w| w == wt),
             rows.iter().position(|w| w == onto),
         ) else {
-            return;
+            return false;
         };
-        if f != t {
-            let w = rows.remove(f);
-            rows.insert(t, w);
-            s.set_rows(rows);
-            self.agents_save(cx);
-            cx.notify();
+        if f == t {
+            return false;
         }
+        let w = rows.remove(f);
+        rows.insert(t, w);
+        s.set_rows(rows);
+        true
     }
 
+    /// Fold / unfold one space's worktrees in the sidebar.
     fn agents_toggle_space(&mut self, space: &Path, cx: &mut Context<Self>) {
         if let Some(s) = self.agents.cfg.spaces.iter_mut().find(|s| s.path == space) {
             s.collapsed = !s.collapsed;
@@ -1886,26 +1924,86 @@ impl Kyde {
         }
     }
 
-    /// Expand all / Collapse all (the sidebar header buttons).
+    /// Fold / unfold a group's projects in the sidebar.
+    fn agents_toggle_group(&mut self, id: u32, cx: &mut Context<Self>) {
+        if let Some(g) = self.agents.cfg.groups.iter_mut().find(|g| g.id == id) {
+            g.collapsed = !g.collapsed;
+            self.agents_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Expand all / Collapse all (the sidebar header buttons) — groups and projects.
     fn agents_set_all_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         for s in &mut self.agents.cfg.spaces {
             s.collapsed = collapsed;
+        }
+        for g in &mut self.agents.cfg.groups {
+            g.collapsed = collapsed;
         }
         self.agents_save(cx);
         cx.notify();
     }
 
-    /// Unfold the space that owns `wt`, so a worktree being opened/created is visible.
+    /// Unfold the space that owns `wt` (and its group), so a worktree being opened/created is
+    /// visible.
     fn agents_reveal(&mut self, wt: &Path) {
-        if let Some(s) = self
-            .agents
-            .cfg
+        let cfg = &mut self.agents.cfg;
+        let Some(s) = cfg
             .spaces
             .iter_mut()
             .find(|s| s.path == wt || s.worktrees.iter().any(|w| w == wt))
-        {
-            s.collapsed = false;
+        else {
+            return;
+        };
+        s.collapsed = false;
+        if let Some(id) = s.group {
+            for g in cfg.groups.iter_mut().filter(|g| g.id == id) {
+                g.collapsed = false;
+            }
         }
+    }
+
+    /// A new group, renamed in place at once; `with` (a project) moves into it.
+    pub(crate) fn agents_new_group(
+        &mut self,
+        with: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.agents.cfg.add_group("New group");
+        if let Some(p) = with {
+            self.agents.cfg.move_space_to_group(&p, Some(id));
+        }
+        self.agents_save(cx);
+        self.agents_start_rename(RenameTarget::Group(id), window, cx);
+    }
+
+    /// Remove group `id` from the sidebar — its projects stay, ungrouped.
+    fn agents_remove_group(&mut self, id: u32, cx: &mut Context<Self>) {
+        self.agents.cfg.remove_group(id);
+        self.agents_save(cx);
+        cx.notify();
+    }
+
+    /// Move project `space` into group `group` (`None`: out of its group).
+    fn agents_move_to_group(&mut self, space: &Path, group: Option<u32>, cx: &mut Context<Self>) {
+        if self.agents.cfg.move_space_to_group(space, group) {
+            self.agents_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// A group header's "+": pick a folder and add it as a project in that group (one that's
+    /// a project already moves there).
+    fn agents_add_space_to_group_prompt(&mut self, id: u32, cx: &mut Context<Self>) {
+        self.prompt_folder("Add Project", cx, move |this, path, cx| {
+            this.agents_ensure_space(&path, cx);
+            if this.agents.cfg.move_space_to_group(&path, Some(id)) {
+                this.agents_save(cx);
+            }
+            this.agents_select(path, cx);
+        });
     }
 
     /// When worktree `wt`'s agents last did anything (output, or being looked at).
@@ -4404,18 +4502,69 @@ impl Kyde {
         vec![self.agents_pin_entry(wt, false)]
     }
 
-    /// A project row's `…`: jump to its Issues / Pull Requests / CI (each tab, narrowed to it).
+    /// A project's menu (its `…`, or a right-click on its header): jump to its Issues / Pull
+    /// Requests / CI (each tab, narrowed to it), move it to another group (or out of its own),
+    /// into a new group, rename it.
     pub(crate) fn agents_space_menu(&self, space: &Path) -> Vec<MenuEntry> {
-        SIDE_TABS
-            .iter()
-            .filter(|(tab, ..)| *tab != SideTab::Code)
-            .map(|&(tab, _, label, _)| {
-                let space = space.to_path_buf();
-                MenuEntry::item(label, move |this, _w, cx| {
-                    this.agents_jump_gh(space.clone(), tab, cx);
-                })
-            })
-            .collect()
+        let cfg = &self.agents.cfg;
+        let Some(s) = cfg.spaces.iter().find(|s| s.path == space) else {
+            return Vec::new();
+        };
+        let mut out: Vec<MenuEntry> = Vec::new();
+        if self.agents.git_spaces.contains(&s.path) {
+            out.extend(
+                SIDE_TABS
+                    .iter()
+                    .filter(|(tab, ..)| *tab != SideTab::Code)
+                    .map(|&(tab, _, label, _)| {
+                        let space = space.to_path_buf();
+                        MenuEntry::item(label, move |this, _w, cx| {
+                            this.agents_jump_gh(space.clone(), tab, cx);
+                        })
+                    }),
+            );
+            out.push(MenuEntry::Divider);
+        }
+        let current = cfg.group_of(s).map(|g| g.id);
+        out.extend(
+            cfg.groups
+                .iter()
+                .filter(|g| Some(g.id) != current)
+                .map(|g| {
+                    let (id, p) = (g.id, space.to_path_buf());
+                    MenuEntry::item(format!("Move to “{}”", g.name), move |this, _w, cx| {
+                        this.agents_move_to_group(&p, Some(id), cx);
+                    })
+                }),
+        );
+        if current.is_some() {
+            let p = space.to_path_buf();
+            out.push(MenuEntry::item("Remove from Group", move |this, _w, cx| {
+                this.agents_move_to_group(&p, None, cx);
+            }));
+        }
+        let p = space.to_path_buf();
+        out.push(MenuEntry::item("New Group…", move |this, window, cx| {
+            this.agents_new_group(Some(p.clone()), window, cx);
+        }));
+        out.push(MenuEntry::Divider);
+        let p = space.to_path_buf();
+        out.push(MenuEntry::item("Rename…", move |this, window, cx| {
+            this.agents_start_rename(RenameTarget::Space(p.clone()), window, cx);
+        }));
+        out
+    }
+
+    /// A sidebar group header's right-click menu.
+    pub(crate) fn agents_group_menu(&self, id: u32) -> Vec<MenuEntry> {
+        vec![
+            MenuEntry::item("Rename…", move |this, window, cx| {
+                this.agents_start_rename(RenameTarget::Group(id), window, cx);
+            }),
+            MenuEntry::item("Remove Group", move |this, _w, cx| {
+                this.agents_remove_group(id, cx);
+            }),
+        ]
     }
 }
 
@@ -4715,7 +4864,8 @@ impl Kyde {
                 .child(svg().path(path).size(px(14.0)).text_color(t.line_number))
         };
         // Expand all / Collapse all in one toggle (shared by every tab's tree).
-        let any_open = self.agents.cfg.spaces.iter().any(|s| !s.collapsed);
+        let any_open = self.agents.cfg.spaces.iter().any(|s| !s.collapsed)
+            || self.agents.cfg.groups.iter().any(|g| !g.collapsed);
         let fold_all = icon(
             "agents-fold-all",
             if any_open {
@@ -4897,134 +5047,368 @@ impl Kyde {
                     .children(rows),
             )
             .when(tab == SideTab::Code, |d| {
+                let link = |id: &'static str, icon: &'static str, label: &'static str| {
+                    div()
+                        .id(id)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .text_color(t.primary)
+                        .hover(|d| d.bg(t.bg_mid))
+                        .child(svg().path(icon).size(px(14.0)).text_color(t.primary))
+                        .child(label)
+                };
                 d.child(
-                    div().flex().flex_none().justify_center().py_2().child(
-                        div()
-                            .id("agents-add-space")
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .cursor_pointer()
-                            .text_color(t.primary)
-                            .hover(|d| d.bg(t.bg_mid))
-                            .child(
-                                svg()
-                                    .path("icons/plus.svg")
-                                    .size(px(14.0))
-                                    .text_color(t.primary),
-                            )
-                            .child("Add project")
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _e, _w, cx| this.agents_add_space_prompt(cx)),
-                            ),
-                    ),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .flex_none()
+                        .justify_center()
+                        .gap_1()
+                        .py_2()
+                        .child(
+                            link("agents-add-space", "icons/plus.svg", "Add project")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _e, _w, cx| {
+                                        this.agents_add_space_prompt(cx);
+                                    }),
+                                ),
+                        )
+                        .child(
+                            link("agents-new-group", "icons/folder-plus.svg", "New group")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _e, window, cx| {
+                                        this.agents_new_group(None, window, cx);
+                                    }),
+                                ),
+                        ),
                 )
             })
             .children(note)
             .into_any_element()
     }
 
-    /// The Code tab: each space's header, then (unfolded) its default worktree, its linked
+    /// The Code tab: each group's header with (unfolded) its projects, then the ungrouped
+    /// projects — each project's header, then (unfolded) its default worktree, its linked
     /// worktrees, and one still being checked out.
     fn agents_code_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        let sort = self.agents.cfg.sort_attention;
-        let urgency = |w: &Path| self.agents_state(w).urgency();
-        // Needs-you-first: spaces by their most urgent worktree (stable — ties keep order).
-        let mut spaces: Vec<(usize, &Space)> = self.agents.cfg.spaces.iter().enumerate().collect();
-        if sort {
-            spaces.sort_by_key(|(_, s)| {
-                std::cmp::Reverse(
-                    std::iter::once(&s.path)
-                        .chain(&s.worktrees)
-                        .map(|w| urgency(w))
-                        .max()
-                        .unwrap_or(0),
-                )
-            });
-        }
+        let cfg = &self.agents.cfg;
         let line = self.agents_drop_line();
-        let drop_line = || {
-            div()
-                .flex_none()
-                .h(px(2.0))
-                .mx(px(4.0))
-                .rounded_full()
-                .bg(theme::get().primary)
-                .into_any_element()
-        };
-        for (si, space) in spaces {
-            if line.as_ref() == Some(&DropLine::BeforeSpace(space.path.clone())) {
-                rows.push(drop_line());
-            }
-            rows.push(self.agents_space_row(si, space, None, cx));
-            // Worktrees still being checked out sit last, so the connectors stay right.
-            let pending: Vec<&Creating> = self
-                .agents
-                .creating
-                .iter()
-                .filter(|c| c.space == space.path)
-                .collect();
-            let after_space = line.as_ref() == Some(&DropLine::AfterSpace(space.path.clone()));
-            if space.collapsed {
-                if after_space {
-                    rows.push(drop_line());
+        for (group, mut idxs) in cfg.sections() {
+            let Some(g) = group else {
+                self.agents_sort_spaces(&mut idxs);
+                for si in idxs {
+                    self.agents_code_space(si, &cfg.spaces[si], line.as_ref(), &mut rows, cx);
                 }
                 continue;
+            };
+            if line == Some(DropLine::BeforeGroup(g.id)) {
+                rows.push(drop_line_el());
             }
-            // The space's own folder (its default worktree) among its linked ones.
-            let ordered = space.rows();
-            let n = ordered.len() + pending.len();
-            if space.scratch && ordered.is_empty() {
-                rows.push(self.agents_scratch_hint(cx));
-            }
-            let mut wts: Vec<(usize, &PathBuf)> = ordered.iter().enumerate().collect();
-            if sort {
-                wts.sort_by_key(|(_, w)| std::cmp::Reverse(urgency(w)));
-            }
-            for (pos, (wi, wt)) in wts.into_iter().enumerate() {
-                if line.as_ref() == Some(&DropLine::BeforeRow(wt.clone())) {
-                    rows.push(drop_line());
+            let lit = line == Some(DropLine::IntoGroup(g.id));
+            if g.collapsed {
+                // Folded: its projects' most urgent dot, and how many projects hide under it.
+                let state = AgentState::rollup(idxs.iter().flat_map(|&i| {
+                    let s = &cfg.spaces[i];
+                    std::iter::once(&s.path)
+                        .chain(&s.worktrees)
+                        .map(|w| self.agents_state(w))
+                }));
+                let folded = Some((Some(state), idxs.len()));
+                rows.push(self.agents_group_row(g, folded, true, lit, cx));
+            } else {
+                rows.push(self.agents_group_row(g, None, true, lit, cx));
+                self.agents_sort_spaces(&mut idxs);
+                let mut block = Vec::new();
+                for si in idxs {
+                    self.agents_code_space(si, &cfg.spaces[si], line.as_ref(), &mut block, cx);
                 }
-                rows.push(self.agents_worktree_row(si, wi, &space.path, wt, pos + 1 == n, cx));
-                if line.as_ref() == Some(&DropLine::AfterRow(wt.clone())) {
-                    rows.push(drop_line());
+                if block.is_empty() {
+                    block.push(self.agents_group_hint(g.id, cx));
                 }
+                rows.push(group_block(block));
             }
-            let shown = ordered.len();
-            for (k, c) in pending.into_iter().enumerate() {
-                let selected = self.agents.selected.as_ref() == Some(&c.path);
-                let path = c.path.clone();
-                rows.push(
-                    div()
-                        .id(SharedString::from(format!(
-                            "agents-pending-{}",
-                            c.path.display()
-                        )))
-                        .rounded_md()
-                        .when(selected, |d| d.bg(theme::get().selected_bg))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _e, _w, cx| {
-                                this.agents.selected = Some(path.clone());
-                                cx.notify();
-                            }),
-                        )
-                        .child(agents_pending_row(c.name.clone(), shown + k + 1 == n))
-                        .into_any_element(),
-                );
-            }
-            if after_space {
-                rows.push(drop_line());
+            if line == Some(DropLine::AfterGroup(g.id)) {
+                rows.push(drop_line_el());
             }
         }
         rows
+    }
+
+    /// Needs-you-first (when on): spaces (indices into the config's) by their most urgent
+    /// worktree — stable, so ties keep your order.
+    fn agents_sort_spaces(&self, idxs: &mut [usize]) {
+        if !self.agents.cfg.sort_attention {
+            return;
+        }
+        let spaces = &self.agents.cfg.spaces;
+        idxs.sort_by_key(|&i| {
+            let s = &spaces[i];
+            std::cmp::Reverse(
+                std::iter::once(&s.path)
+                    .chain(&s.worktrees)
+                    .map(|w| self.agents_state(w).urgency())
+                    .max()
+                    .unwrap_or(0),
+            )
+        });
+    }
+
+    /// One project's rows on the Code tab: its header, then (unfolded) its worktrees and
+    /// those still being checked out — with the drop `line` where it falls among them.
+    fn agents_code_space(
+        &self,
+        si: usize,
+        space: &Space,
+        line: Option<&DropLine>,
+        rows: &mut Vec<gpui::AnyElement>,
+        cx: &mut Context<Self>,
+    ) {
+        let sort = self.agents.cfg.sort_attention;
+        let urgency = |w: &Path| self.agents_state(w).urgency();
+        if line == Some(&DropLine::BeforeSpace(space.path.clone())) {
+            rows.push(drop_line_el());
+        }
+        rows.push(self.agents_space_row(si, space, None, cx));
+        let after_space = line == Some(&DropLine::AfterSpace(space.path.clone()));
+        if space.collapsed {
+            if after_space {
+                rows.push(drop_line_el());
+            }
+            return;
+        }
+        // Worktrees still being checked out sit last, so the connectors stay right.
+        let pending: Vec<&Creating> = self
+            .agents
+            .creating
+            .iter()
+            .filter(|c| c.space == space.path)
+            .collect();
+        // The space's own folder (its default worktree) among its linked ones.
+        let ordered = space.rows();
+        let n = ordered.len() + pending.len();
+        if space.scratch && ordered.is_empty() {
+            rows.push(self.agents_scratch_hint(cx));
+        }
+        let mut wts: Vec<(usize, &PathBuf)> = ordered.iter().enumerate().collect();
+        if sort {
+            wts.sort_by_key(|(_, w)| std::cmp::Reverse(urgency(w)));
+        }
+        for (pos, (wi, wt)) in wts.into_iter().enumerate() {
+            if line == Some(&DropLine::BeforeRow(wt.clone())) {
+                rows.push(drop_line_el());
+            }
+            rows.push(self.agents_worktree_row(si, wi, &space.path, wt, pos + 1 == n, cx));
+            if line == Some(&DropLine::AfterRow(wt.clone())) {
+                rows.push(drop_line_el());
+            }
+        }
+        let shown = ordered.len();
+        for (k, c) in pending.into_iter().enumerate() {
+            let selected = self.agents.selected.as_ref() == Some(&c.path);
+            let path = c.path.clone();
+            rows.push(
+                div()
+                    .id(SharedString::from(format!(
+                        "agents-pending-{}",
+                        c.path.display()
+                    )))
+                    .rounded_md()
+                    .when(selected, |d| d.bg(theme::get().selected_bg))
+                    .cursor_pointer()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            this.agents.selected = Some(path.clone());
+                            cx.notify();
+                        }),
+                    )
+                    .child(agents_pending_row(c.name.clone(), shown + k + 1 == n))
+                    .into_any_element(),
+            );
+        }
+        if after_space {
+            rows.push(drop_line_el());
+        }
+    }
+
+    /// An empty, unfolded group's only row: where a dragged project can be dropped into it.
+    fn agents_group_hint(&self, id: u32, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = theme::get();
+        div()
+            .id(SharedString::from(format!("agents-group-empty-{id}")))
+            .pl(px(ROW_PAD_X + CHEVRON_W + GAP))
+            .py(px(ROW_PAD_Y))
+            .h(px(TITLE_H + 2.0 * ROW_PAD_Y))
+            .flex()
+            .items_center()
+            .text_size(px(t.ui_font_size - 1.0))
+            .text_color(t.line_number)
+            .on_mouse_move(cx.listener(move |this, _e: &gpui::MouseMoveEvent, _w, cx| {
+                this.agents_drag_hover_group(id, cx);
+            }))
+            .child("Drag a project here")
+            .into_any_element()
+    }
+
+    /// A group's header: fold chevron, folder glyph, name — folded, its projects' rolled-up
+    /// status dot (`folded.0`) and how many items hide under it. On the Code tab (`code`) it
+    /// drags to reorder the groups, takes projects dropped on it (`lit` while one is over
+    /// it), and offers Add project / Remove group on hover.
+    fn agents_group_row(
+        &self,
+        g: &kyde_config::agents::Group,
+        folded: Option<(Option<AgentState>, usize)>,
+        code: bool,
+        lit: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let t = theme::get();
+        let id = g.id;
+        let grp = SharedString::from(format!("agents-group-{id}"));
+        let renaming = self.agents.renaming == Some(RenameTarget::Group(id));
+        let dragged = self
+            .agents
+            .drag
+            .as_ref()
+            .is_some_and(|d| d.active && d.item == DragItem::Group(id));
+        let action = |key: &str, icon: &'static str, tip: &'static str| {
+            ui::icon_btn(SharedString::from(format!("agents-group-{key}-{id}")), 20.0)
+                .tooltip(ui::tip(tip))
+                .child(svg().path(icon).size(px(13.0)).text_color(t.secondary_text))
+        };
+        let actions = div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .opacity(0.0)
+            .group_hover(grp.clone(), |s| s.opacity(1.0))
+            .child(
+                action("add", "icons/plus.svg", "Add project to this group").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        this.agents_add_space_to_group_prompt(id, cx);
+                    }),
+                ),
+            )
+            .child(
+                action("rm", "icons/x.svg", "Remove group (its projects stay)").on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        this.agents_remove_group(id, cx);
+                    }),
+                ),
+            );
+        let folded = folded.filter(|(_, k)| *k > 0);
+        div()
+            .id(grp.clone())
+            .debug_selector(move || format!("agents-group-{id}"))
+            .group(grp)
+            .flex()
+            .flex_col()
+            .pl(px(ROW_PAD_X))
+            .pr_2()
+            .py(px(ROW_PAD_Y + 1.0))
+            .mt(px(4.0))
+            .rounded_md()
+            // Lit while a dragged project is over it (a transparent border otherwise, so the
+            // row doesn't shift when it lights).
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .cursor_pointer()
+            .hover(|d| d.bg(t.bg_mid))
+            .when(lit, |d| d.bg(t.selected_bg).border_color(t.primary))
+            // Drag a group to a new place (Code tab).
+            .when(code, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _w, _cx| {
+                        this.agents_drag_press(DragItem::Group(id), e);
+                    }),
+                )
+            })
+            .on_mouse_move(cx.listener(move |this, _e: &gpui::MouseMoveEvent, _w, cx| {
+                this.agents_drag_hover_group(id, cx);
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    this.open_menu(e.position, MenuTarget::AgentGroup(id), cx);
+                }),
+            )
+            .when(dragged, |d| d.opacity(0.4))
+            .child(
+                title_line()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(CHEVRON_W))
+                            .flex()
+                            .items_center()
+                            .child(
+                                svg()
+                                    .path(if g.collapsed {
+                                        "icons/chevron-right.svg"
+                                    } else {
+                                        "icons/chevron-down.svg"
+                                    })
+                                    .size(px(12.0))
+                                    .text_color(t.line_number),
+                            ),
+                    )
+                    .child(
+                        svg()
+                            .flex_none()
+                            .path("icons/folder.svg")
+                            .size(px(13.0))
+                            .text_color(t.line_number),
+                    )
+                    .child(if renaming {
+                        self.agents_rename_field(cx)
+                    } else {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(SharedString::from(g.name.clone()))
+                            .into_any_element()
+                    })
+                    .when_some(folded, |d, (state, n)| {
+                        d.children(state.map(status_dot)).child(
+                            div()
+                                .flex_none()
+                                .text_size(px(t.ui_font_size - 1.0))
+                                .text_color(t.line_number)
+                                .child(SharedString::from(n.to_string())),
+                        )
+                    })
+                    .when(!renaming, |d| {
+                        d.child(div().flex_1()).when(code, |d| d.child(actions))
+                    }),
+            )
+            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
+                // The end of a drag isn't a click.
+                if renaming || this.agents.drag.as_ref().is_some_and(|d| d.active) {
+                    return;
+                }
+                this.agents_toggle_group(id, cx);
+                // Double-click: the first click's fold is undone; rename instead.
+                if e.click_count() >= 2 {
+                    this.agents_start_rename(RenameTarget::Group(id), window, cx);
+                }
+            }))
+            .into_any_element()
     }
 
     /// Scratch's only row while it has none: start one.
@@ -5069,32 +5453,56 @@ impl Kyde {
         let mut failed: Vec<String> = Vec::new();
         // CI filters as it renders: the search, lowercased once.
         let query = self.agents_gh_query(cx).to_lowercase();
-        for (si, space) in self.agents.cfg.spaces.iter().enumerate() {
-            if !self.agents.git_spaces.contains(&space.path) || !self.agents_in_scope(&space.path) {
-                continue;
-            }
-            let (ready, loading, why) = match tab {
-                SideTab::Issues => gh_status(self.agents.issues.get(&space.path)),
-                SideTab::Ci => self.agents_ci_status(&space.path, &query),
-                _ => gh_status(self.agents.prs.get(&space.path)),
-            };
-            // Only projects with something to show (no empty / issues-disabled headers).
-            if ready == 0 {
-                any_loading |= loading;
-                if let Some(why) = why {
-                    failed.push(format!("{} — {why}", leaf_name(&space.path)));
+        let cfg = &self.agents.cfg;
+        for (group, idxs) in cfg.sections() {
+            let folded = group.is_some_and(|g| g.collapsed);
+            let (mut block, mut total) = (Vec::new(), 0);
+            for si in idxs {
+                let space = &cfg.spaces[si];
+                if !self.agents.git_spaces.contains(&space.path)
+                    || !self.agents_in_scope(&space.path)
+                {
+                    continue;
                 }
-                continue;
+                let (ready, loading, why) = match tab {
+                    SideTab::Issues => gh_status(self.agents.issues.get(&space.path)),
+                    SideTab::Ci => self.agents_ci_status(&space.path, &query),
+                    _ => gh_status(self.agents.prs.get(&space.path)),
+                };
+                // Only projects with something to show (no empty / issues-disabled headers).
+                if ready == 0 {
+                    any_loading |= loading;
+                    if let Some(why) = why {
+                        failed.push(format!("{} — {why}", leaf_name(&space.path)));
+                    }
+                    continue;
+                }
+                total += ready;
+                if folded {
+                    continue;
+                }
+                block.push(self.agents_space_row(si, space, Some(ready), cx));
+                if space.collapsed {
+                    continue;
+                }
+                block.extend(match tab {
+                    SideTab::Issues => self.agents_issue_rows(si, &space.path, cx),
+                    SideTab::Ci => self.agents_ci_rows(si, &space.path, &query, cx),
+                    _ => self.agents_pr_rows(si, &space.path, cx),
+                });
             }
-            rows.push(self.agents_space_row(si, space, Some(ready), cx));
-            if space.collapsed {
-                continue;
+            match group {
+                // Only groups with something to show; folded, how many items hide under it.
+                Some(g) if total > 0 => {
+                    let count = folded.then_some((None, total));
+                    rows.push(self.agents_group_row(g, count, false, false, cx));
+                    if !folded {
+                        rows.push(group_block(block));
+                    }
+                }
+                Some(_) => {}
+                None => rows.extend(block),
             }
-            rows.extend(match tab {
-                SideTab::Issues => self.agents_issue_rows(si, &space.path, cx),
-                SideTab::Ci => self.agents_ci_rows(si, &space.path, &query, cx),
-                _ => self.agents_pr_rows(si, &space.path, cx),
-            });
         }
         if rows.is_empty() {
             rows.push(gh_note(if any_loading || self.agents.git_refreshing {
@@ -6803,7 +7211,7 @@ impl Kyde {
         let grp = SharedString::from(format!("agents-space-{si}"));
         let renaming = self.agents.renaming == Some(RenameTarget::Space(space.path.clone()));
         let (toggle, new_wt, rm) = (space.path.clone(), space.path.clone(), space.path.clone());
-        let drop_space = space.path.clone();
+        let (drop_space, menu) = (space.path.clone(), space.path.clone());
         let draggable = items.is_none() && !self.agents.cfg.sort_attention;
         let dragged = self
             .agents
@@ -6814,7 +7222,7 @@ impl Kyde {
         let more = space.path.clone();
         let jump = ui::icon_btn(("agents-space-more", si), 20.0)
             .debug_selector(move || format!("agents-space-more-{si}"))
-            .tooltip(ui::tip("Issues, pull requests, CI"))
+            .tooltip(ui::tip("Issues, pull requests, CI and more"))
             .child(
                 svg()
                     .path("icons/ellipsis.svg")
@@ -6914,8 +7322,10 @@ impl Kyde {
                 ),
             })
             .filter(|(_, k)| *k > 0);
+        let selector = format!("agents-space-{}", leaf_name(&space.path));
         div()
             .id(("agents-space", si))
+            .debug_selector(move || selector)
             .group(grp)
             .flex()
             .flex_col()
@@ -6940,6 +7350,12 @@ impl Kyde {
                 this.agents_drag_hover(&drop_space, None, cx);
             }))
             .when(dragged, |d| d.opacity(0.4))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                    this.open_menu(e.position, MenuTarget::AgentSpace(menu.clone()), cx);
+                }),
+            )
             .child(
                 title_line()
                     .child(
@@ -8576,6 +8992,37 @@ fn gh_note(text: impl Into<SharedString>) -> gpui::AnyElement {
         .into_any_element()
 }
 
+/// The drop line for moving the item at `from` to `to` in a list: `before` it moving up,
+/// `after` it moving down, none in place.
+fn drop_side(from: usize, to: usize, before: DropLine, after: DropLine) -> Option<DropLine> {
+    match to.cmp(&from) {
+        std::cmp::Ordering::Less => Some(before),
+        std::cmp::Ordering::Greater => Some(after),
+        std::cmp::Ordering::Equal => None,
+    }
+}
+
+/// A group's rows in the sidebar, indented under its header.
+fn group_block(rows: Vec<gpui::AnyElement>) -> gpui::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .pl(px(GROUP_INDENT))
+        .children(rows)
+        .into_any_element()
+}
+
+/// The drop line between sidebar rows.
+fn drop_line_el() -> gpui::AnyElement {
+    div()
+        .flex_none()
+        .h(px(2.0))
+        .mx(px(4.0))
+        .rounded_full()
+        .bg(theme::get().primary)
+        .into_any_element()
+}
+
 /// A sidebar row's first line, at a fixed height so the dot, chevron and actions centre on
 /// the title and the tree connector's stub can hang off its middle.
 fn title_line() -> gpui::Div {
@@ -8758,29 +9205,28 @@ fn tab_auto_title(t: &AgentTab, cx: &gpui::App) -> String {
 
 // ── keyboard navigation, renaming, scrollback ────────────────────────────────────────────
 impl Kyde {
-    /// The worktrees in the sidebar's order (unfolded spaces only, attention order if on).
+    /// The worktrees in the sidebar's order (unfolded groups and spaces only, attention order
+    /// if on).
     fn agents_row_order(&self) -> Vec<PathBuf> {
-        let sort = self.agents.cfg.sort_attention;
+        let cfg = &self.agents.cfg;
         let urgency = |w: &Path| self.agents_state(w).urgency();
-        let mut spaces: Vec<&Space> = self.agents.cfg.spaces.iter().collect();
-        if sort {
-            spaces.sort_by_key(|s| {
-                std::cmp::Reverse(
-                    std::iter::once(&s.path)
-                        .chain(&s.worktrees)
-                        .map(|w| urgency(w))
-                        .max()
-                        .unwrap_or(0),
-                )
-            });
-        }
         let mut out = Vec::new();
-        for s in spaces.into_iter().filter(|s| !s.collapsed) {
-            let mut wts = s.rows();
-            if sort {
-                wts.sort_by_key(|w| std::cmp::Reverse(urgency(w)));
+        for (group, mut idxs) in cfg.sections() {
+            if group.is_some_and(|g| g.collapsed) {
+                continue;
             }
-            out.extend(wts);
+            self.agents_sort_spaces(&mut idxs);
+            for s in idxs
+                .into_iter()
+                .map(|i| &cfg.spaces[i])
+                .filter(|s| !s.collapsed)
+            {
+                let mut wts = s.rows();
+                if cfg.sort_attention {
+                    wts.sort_by_key(|w| std::cmp::Reverse(urgency(w)));
+                }
+                out.extend(wts);
+            }
         }
         out
     }
@@ -8875,6 +9321,8 @@ impl Kyde {
             RenameTarget::Space(p) | RenameTarget::Worktree(p) => {
                 self.agents.cfg.names.get(p).cloned()
             }
+            // A group's name is always its own (`agents_auto_name`).
+            RenameTarget::Group(_) => None,
             #[cfg(feature = "terminal")]
             RenameTarget::Tab(wt, id) => self
                 .agents
@@ -8902,6 +9350,15 @@ impl Kyde {
         match target {
             RenameTarget::Space(p) if *p == kyde_config::agents::scratch_dir() => "Scratch".into(),
             RenameTarget::Space(p) => leaf_name(p),
+            // Its current name: renaming it to nothing (or the same) keeps that.
+            RenameTarget::Group(id) => self
+                .agents
+                .cfg
+                .groups
+                .iter()
+                .find(|g| g.id == *id)
+                .map(|g| g.name.clone())
+                .unwrap_or_default(),
             RenameTarget::Worktree(wt) => {
                 let space = self
                     .agents
@@ -9023,6 +9480,13 @@ impl Kyde {
                         self.agents.cfg.names.remove(&p);
                     }
                 },
+                RenameTarget::Group(id) => {
+                    if let (Some(n), Some(g)) =
+                        (name, self.agents.cfg.groups.iter_mut().find(|g| g.id == id))
+                    {
+                        g.name = n;
+                    }
+                }
                 #[cfg(feature = "terminal")]
                 RenameTarget::Tab(wt, id) => {
                     if let Some(t) = self
