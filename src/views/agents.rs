@@ -1784,7 +1784,15 @@ impl Kyde {
         else {
             return;
         };
+        let scratch = self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .any(|s| s.scratch && s.path == space);
         let over = match item {
+            // A project can't go below Scratch, which stays at the bottom.
+            DragItem::Space(_) if scratch => None,
             DragItem::Space(_) => Some(DropOver::Path(space.to_path_buf())),
             DragItem::Group(_) => {
                 let cfg = &self.agents.cfg;
@@ -4525,29 +4533,32 @@ impl Kyde {
             );
             out.push(MenuEntry::Divider);
         }
-        let current = cfg.group_of(s).map(|g| g.id);
-        out.extend(
-            cfg.groups
-                .iter()
-                .filter(|g| Some(g.id) != current)
-                .map(|g| {
-                    let (id, p) = (g.id, space.to_path_buf());
-                    MenuEntry::item(format!("Move to “{}”", g.name), move |this, _w, cx| {
-                        this.agents_move_to_group(&p, Some(id), cx);
-                    })
-                }),
-        );
-        if current.is_some() {
+        // Scratch is never in a group: it stays at the bottom.
+        if !s.scratch {
+            let current = cfg.group_of(s).map(|g| g.id);
+            out.extend(
+                cfg.groups
+                    .iter()
+                    .filter(|g| Some(g.id) != current)
+                    .map(|g| {
+                        let (id, p) = (g.id, space.to_path_buf());
+                        MenuEntry::item(format!("Move to “{}”", g.name), move |this, _w, cx| {
+                            this.agents_move_to_group(&p, Some(id), cx);
+                        })
+                    }),
+            );
+            if current.is_some() {
+                let p = space.to_path_buf();
+                out.push(MenuEntry::item("Remove from Group", move |this, _w, cx| {
+                    this.agents_move_to_group(&p, None, cx);
+                }));
+            }
             let p = space.to_path_buf();
-            out.push(MenuEntry::item("Remove from Group", move |this, _w, cx| {
-                this.agents_move_to_group(&p, None, cx);
+            out.push(MenuEntry::item("New Group…", move |this, window, cx| {
+                this.agents_new_group(Some(p.clone()), window, cx);
             }));
+            out.push(MenuEntry::Divider);
         }
-        let p = space.to_path_buf();
-        out.push(MenuEntry::item("New Group…", move |this, window, cx| {
-            this.agents_new_group(Some(p.clone()), window, cx);
-        }));
-        out.push(MenuEntry::Divider);
         let p = space.to_path_buf();
         out.push(MenuEntry::item("Rename…", move |this, window, cx| {
             this.agents_start_rename(RenameTarget::Space(p.clone()), window, cx);
@@ -5107,7 +5118,13 @@ impl Kyde {
             let Some(g) = group else {
                 self.agents_sort_spaces(&mut idxs);
                 for si in idxs {
-                    self.agents_code_space(si, &cfg.spaces[si], line.as_ref(), &mut rows, cx);
+                    let space = &cfg.spaces[si];
+                    // Scratch sits at the bottom, just above Add project: the list's spare
+                    // room goes above it (none once the list scrolls).
+                    if space.scratch {
+                        rows.push(div().flex_1().into_any_element());
+                    }
+                    self.agents_code_space(si, space, line.as_ref(), &mut rows, cx);
                 }
                 continue;
             };
@@ -5145,21 +5162,22 @@ impl Kyde {
     }
 
     /// Needs-you-first (when on): spaces (indices into the config's) by their most urgent
-    /// worktree — stable, so ties keep your order.
+    /// worktree — stable, so ties keep your order. Scratch stays last either way.
     fn agents_sort_spaces(&self, idxs: &mut [usize]) {
-        if !self.agents.cfg.sort_attention {
-            return;
-        }
+        let sort = self.agents.cfg.sort_attention;
         let spaces = &self.agents.cfg.spaces;
         idxs.sort_by_key(|&i| {
             let s = &spaces[i];
-            std::cmp::Reverse(
+            let urgency = if sort {
                 std::iter::once(&s.path)
                     .chain(&s.worktrees)
                     .map(|w| self.agents_state(w).urgency())
                     .max()
-                    .unwrap_or(0),
-            )
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (s.scratch, std::cmp::Reverse(urgency))
         });
     }
 
@@ -7212,7 +7230,8 @@ impl Kyde {
         let renaming = self.agents.renaming == Some(RenameTarget::Space(space.path.clone()));
         let (toggle, new_wt, rm) = (space.path.clone(), space.path.clone(), space.path.clone());
         let (drop_space, menu) = (space.path.clone(), space.path.clone());
-        let draggable = items.is_none() && !self.agents.cfg.sort_attention;
+        // Scratch is pinned to the bottom.
+        let draggable = items.is_none() && !self.agents.cfg.sort_attention && !space.scratch;
         let dragged = self
             .agents
             .drag

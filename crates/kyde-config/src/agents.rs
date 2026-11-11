@@ -375,15 +375,25 @@ impl AgentsCfg {
         c
     }
 
-    /// Add the Scratch space (last) when there isn't one — every layout has it.
+    /// Add the Scratch space when there isn't one — every layout has it — and keep it last
+    /// and out of any group (the sidebar pins it to the bottom; an older layout may have it
+    /// among the projects, or in a group).
     pub fn ensure_scratch(&mut self) {
-        if !self.spaces.iter().any(|s| s.scratch) {
-            self.spaces.push(Space {
+        let mut scratch = match self.spaces.iter().position(|s| s.scratch) {
+            Some(i) => self.spaces.remove(i),
+            None => Space {
                 path: scratch_dir(),
                 scratch: true,
                 ..Space::default()
-            });
-        }
+            },
+        };
+        scratch.group = None;
+        self.spaces.push(scratch);
+    }
+
+    /// Whether space `path` is Scratch.
+    fn is_scratch_space(&self, path: &Path) -> bool {
+        self.spaces.iter().any(|s| s.scratch && s.path == path)
     }
 
     /// Where a newly added project goes: after the last project, so Scratch stays below them.
@@ -508,7 +518,8 @@ impl AgentsCfg {
     }
 
     /// Move space `from` to where space `onto` is in the sidebar: into `onto`'s group, above
-    /// it when moving up, below it when moving down. `false`: nothing moved.
+    /// it when moving up, below it when moving down. `false`: nothing moved — also for
+    /// Scratch either way, which stays at the bottom.
     ///
     /// ```
     /// use kyde_config::agents::{AgentsCfg, Group, Space};
@@ -526,6 +537,9 @@ impl AgentsCfg {
     /// assert_eq!(c.spaces[0].group, Some(1));
     /// ```
     pub fn move_space(&mut self, from: &Path, onto: &Path) -> bool {
+        if self.is_scratch_space(from) || self.is_scratch_space(onto) {
+            return false;
+        }
         let order = self.space_order();
         let at = |p: &Path| order.iter().position(|&i| self.spaces[i].path == p);
         let (Some(df), Some(dt)) = (at(from), at(onto)) else {
@@ -548,9 +562,13 @@ impl AgentsCfg {
     }
 
     /// Move space `path` into group `group` (`None`: out of any group) — first in it.
-    /// `false`: no such space.
+    /// `false`: no such space, or it's Scratch (never in a group).
     pub fn move_space_to_group(&mut self, path: &Path, group: Option<u32>) -> bool {
-        let Some(f) = self.spaces.iter().position(|s| s.path == path) else {
+        let Some(f) = self
+            .spaces
+            .iter()
+            .position(|s| s.path == path && !s.scratch)
+        else {
             return false;
         };
         let group = group.filter(|id| self.groups.iter().any(|g| g.id == *id));
@@ -668,5 +686,30 @@ mod tests {
             c.space_of(Path::new("/w")).map(|s| s.path.as_path()),
             Some(Path::new("/r"))
         );
+    }
+
+    /// A layout saved with Scratch among the projects, or in a group (both possible before
+    /// it was pinned), loads with it last and ungrouped, its rows kept — and no move puts
+    /// it anywhere else.
+    #[test]
+    fn scratch_stays_below_the_projects() {
+        let mut c: AgentsCfg = serde_json::from_str(
+            r#"{"spaces":[{"path":"/a"},{"path":"/s","worktrees":["/s/x"],"scratch":true,"group":1},{"path":"/b"}],
+                "groups":[{"id":1,"name":"Work"}]}"#,
+        )
+        .unwrap();
+        c.ensure_scratch();
+        let order = |c: &AgentsCfg| -> Vec<PathBuf> {
+            c.space_order()
+                .into_iter()
+                .map(|i| c.spaces[i].path.clone())
+                .collect()
+        };
+        assert_eq!(order(&c), ["/a", "/b", "/s"].map(PathBuf::from));
+        assert!(c.is_scratch(Path::new("/s/x")));
+        assert!(!c.move_space(Path::new("/s"), Path::new("/a")));
+        assert!(!c.move_space(Path::new("/a"), Path::new("/s")));
+        assert!(!c.move_space_to_group(Path::new("/s"), Some(1)));
+        assert_eq!(order(&c), ["/a", "/b", "/s"].map(PathBuf::from));
     }
 }
