@@ -7739,6 +7739,11 @@ impl Kyde {
                 .min_h_0()
                 .pl_2()
                 .pt_1()
+                // The terminal paints a square background; this inset keeps it inside the
+                // island's rounded bottom-right corner (and the top-right one when the strip
+                // is hidden).
+                .pr_1()
+                .pb_1()
                 .child(tab.view.clone())
                 .into_any_element()
         } else {
