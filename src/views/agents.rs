@@ -5091,15 +5091,26 @@ impl Kyde {
                     .context_menu
                     .as_ref()
                     .is_some_and(|m| matches!(m.target, MenuTarget::AgentsAdd));
-                let add = ui::icon_btn("agents-add", 26.0)
+                // The whole row is the button (inset like the rows above), not just the glyph.
+                let add = div()
+                    .id("agents-add")
                     .debug_selector(|| "agents-add".into())
                     .tooltip(ui::tip("Add a project or a group"))
-                    .when(open, |d| d.bg(t.bg_light))
+                    .group("agents-add")
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .h(px(26.0))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|d| d.bg(t.bg_mid))
+                    .when(open, |d| d.bg(t.bg_mid))
                     .child(
                         svg()
                             .path("icons/circle-plus.svg")
                             .size(px(16.0))
-                            .text_color(t.secondary_text),
+                            .text_color(if open { t.text } else { t.secondary_text })
+                            .group_hover("agents-add", |s| s.text_color(t.text)),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -5108,14 +5119,7 @@ impl Kyde {
                             this.open_menu(at, MenuTarget::AgentsAdd, cx);
                         }),
                     );
-                d.child(
-                    div()
-                        .flex()
-                        .flex_none()
-                        .justify_center()
-                        .py_1p5()
-                        .child(add),
-                )
+                d.child(div().flex_none().px_1p5().py_1p5().child(add))
             })
             .children(note)
             .into_any_element()
