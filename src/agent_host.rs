@@ -5,8 +5,8 @@
 //! of output, and serves them on a Unix socket in `~/.kyde/agents/<id>.sock`. Kyde's terminal
 //! view is a client: it attaches, gets the buffered output replayed, then the live stream, and
 //! sends keystrokes / resizes back. Quitting Kyde only disconnects; the next launch reattaches
-//! (`live_hosts`). Closing the tab sends `KILL`. The `ky agent …` CLI talks to the same
-//! sockets.
+//! (`live_hosts`). Closing the tab sends `KILL`, which ends the agent and everything it started
+//! (`end_tree`). The `ky agent …` CLI talks to the same sockets.
 //!
 //! Wire format, both directions: `[kind: u8][len: u32 LE][payload]`.
 
@@ -18,8 +18,8 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
+use std::time::{Duration, Instant};
 
 /// Bumped when the wire format changes (a host from an older Kyde says so in `HELLO`).
 pub(crate) const VERSION: u32 = 1;
@@ -44,6 +44,11 @@ const PARENT_SESSION_VARS: [&str; 10] = [
 
 /// Largest frame accepted — anything bigger is a broken stream.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
+/// How long a closed agent gets to wind down after the hang-up (Claude stopping its MCP
+/// servers and commands) before whatever it left running is stopped for it.
+const HANGUP_GRACE: Duration = Duration::from_secs(5);
+/// Then how long SIGTERM gets before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// Client → host: start streaming (answered with `HELLO`, the buffered `OUT`, then live).
 pub(crate) const ATTACH: u8 = 1;
@@ -53,7 +58,7 @@ pub(crate) const INPUT: u8 = 2;
 pub(crate) const RESIZE: u8 = 3;
 /// Client → host: send the buffered output once, then hang up.
 pub(crate) const SNAPSHOT: u8 = 4;
-/// Client → host: end the agent (SIGHUP to its process group).
+/// Client → host: end the agent and everything it started (see `end_tree`).
 pub(crate) const KILL: u8 = 5;
 /// Host → client: `HostHello` JSON.
 pub(crate) const HELLO: u8 = 10;
@@ -329,6 +334,7 @@ impl Ring {
 }
 
 struct Shared {
+    id: String,
     /// Recent output. Its lock also orders a new viewer's replay before any live output.
     ring: Mutex<Ring>,
     viewers: Mutex<Vec<UnixStream>>,
@@ -336,19 +342,173 @@ struct Shared {
     pty: Mutex<tty::Pty>,
     size: Mutex<(u16, u16)>,
     child: u32,
+    /// Set (and `closed_cv` signalled) once the agent's terminal has closed.
+    closed: Mutex<bool>,
+    closed_cv: Condvar,
+    /// Held while a `KILL` ends the agent, so the host stays up until that's done.
+    ending: Mutex<()>,
 }
 
 impl Shared {
     /// Signal the agent's whole process group (the shell is its session leader).
     fn signal(&self, sig: i32) {
-        if let Ok(pgid) = i32::try_from(self.child) {
-            if pgid > 0 {
-                // SAFETY: plain kill(2) on the child's own process group.
-                unsafe {
-                    libc::kill(-pgid, sig);
-                }
+        signal_group(self.child, sig);
+    }
+
+    /// Wait up to `max` for the agent's terminal to close; whether it has.
+    fn wait_closed(&self, max: Duration) -> bool {
+        let closed = lock(&self.closed);
+        match self.closed_cv.wait_timeout_while(closed, max, |c| !*c) {
+            Ok((c, _)) => *c,
+            Err(p) => *p.into_inner().0,
+        }
+    }
+
+    /// `KILL`: end the agent and everything it started. A second one meanwhile is a no-op.
+    fn end(&self) {
+        let _ending = match self.ending.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+            Err(TryLockError::WouldBlock) => return,
+        };
+        end_tree(
+            self.child,
+            || {
+                self.wait_closed(HANGUP_GRACE);
+            },
+            TERM_GRACE,
+        );
+        // Something from outside the tree still holds the terminal open: go anyway. Exiting
+        // drops the PTY, which hangs up whatever is left on it.
+        if !self.wait_closed(Duration::from_secs(1)) {
+            self.unregister();
+            std::process::exit(0);
+        }
+    }
+
+    /// The agent's terminal closed (or is being abandoned): tell viewers and unregister.
+    fn unregister(&self) {
+        for v in lock(&self.viewers).iter_mut() {
+            let _ = write_frame(v, EXIT, &[]);
+        }
+        let _ = std::fs::remove_file(sock_path(&self.id));
+        let _ = std::fs::remove_file(info_path(&self.id));
+        // Its log (our stderr) only stays if something went wrong.
+        let log = kyde_config::agents::agents_dir().join(format!("{}.log", self.id));
+        if std::fs::metadata(&log).is_ok_and(|m| m.len() == 0) {
+            let _ = std::fs::remove_file(log);
+        }
+    }
+}
+
+// ── ending an agent's process tree ───────────────────────────────────────────────────────
+
+/// A process, told apart from a later one that reuses its pid by its start time.
+#[derive(Clone, Debug)]
+struct Proc {
+    pid: u32,
+    ppid: u32,
+    start: String,
+}
+
+/// Every running process, per `ps` (zombies left out: they've already ended).
+fn processes() -> Vec<Proc> {
+    let Ok(out) = std::process::Command::new("ps")
+        .args([
+            "-A", "-o", "pid=", "-o", "ppid=", "-o", "stat=", "-o", "lstart=",
+        ])
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut f = line.split_whitespace();
+            let pid = f.next()?.parse().ok()?;
+            let ppid = f.next()?.parse().ok()?;
+            if f.next()?.starts_with('Z') {
+                return None;
+            }
+            let start = f.collect::<Vec<_>>().join(" ");
+            Some(Proc { pid, ppid, start })
+        })
+        .collect()
+}
+
+/// `root` and every process under it, as they are now.
+fn proc_tree(root: u32) -> Vec<Proc> {
+    let all = processes();
+    let mut tree: Vec<Proc> = all.iter().filter(|p| p.pid == root).cloned().collect();
+    let mut i = 0;
+    while let Some(parent) = tree.get(i).map(|p| p.pid) {
+        tree.extend(
+            all.iter()
+                .filter(|p| p.ppid == parent && p.pid != parent)
+                .cloned(),
+        );
+        i += 1;
+    }
+    tree
+}
+
+/// Which of `procs` are still running (the same process: pid *and* start time).
+fn still_running(procs: &[Proc]) -> Vec<Proc> {
+    if procs.is_empty() {
+        return Vec::new();
+    }
+    let now = processes();
+    procs
+        .iter()
+        .filter(|p| now.iter().any(|n| n.pid == p.pid && n.start == p.start))
+        .cloned()
+        .collect()
+}
+
+fn signal_pid(pid: u32, sig: i32) {
+    if let Ok(p) = i32::try_from(pid) {
+        if p > 0 {
+            // SAFETY: plain kill(2) on one process.
+            unsafe {
+                libc::kill(p, sig);
             }
         }
+    }
+}
+
+fn signal_group(pgid: u32, sig: i32) {
+    if let Ok(p) = i32::try_from(pgid) {
+        if p > 0 {
+            // SAFETY: plain kill(2) on one process group.
+            unsafe {
+                libc::kill(-p, sig);
+            }
+        }
+    }
+}
+
+/// End `root` (an agent's shell) and everything under it, so closing a tab leaves nothing
+/// running. The tree is read *before* the hang-up: once a parent exits, its children are
+/// re-parented to launchd and can no longer be traced back. The hang-up reaches only the
+/// shell's process group, and Claude runs each tool command (a dev server, say) in a session
+/// of its own, so after `wait_hangup` (the agent winding down) whatever is still running gets
+/// SIGTERM, then — `term_grace` later — SIGKILL.
+fn end_tree(root: u32, wait_hangup: impl FnOnce(), term_grace: Duration) {
+    let tree = proc_tree(root);
+    signal_group(root, libc::SIGHUP);
+    wait_hangup();
+    let mut left = still_running(&tree);
+    for p in &left {
+        signal_pid(p.pid, libc::SIGTERM);
+    }
+    let until = Instant::now() + term_grace;
+    while !left.is_empty() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+        left = still_running(&left);
+    }
+    for p in &left {
+        signal_pid(p.pid, libc::SIGKILL);
     }
 }
 
@@ -412,12 +572,16 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         writer.write_all(format!("{line}\n").as_bytes())?;
     }
     let shared = Arc::new(Shared {
+        id: spec.id.clone(),
         ring: Mutex::new(Ring::default()),
         viewers: Mutex::new(Vec::new()),
         writer: Mutex::new(writer),
         pty: Mutex::new(pty),
         size: Mutex::new((spec.cols, spec.rows)),
         child,
+        closed: Mutex::new(false),
+        closed_cv: Condvar::new(),
+        ending: Mutex::new(()),
     });
     let info = HostInfo {
         version: VERSION,
@@ -445,18 +609,12 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         });
     }
     pump(master, &shared);
-    // The agent's terminal closed: tell viewers, unregister, and go (dropping the PTY hangs
-    // up anything left in it).
-    for v in lock(&shared.viewers).iter_mut() {
-        let _ = write_frame(v, EXIT, &[]);
-    }
-    let _ = std::fs::remove_file(sock_path(&spec.id));
-    let _ = std::fs::remove_file(info_path(&spec.id));
-    // Its log (our stderr) only stays if something went wrong.
-    let log = kyde_config::agents::agents_dir().join(format!("{}.log", spec.id));
-    if std::fs::metadata(&log).is_ok_and(|m| m.len() == 0) {
-        let _ = std::fs::remove_file(log);
-    }
+    // The agent's terminal closed: let a `KILL` under way know, and outlast it.
+    *lock(&shared.closed) = true;
+    shared.closed_cv.notify_all();
+    drop(lock(&shared.ending));
+    // Then unregister and go (dropping the PTY hangs up anything left in it).
+    shared.unregister();
     Ok(())
 }
 
@@ -530,7 +688,7 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
                 return;
             }
             KILL => {
-                shared.signal(libc::SIGHUP);
+                shared.end();
                 return;
             }
             _ => {}
@@ -579,5 +737,47 @@ mod tests {
         let ws = parse_resize(&p).unwrap();
         assert_eq!((ws.num_cols, ws.num_lines, ws.cell_height), (120, 40, 17));
         assert!(f.next(&mut r).is_err(), "end of stream");
+    }
+
+    #[test]
+    fn ending_an_agent_stops_what_outlives_its_hangup() {
+        use std::os::unix::process::CommandExt;
+        // A shell leading its own process group (as a PTY's does), running a child that
+        // shrugs off SIGHUP and SIGTERM — like a dev server the hang-up never reaches.
+        let mut shell = std::process::Command::new("sh")
+            .args(["-c", "(trap '' HUP TERM; exec sleep 300) & wait"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let root = shell.id();
+        let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !done() {
+                assert!(Instant::now() < deadline, "{what}");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // Once it's `sleep`, its traps are set (the signals stay ignored across the exec).
+        let is_sleep = |pid: u32| {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "comm=", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .ends_with("sleep")
+        };
+        wait_for("the child never started", &|| {
+            proc_tree(root)
+                .iter()
+                .any(|p| p.pid != root && is_sleep(p.pid))
+        });
+        let child = proc_tree(root).into_iter().find(|p| p.pid != root).unwrap();
+
+        end_tree(root, || {}, Duration::from_millis(300));
+        shell.wait().unwrap();
+        wait_for("the child outlived its agent", &|| {
+            still_running(std::slice::from_ref(&child)).is_empty()
+        });
     }
 }
