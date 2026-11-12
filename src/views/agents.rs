@@ -4499,9 +4499,80 @@ impl Kyde {
         MenuEntry::item(label, move |this, _w, cx| this.agents_toggle_pin(&wt, cx))
     }
 
-    /// A sidebar worktree row's right-click menu.
+    /// A sidebar worktree row's right-click menu: its project's Issues / Pull Requests / CI
+    /// (onto its own PR / CI run, where it has one), then pinning.
     pub(crate) fn agents_row_menu(&self, wt: &Path) -> Vec<MenuEntry> {
-        vec![self.agents_pin_entry(wt, false)]
+        let mut out = Vec::new();
+        let space = self.agents.cfg.spaces.iter().find(|s| {
+            (s.path == wt || s.worktrees.iter().any(|w| w == wt))
+                && self.agents.git_spaces.contains(&s.path)
+        });
+        if let Some(s) = space {
+            out = Self::agents_gh_entries(&s.path, Some(wt));
+            out.push(MenuEntry::Divider);
+        }
+        out.push(self.agents_pin_entry(wt, false));
+        out
+    }
+
+    /// The menu's jumps to `space`'s Issues / Pull Requests / CI — from worktree `wt`'s row,
+    /// each then opening its own PR / CI run where it has one.
+    fn agents_gh_entries(space: &Path, wt: Option<&Path>) -> Vec<MenuEntry> {
+        SIDE_TABS
+            .iter()
+            .filter(|(tab, ..)| *tab != SideTab::Code)
+            .map(|&(tab, _, label, _)| {
+                let (space, wt) = (space.to_path_buf(), wt.map(Path::to_path_buf));
+                MenuEntry::item(label, move |this, _w, cx| {
+                    this.agents_jump_gh(space.clone(), tab, cx);
+                    if let Some(wt) = &wt {
+                        this.agents_open_wt_gh(space.clone(), wt.clone(), tab, cx);
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// After a worktree row's jump to Pull Requests / CI: open `wt`'s own PR (its branch's,
+    /// merged or not) / its branch's CI run most worth a look, found with `gh` in the
+    /// background. It has none → the project's list stays as it is.
+    fn agents_open_wt_gh(
+        &mut self,
+        space: PathBuf,
+        wt: PathBuf,
+        tab: SideTab,
+        cx: &mut Context<Self>,
+    ) {
+        use kyde_git::github as gh;
+        let branch = self.agents.branches.get(&wt).cloned();
+        if !matches!(tab, SideTab::Prs | SideTab::Ci) || (tab == SideTab::Ci && branch.is_none()) {
+            return;
+        }
+        let picked = self.agents.gh_selected.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async move {
+                    if tab == SideTab::Prs {
+                        return gh::branch_pr(&wt).ok();
+                    }
+                    let runs = gh::branch_runs(&wt, branch.as_deref()?).ok()?;
+                    gh::headline_run(&runs).map(|r| r.id)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Only while the jump still stands: same tab and project, nothing else picked.
+                let a = &this.agents;
+                let stands = a.side_tab == tab
+                    && a.gh_scope.as_ref() == Some(&space)
+                    && a.gh_selected == picked;
+                if let Some(n) = found.filter(|_| stands) {
+                    this.agents_select_gh(space, tab, n, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A project's menu (its `…`, or a right-click on its header): jump to its Issues / Pull
@@ -4514,17 +4585,7 @@ impl Kyde {
         };
         let mut out: Vec<MenuEntry> = Vec::new();
         if self.agents.git_spaces.contains(&s.path) {
-            out.extend(
-                SIDE_TABS
-                    .iter()
-                    .filter(|(tab, ..)| *tab != SideTab::Code)
-                    .map(|&(tab, _, label, _)| {
-                        let space = space.to_path_buf();
-                        MenuEntry::item(label, move |this, _w, cx| {
-                            this.agents_jump_gh(space.clone(), tab, cx);
-                        })
-                    }),
-            );
+            out = Self::agents_gh_entries(space, None);
             out.push(MenuEntry::Divider);
         }
         // Scratch is never in a group: it stays at the bottom.

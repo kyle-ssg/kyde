@@ -235,6 +235,23 @@ pub fn pr_checkout(dir: &Path, number: u64) -> Result<()> {
     gh(dir, &["pr", "checkout", &number.to_string()]).map(|_| ())
 }
 
+/// The number of the pull request for the branch checked out at `dir` — open, merged or
+/// closed, the latest. `gh pr view` follows the branch's upstream, so a fork's PR checked out
+/// with `gh pr checkout` is found too. An error when the branch has none.
+pub fn branch_pr(dir: &Path) -> Result<u64> {
+    #[derive(Deserialize)]
+    struct Raw {
+        number: u64,
+    }
+    let raw = gh(dir, &["pr", "view", "--json", "number"])?;
+    serde_json::from_str::<Raw>(&raw)
+        .map(|r| r.number)
+        .map_err(|source| GitError::Json {
+            what: "gh pr view".into(),
+            source,
+        })
+}
+
 /// An issue or pull request in full, for the detail view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemDetail {
@@ -1308,6 +1325,44 @@ pub fn runs(dir: &Path) -> Result<Vec<WorkflowRun>> {
         dir,
         &["run", "list", "--limit", "50", "--json", RUN_FIELDS],
     )?)
+}
+
+/// The latest workflow runs on `branch` in `dir`'s GitHub repo (newest first).
+pub fn branch_runs(dir: &Path, branch: &str) -> Result<Vec<WorkflowRun>> {
+    parse_runs(&gh(
+        dir,
+        &[
+            "run", "list", "--branch", branch, "--limit", "30", "--json", RUN_FIELDS,
+        ],
+    )?)
+}
+
+/// The run of `runs` (newest first, as [`parse_runs`] marks them) most worth a look: of each
+/// workflow's latest, a failed one, else one under way, else the newest.
+///
+/// ```
+/// use kyde_git::github::{headline_run, parse_runs};
+/// let v = parse_runs(
+///     r#"[{"databaseId":4,"workflowName":"deploy","headBranch":"x","status":"completed",
+///         "conclusion":"skipped"},
+///        {"databaseId":3,"workflowName":"build","headBranch":"x","status":"in_progress"},
+///        {"databaseId":2,"workflowName":"lint","headBranch":"x","status":"completed",
+///         "conclusion":"failure"},
+///        {"databaseId":1,"workflowName":"build","headBranch":"x","status":"completed",
+///         "conclusion":"failure"}]"#,
+/// ).unwrap();
+/// // `lint` still fails; `build`'s failure is out of date (run 3 re-runs it).
+/// assert_eq!(headline_run(&v).map(|r| r.id), Some(2));
+/// assert_eq!(headline_run(&v[..2]).map(|r| r.id), Some(3)); // nothing failed: the one running
+/// assert_eq!(headline_run(&v[..1]).map(|r| r.id), Some(4));
+/// ```
+#[must_use]
+pub fn headline_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
+    let latest = || runs.iter().filter(|r| r.superseded_by.is_none());
+    latest()
+        .find(|r| r.state() == RunState::Failed)
+        .or_else(|| latest().find(|r| r.state() == RunState::Running))
+        .or_else(|| runs.first())
 }
 
 /// Parse `gh run list --json databaseId,number,…` (see `RUN_FIELDS`; newest first), marking
