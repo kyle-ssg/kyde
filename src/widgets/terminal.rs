@@ -246,6 +246,12 @@ pub struct TerminalView {
     sb_drag: Option<SbDrag>,
     /// Find (⌘F), built the first time it opens.
     find: Option<TermFind>,
+    /// Agent tabs: the find reaches the other tabs too — this worktree's, or every
+    /// worktree's ([`FindScope`]). Kyde does the reaching ([`TerminalEvent::FindOut`]).
+    pub scoped_find: bool,
+    /// The key that opens that find on every worktree, for its tip (none off macOS, where it's
+    /// the terminal's own find key).
+    pub find_all_key: Option<String>,
     /// The link under the mouse while ⌘ (Ctrl off macOS) is held: drawn underlined, with
     /// a pointing hand, so you can see a click will open it.
     link: Option<Link>,
@@ -347,8 +353,16 @@ struct TermFind {
     open: bool,
     query: Entity<CodeEditor>,
     _query_sub: gpui::Subscription,
-    /// The query, compiled (`None` while empty).
+    /// The query as last searched for, and compiled (`None` while empty).
+    text: String,
     regex: Option<RegexSearch>,
+    /// Where a scoped find looks ([`TerminalView::scoped_find`]).
+    scope: FindScope,
+    /// Matches in the scope's other tabs before and after this one, as Kyde last counted them
+    /// (`None` = not counted yet for this query + scope).
+    elsewhere: Option<(usize, usize)>,
+    /// It was opened here from another tab: the query box takes focus as this tab is shown.
+    claim_focus: bool,
     /// The current match where it was found, with the scrollback size and scroll offset then
     /// (the offset adjusted for our own scrolling since) — see [`shifted`].
     cur: Option<(Match, usize, isize)>,
@@ -372,6 +386,40 @@ enum Pick {
     Newer,
     /// Just re-count, staying on the current match.
     Keep,
+    /// The oldest / newest match: a find stepping in from the tab above / below.
+    Oldest,
+    Newest,
+}
+
+/// Where an agent tab's find looks: only this tab (⌘F), its worktree's tabs, or every
+/// worktree's (⌘⇧F). Past a tab's first / last match the wider two go on into the next tab
+/// that has one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum FindScope {
+    #[default]
+    Tab,
+    Worktree,
+    All,
+}
+
+/// A step went past this tab's first / last match (a scoped find hands it on instead).
+struct AtEdge;
+
+/// A terminal's buffer, to search off the UI thread (Kyde counts a scoped find's matches in
+/// the other tabs).
+#[derive(Clone)]
+pub struct Searcher(Arc<FairMutex<Term<EventProxy>>>);
+
+/// How many times each of `terms` holds `query`, as the find bar matches it (literal,
+/// smart-case). Locks each in turn — run it off the UI thread.
+pub fn count_matches(terms: &[Searcher], query: &str) -> Vec<usize> {
+    let Ok(mut regex) = RegexSearch::new(&literal_regex(query)) else {
+        return vec![0; terms.len()];
+    };
+    terms
+        .iter()
+        .map(|s| scan_all(&s.0.lock(), &mut regex).len())
+        .collect()
 }
 
 impl TerminalView {
@@ -568,6 +616,8 @@ impl TerminalView {
             scroll_px: 0.0,
             sb_drag: None,
             find: None,
+            scoped_find: false,
+            find_all_key: None,
         }
     }
 
@@ -1096,10 +1146,16 @@ impl TerminalView {
         self.find.as_ref().is_some_and(|f| f.open)
     }
 
-    /// Open the find bar (⌘F) with its query selected, so typing replaces it.
-    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the find bar with its query selected, so typing replaces it — a scoped one on
+    /// `scope` (⌘F this worktree, ⌘⇧F every worktree).
+    fn open_find(&mut self, scope: FindScope, window: &mut Window, cx: &mut Context<Self>) {
+        let scoped = self.scoped_find;
         let f = self.find_state(cx);
         f.open = true;
+        if scoped && f.scope != scope {
+            f.scope = scope;
+            f.elsewhere = None;
+        }
         let query = f.query.clone();
         query.update(cx, |e, cx| {
             let n = e.text().len();
@@ -1109,6 +1165,7 @@ impl TerminalView {
         if let Some(m) = self.find_scan(Pick::Fresh) {
             self.reveal(&m);
         }
+        self.find_changed(cx);
         cx.notify();
     }
 
@@ -1130,7 +1187,11 @@ impl TerminalView {
                 open: false,
                 query,
                 _query_sub: sub,
+                text: String::new(),
                 regex: None,
+                scope: FindScope::default(),
+                elsewhere: None,
+                claim_focus: false,
                 cur: None,
                 count: 0,
                 index: 0,
@@ -1142,11 +1203,17 @@ impl TerminalView {
 
     /// Close the find bar and hand the keyboard back to the shell.
     fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.end_find(cx);
+        window.focus(&self.focus);
+    }
+
+    /// Close the find bar (a scoped find moved on to another tab).
+    pub fn end_find(&mut self, cx: &mut Context<Self>) {
         if let Some(f) = self.find.as_mut() {
             f.open = false;
             f.cur = None;
+            f.claim_focus = false;
         }
-        window.focus(&self.focus);
         cx.notify();
     }
 
@@ -1156,32 +1223,170 @@ impl TerminalView {
             return;
         };
         let q = f.query.read(cx).text().to_string();
+        // Already searched for (a find carried in from another tab sets the box itself).
+        if q == f.text {
+            return;
+        }
         f.regex = (!q.is_empty())
             .then(|| RegexSearch::new(&literal_regex(&q)).ok())
             .flatten();
+        f.text = q;
         f.cur = None;
+        f.elsewhere = None;
         if let Some(m) = self.find_scan(Pick::Fresh) {
             self.reveal(&m);
+        }
+        self.find_changed(cx);
+        cx.notify();
+    }
+
+    /// A find that reaches other tabs changed query or scope: Kyde counts them again.
+    fn find_changed(&self, cx: &mut Context<Self>) {
+        if self.find_reaches_out() {
+            cx.emit(TerminalEvent::FindChanged);
+        }
+    }
+
+    /// The find searches other tabs too (a scoped find wider than this tab).
+    fn find_reaches_out(&self) -> bool {
+        self.scoped_find
+            && self
+                .find
+                .as_ref()
+                .is_some_and(|f| f.scope != FindScope::Tab)
+    }
+
+    /// Search only this tab, its worktree's or every worktree's (the bar's scope pills).
+    fn set_find_scope(&mut self, scope: FindScope, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut().filter(|f| f.scope != scope) {
+            f.scope = scope;
+            f.elsewhere = None;
+            self.find_changed(cx);
+            cx.notify();
+        }
+    }
+
+    /// Step to the next match up or down the buffer and bring it into view. Past the first /
+    /// last match a scoped find goes on into the next tab that has one (Kyde picks it) —
+    /// unless none has, when it wraps around here.
+    fn find_step(&mut self, pick: Pick, cx: &mut Context<Self>) {
+        let hand_on = self.find_reaches_out()
+            && self
+                .find
+                .as_ref()
+                .is_some_and(|f| f.elsewhere != Some((0, 0)));
+        match self.find_scan_to(pick, !hand_on) {
+            Ok(Some(m)) => self.reveal(&m),
+            Ok(None) => {}
+            Err(AtEdge) => cx.emit(TerminalEvent::FindOut {
+                older: matches!(pick, Pick::Older),
+            }),
         }
         cx.notify();
     }
 
-    /// Step to the next match up or down the buffer and bring it into view.
-    fn find_step(&mut self, pick: Pick, cx: &mut Context<Self>) {
+    /// No other tab had a match for a scoped find stepping past this tab's first / last:
+    /// wrap around here after all.
+    pub fn find_wrap(&mut self, older: bool, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            f.elsewhere = Some((0, 0));
+        }
+        self.find_step(if older { Pick::Older } else { Pick::Newer }, cx);
+    }
+
+    /// A scoped find stepping on from another tab: search for `query` on `scope` here, and
+    /// land on the newest match (stepping `older`, up from the tab below) or the oldest.
+    /// `false` (nothing changed) when this tab has no match.
+    pub fn find_land(
+        &mut self,
+        query: &str,
+        scope: FindScope,
+        older: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Ok(mut regex) = RegexSearch::new(&literal_regex(query)) else {
+            return false;
+        };
+        if scan_all(&self.term.lock(), &mut regex).is_empty() {
+            return false;
+        }
+        let f = self.find_state(cx);
+        let input = f.query.clone();
+        (f.open, f.claim_focus, f.scope, f.elsewhere, f.cur) = (true, true, scope, None, None);
+        f.text = query.to_string();
+        f.regex = Some(regex);
+        input.update(cx, |e, cx| {
+            if e.text() != query {
+                e.set_content(query.to_string(), crate::Lang::PlainText, cx);
+            }
+            e.select_range(0..query.len(), cx);
+        });
+        let pick = if older { Pick::Newest } else { Pick::Oldest };
         if let Some(m) = self.find_scan(pick) {
             self.reveal(&m);
         }
+        self.find_changed(cx);
         cx.notify();
+        true
+    }
+
+    /// An open scoped find's query and scope (`None` when closed or empty).
+    pub fn find_query(&self) -> Option<(String, FindScope)> {
+        self.find
+            .as_ref()
+            .filter(|f| f.open && self.scoped_find && f.regex.is_some())
+            .map(|f| (f.text.clone(), f.scope))
+    }
+
+    /// Kyde counted the scope's other tabs: `before` / `after` this one, in its order.
+    pub fn set_find_elsewhere(&mut self, before: usize, after: usize, cx: &mut Context<Self>) {
+        if let Some(f) = self.find.as_mut() {
+            f.elsewhere = Some((before, after));
+            cx.notify();
+        }
+    }
+
+    /// What to focus as this tab is shown: the find's query box when a find just stepped in
+    /// from another tab, else the terminal.
+    pub fn focus_target(&mut self, cx: &App) -> FocusHandle {
+        match self.find.as_mut().filter(|f| f.open && f.claim_focus) {
+            Some(f) => {
+                f.claim_focus = false;
+                f.query.read(cx).focus_handle.clone()
+            }
+            None => self.focus.clone(),
+        }
+    }
+
+    /// Its buffer, to count a scoped find's matches in off the UI thread.
+    pub fn searcher(&self) -> Searcher {
+        Searcher(self.term.clone())
+    }
+
+    /// Print `text` straight into the grid, as if the program in it had.
+    #[cfg(test)]
+    pub(crate) fn feed(&self, text: &str) {
+        let mut parser: alacritty_terminal::vte::ansi::Processor =
+            alacritty_terminal::vte::ansi::Processor::new();
+        parser.advance(&mut *self.term.lock(), text.as_bytes());
     }
 
     /// Search the whole buffer for the query and land on the match `pick` says — returned,
     /// for scrolling to (`None` with no match, or for a [`Pick::Keep`] re-count).
     fn find_scan(&mut self, pick: Pick) -> Option<Match> {
-        let f = self.find.as_mut()?;
+        self.find_scan_to(pick, true).ok().flatten()
+    }
+
+    /// [`Self::find_scan`]; a step past the first / last match wraps around with `wrap`, else
+    /// it's an [`AtEdge`] (nothing changed).
+    fn find_scan_to(&mut self, pick: Pick, wrap: bool) -> Result<Option<Match>, AtEdge> {
+        let Some(f) = self.find.as_mut() else {
+            return Ok(None);
+        };
         f.scanned = Some(Instant::now());
         let Some(regex) = f.regex.as_mut() else {
             (f.cur, f.count, f.index) = (None, 0, 0);
-            return None;
+            return Ok(None);
         };
         let term = self.term.lock();
         let all = scan_all(&term, regex);
@@ -1192,14 +1397,26 @@ impl TerminalView {
         drop(term);
         let n = all.len();
         let last = n.checked_sub(1);
+        let stepping = matches!(pick, Pick::Older | Pick::Newer);
         let i = match (pick, &now) {
             _ if n == 0 => None,
             (Pick::Keep, Some(c)) => all.iter().position(|m| m == c),
             (Pick::Keep, None) => None,
             (Pick::Fresh, _) => all.iter().rposition(|m| m.start().line <= bottom).or(last),
-            (Pick::Older, Some(c)) => all.iter().rposition(|m| m.start() < c.start()).or(last),
-            (Pick::Newer, Some(c)) => all.iter().position(|m| m.start() > c.start()).or(Some(0)),
-            (Pick::Older | Pick::Newer, None) => last,
+            (Pick::Older, Some(c)) => all.iter().rposition(|m| m.start() < c.start()),
+            (Pick::Newer, Some(c)) => all.iter().position(|m| m.start() > c.start()),
+            (Pick::Older | Pick::Newer, None) | (Pick::Newest, _) => last,
+            (Pick::Oldest, _) => Some(0),
+        };
+        // Stepped off the end: wrap around to the other end, or tell the caller.
+        let i = match i {
+            None if stepping && !wrap => return Err(AtEdge),
+            None if stepping && n > 0 => Some(if matches!(pick, Pick::Older) {
+                n - 1
+            } else {
+                0
+            }),
+            i => i,
         };
         f.count = n;
         f.index = i.map_or(0, |i| n - i);
@@ -1207,7 +1424,7 @@ impl TerminalView {
         // A re-count that can't find the current match any more (cleared, scrolled off the
         // top, or lost track of once the scrollback is full) drops it.
         f.cur = m.clone().map(|m| (m, hist, off as isize));
-        m.filter(|_| !matches!(pick, Pick::Keep))
+        Ok(m.filter(|_| !matches!(pick, Pick::Keep)))
     }
 
     /// Scroll `m` to the middle of the view, unless it's already all on screen.
@@ -1679,6 +1896,13 @@ pub enum TerminalEvent {
         path: PathBuf,
         line: Option<u32>,
     },
+    /// A scoped find's query or scope changed, or it opened ([`TerminalView::scoped_find`]).
+    FindChanged,
+    /// A scoped find stepped past this tab's oldest (`older`) / newest match: go on into the
+    /// next tab with one, or [`TerminalView::find_wrap`] when none has.
+    FindOut {
+        older: bool,
+    },
 }
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
@@ -1714,8 +1938,17 @@ impl Render for TerminalView {
             }))
             // ⌘F searches the scrollback. While the bar is open, Enter / ⌘G step up to older
             // matches, ⇧Enter / ⇧⌘G back down, Escape closes it; closed, they're the app's.
+            // In an agent tab Find in Files (⌘⇧F) opens it on every worktree's tabs; elsewhere
+            // that's still the app's.
             .on_action(cx.listener(|this, _: &crate::TerminalFind, window, cx| {
-                this.open_find(window, cx);
+                this.open_find(FindScope::Tab, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::FindInFiles, window, cx| {
+                if this.scoped_find {
+                    this.open_find(FindScope::All, window, cx);
+                } else {
+                    cx.propagate();
+                }
             }))
             // ⌘↑ / ⌘↓ step through the prompts you sent an agent (Terminal.app's marks keys).
             .on_action(cx.listener(|this, _: &crate::TerminalPrevPrompt, _w, cx| {
@@ -1918,23 +2151,64 @@ impl TerminalView {
             }))
     }
 
-    /// The find bar, floated at the top right over the output.
+    /// The find bar, floated at the top right over the output. A scoped find counts the
+    /// other tabs' matches in too, as if their buffers were one: this tab's after those above
+    /// it, the current match counted up from the very newest.
     fn render_find(&self, f: &TermFind, cx: &mut Context<Self>) -> impl IntoElement {
         let (next, prev) = crate::FIND_STEP_KEYS;
-        let bar = crate::ui::find::Bar::new(
+        let (total, current) = match f.elsewhere.filter(|_| self.find_reaches_out()) {
+            Some((before, after)) => (
+                before + f.count + after,
+                if f.index > 0 { after + f.index } else { 0 },
+            ),
+            None => (f.count, f.index),
+        };
+        let mut bar = crate::ui::find::Bar::new(
             "term-find",
             f.query.clone(),
-            crate::ui::find::match_label(f.regex.is_some(), f.count, f.index),
-        )
-        .on_up(
-            format!("Older match  ({next})"),
-            cx.listener(|this, _e, _w, cx| this.find_step(Pick::Older, cx)),
-        )
-        .on_down(
-            format!("Newer match  ({prev})"),
-            cx.listener(|this, _e, _w, cx| this.find_step(Pick::Newer, cx)),
-        )
-        .on_close(cx.listener(|this, _e, window, cx| this.close_find(window, cx)));
+            crate::ui::find::match_label(f.regex.is_some(), total, current),
+        );
+        if self.scoped_find {
+            let here = crate::pretty_key(&format!("{}-f", crate::TERMINAL_MOD));
+            let all = self
+                .find_all_key
+                .as_ref()
+                .map_or(String::new(), |k| format!("  ({k})"));
+            for (scope, label, tip) in [
+                (
+                    FindScope::Tab,
+                    "This tab",
+                    format!("Search this tab  ({here})"),
+                ),
+                (
+                    FindScope::Worktree,
+                    "This worktree",
+                    "Search this worktree's tabs".to_string(),
+                ),
+                (
+                    FindScope::All,
+                    "All worktrees",
+                    format!("Search every worktree's tabs{all}"),
+                ),
+            ] {
+                bar = bar.scope(
+                    label,
+                    f.scope == scope,
+                    tip,
+                    cx.listener(move |this, _e, _w, cx| this.set_find_scope(scope, cx)),
+                );
+            }
+        }
+        let bar = bar
+            .on_up(
+                format!("Older match  ({next})"),
+                cx.listener(|this, _e, _w, cx| this.find_step(Pick::Older, cx)),
+            )
+            .on_down(
+                format!("Newer match  ({prev})"),
+                cx.listener(|this, _e, _w, cx| this.find_step(Pick::Newer, cx)),
+            )
+            .on_close(cx.listener(|this, _e, window, cx| this.close_find(window, cx)));
         crate::ui::find::floating(bar)
     }
 

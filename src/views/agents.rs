@@ -16,6 +16,8 @@ use std::time::Instant;
 mod ci;
 #[cfg(feature = "terminal")]
 mod context;
+#[cfg(feature = "terminal")]
+mod find;
 
 /// How often the status/cleanup ticker runs, and how many ticks between cleanup sweeps.
 #[cfg(feature = "terminal")]
@@ -2425,8 +2427,14 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) {
         let spawned_at = std::time::SystemTime::now();
-        // The agent's input box sits at the bottom of the pane, herdr-style.
-        view.update(cx, |v, _| v.anchor_bottom = true);
+        // The agent's input box sits at the bottom of the pane, herdr-style. Its find reaches
+        // the other agent tabs (`find`).
+        let all_key = self.agents_find_all_key();
+        view.update(cx, |v, _| {
+            v.anchor_bottom = true;
+            v.scoped_find = true;
+            v.find_all_key = all_key;
+        });
         // Looked up per event: the tab moves when its agent moves to another worktree.
         cx.subscribe(&view, move |this, v, ev, cx| {
             let Some(key) = this.agents_wt_of(&v) else {
@@ -2439,6 +2447,10 @@ impl Kyde {
                 terminal::TerminalEvent::OpenScrollback => this.agents_open_scrollback(&v, cx),
                 terminal::TerminalEvent::OpenFile { path, line } => {
                     this.open_terminal_file(path.clone(), *line, cx);
+                }
+                terminal::TerminalEvent::FindChanged => this.agents_find_recount(&key, &v, cx),
+                terminal::TerminalEvent::FindOut { older } => {
+                    this.agents_find_out(&key, &v, *older, cx);
                 }
                 terminal::TerminalEvent::CloseRequested => {
                     let Some(i) = this
@@ -4449,13 +4461,15 @@ impl Kyde {
     }
 
     /// Focus the visible agent tab (now and next frame — a just-spawned tab isn't in the
-    /// window tree yet; same gotcha as `focus_active_terminal`), or the app root if none.
+    /// window tree yet; same gotcha as `focus_active_terminal`), or the app root if none. A
+    /// find that just stepped into it keeps the keyboard in its query box.
     pub(crate) fn agents_focus_visible(&self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((wt, i)) = self.agents_visible_tab() else {
             window.focus(&self.focus_handle);
             return;
         };
-        let handle = self.agents.tabs[wt].tabs[i].view.read(cx).handle();
+        let view = self.agents.tabs[wt].tabs[i].view.clone();
+        let handle = view.update(cx, |v, cx| v.focus_target(cx));
         window.focus(&handle);
         window.defer(cx, move |window, _cx| window.focus(&handle));
     }

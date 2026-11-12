@@ -1539,6 +1539,9 @@ struct AgentsView {
     /// Live tabs per worktree path.
     #[cfg(feature = "terminal")]
     tabs: std::collections::HashMap<PathBuf, AgentTabs>,
+    /// A find across agent tabs: its matches per tab, as last counted.
+    #[cfg(feature = "terminal")]
+    find: AgentFind,
     /// Worktrees being checked out — each a pending row, and a setup screen when selected.
     creating: Vec<Creating>,
     /// A project / worktree row being dragged to a new place in the sidebar.
@@ -1780,6 +1783,18 @@ struct PrFeedback {
     preparing: bool,
     /// A check that its agent still runs is in flight.
     checking: bool,
+}
+
+/// A find across agent tabs (this worktree's or every worktree's — `terminal::FindScope`):
+/// how many matches each tab held for `query` when last counted.
+#[cfg(feature = "terminal")]
+#[derive(Default)]
+struct AgentFind {
+    /// Bumped per count asked for; a count lands only if no newer one was.
+    gen: u64,
+    query: String,
+    /// Matches per tab id.
+    counts: std::collections::HashMap<String, usize>,
 }
 
 /// One worktree's live tabs, left→right, and which one is shown.
@@ -2062,6 +2077,8 @@ impl AgentsView {
             sidebar_w: 330.0,
             #[cfg(feature = "terminal")]
             tabs: std::collections::HashMap::new(),
+            #[cfg(feature = "terminal")]
+            find: AgentFind::default(),
             creating: Vec::new(),
             drag: None,
             #[cfg(feature = "terminal")]
@@ -8188,6 +8205,103 @@ mod gpui_smoke_tests {
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
             })
             .unwrap();
+    }
+
+    /// An agent tab's ⌘F finds in just that tab: stepping past its matches (none here) stays
+    /// put. ⌘⇧F widens it to every worktree's tabs: the step then shows the worktree whose tab
+    /// has one, its find carried over with the keyboard in its box — and with no other tab to
+    /// go on to, the next step wraps in place.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_find_in_all_worktrees_steps_into_the_next(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let other = dir.with_extension("other");
+        std::fs::create_dir_all(&other).unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.agents.cfg.setup_done = true; // past the first-run setup, tabs take focus
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(other.clone(), cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let (here, there) = handle
+            .update(cx, |k, _w, cx| {
+                let (here, there) = (
+                    k.agents.tabs[&dir].tabs[0].view.clone(),
+                    k.agents.tabs[&other].tabs[0].view.clone(),
+                );
+                // Scrolled up into its history, clear of what its shell prints.
+                there
+                    .read(cx)
+                    .feed(&format!("needle\r\n{}", "\r\n".repeat(40)));
+                (here, there)
+            })
+            .unwrap();
+        cx.refresh().unwrap(); // the selected worktree's tab takes focus
+        cx.run_until_parked();
+        let window: gpui::AnyWindowHandle = handle.into();
+        let act = |cx: &mut TestAppContext, a: Box<dyn gpui::Action>| {
+            cx.update_window(window, |_, w, cx| w.dispatch_action(a, cx))
+                .unwrap();
+            cx.refresh().unwrap();
+            cx.run_until_parked();
+        };
+        act(cx, Box::new(TerminalFind));
+        cx.simulate_input(window, "needle");
+        let tab = Some(("needle".to_string(), terminal::FindScope::Tab));
+        let all = Some(("needle".to_string(), terminal::FindScope::All));
+        assert_eq!(
+            handle
+                .read_with(cx, |_, cx| here.read(cx).find_query())
+                .unwrap(),
+            tab
+        );
+        act(cx, Box::new(FindNext));
+        handle
+            .read_with(cx, |k, _| {
+                assert_eq!(
+                    k.agents.selected.as_deref(),
+                    Some(dir.as_path()),
+                    "⌘F: this tab"
+                );
+            })
+            .unwrap();
+        act(cx, Box::new(FindInFiles));
+        assert_eq!(
+            handle
+                .read_with(cx, |_, cx| here.read(cx).find_query())
+                .unwrap(),
+            all
+        );
+        handle
+            .update(cx, |_k, w, cx| w.dispatch_action(Box::new(FindNext), cx))
+            .unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                assert_eq!(k.agents.selected.as_deref(), Some(other.as_path()));
+                assert_eq!(there.read(cx).find_query(), all);
+                assert_eq!(here.read(cx).find_query(), None, "it left this tab");
+                let tab = there.read(cx).handle();
+                assert!(
+                    tab.contains_focused(w, cx) && !tab.is_focused(w),
+                    "the keyboard is in its find box"
+                );
+                w.dispatch_action(Box::new(FindNext), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.agents.selected.as_deref(), Some(other.as_path()));
+                assert_eq!(there.read(cx).find_query(), all, "wrapped in place");
+            })
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     /// Scratch: a new scratch tab gets a folder of its own — a row under Scratch, its agent

@@ -1,6 +1,7 @@
 //! The find bar every ⌘F shares — terminal scrollback, the editor, diff panes: a query box, the
-//! match count, ↑ / ↓ / × and (for find / replace) a replace row, in a small panel floated at
-//! the top right of what it searches.
+//! match count, ↑ / ↓ / ×, (for find / replace) a replace row and (where it can search more
+//! than one place) a row of scopes, in a small panel floated at the top right of what it
+//! searches.
 use gpui::prelude::*;
 use gpui::{
     div, px, svg, AnyElement, App, Div, ElementId, MouseButton, MouseDownEvent, SharedString,
@@ -50,6 +51,7 @@ pub struct Bar {
     down: Option<(SharedString, OnClick)>,
     close: Option<OnClick>,
     replace: Option<(AnyElement, OnClick, OnClick)>,
+    scopes: Vec<(SharedString, bool, SharedString, OnClick)>,
 }
 
 impl Bar {
@@ -68,6 +70,7 @@ impl Bar {
             down: None,
             close: None,
             replace: None,
+            scopes: Vec::new(),
         }
     }
 
@@ -112,6 +115,21 @@ impl Bar {
         all: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.replace = Some((input.into_any_element(), Box::new(one), Box::new(all)));
+        self
+    }
+
+    /// One place it can search, as a pill in a row under the query: `label`, filled when
+    /// `active`, `tip` on hover, `f` on click. Call once per scope, in order.
+    #[must_use]
+    pub fn scope(
+        mut self,
+        label: impl Into<SharedString>,
+        active: bool,
+        tip: impl Into<SharedString>,
+        f: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.scopes
+            .push((label.into(), active, tip.into(), Box::new(f)));
         self
     }
 }
@@ -203,6 +221,23 @@ impl RenderOnce for Bar {
                 .child(text_button("replace-one", "Replace", one))
                 .child(text_button("replace-all", "All", all))
         });
+        let scope_row = (!self.scopes.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_size(px(t.ui_font_size - 1.0))
+                .children(self.scopes.into_iter().enumerate().map(
+                    |(i, (label, active, tip, f))| {
+                        crate::tab_pill(("find-scope", i), label, 0, active)
+                            .px_2()
+                            .py_0p5()
+                            .tooltip(crate::tip(tip))
+                            .on_mouse_down(MouseButton::Left, f)
+                    },
+                ))
+        });
         div()
             .id(self.id)
             .occlude()
@@ -224,5 +259,6 @@ impl RenderOnce for Bar {
             .text_size(px(t.ui_font_size))
             .child(find_row)
             .children(replace_row)
+            .children(scope_row)
     }
 }

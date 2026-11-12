@@ -365,7 +365,9 @@ impl Kyde {
                 this.open_terminal_file(path.clone(), *line, cx);
             }
             crate::terminal::TerminalEvent::Submitted
-            | crate::terminal::TerminalEvent::OpenScrollback => {}
+            | crate::terminal::TerminalEvent::OpenScrollback
+            | crate::terminal::TerminalEvent::FindChanged
+            | crate::terminal::TerminalEvent::FindOut { .. } => {}
         })
         .detach();
         self.term.tabs.push(view);
