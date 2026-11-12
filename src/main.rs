@@ -4934,7 +4934,7 @@ mod gpui_smoke_tests {
     /// `refresh` external-change scan (and the boot-time store open) would otherwise land
     /// there. Idempotent + serialized (`Once`), so parallel tests agree on one value that's
     /// in place before any `Kyde::new` reads it.
-    fn isolate_history() {
+    pub(crate) fn isolate_history() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
             let dir = std::env::temp_dir().join(format!("kyde-test-xdg-{}", std::process::id()));

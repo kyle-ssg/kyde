@@ -2215,17 +2215,11 @@ impl Kyde {
     /// work already there when `blank` (a seeded tab's worktree was made for its task) — see
     /// `agents::task_brief`. `None` without the hook.
     fn agents_task_brief(&self, wt: &Path, blank: bool, cx: &gpui::App) -> Option<String> {
-        // The hook is what hands it over; a scratch folder has no worktrees to move to.
-        if !self.agents.cfg.claude_hooks || self.agents.cfg.is_scratch(wt) {
-            return None;
+        let seeded = crate::agents::seeded_brief(&self.agents.cfg, wt)?;
+        if !blank {
+            return Some(seeded);
         }
         let mode = self.agents.cfg.new_task;
-        if !blank {
-            return Some(crate::agents::task_brief(
-                &crate::agents::Busy::default(),
-                mode,
-            ));
-        }
         let git = self.agents.git.get(wt).copied().unwrap_or_default();
         let busy = crate::agents::Busy {
             branch: self.agents.branches.get(wt).cloned(),

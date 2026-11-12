@@ -1523,6 +1523,16 @@ pub(crate) fn task_brief(b: &Busy, mode: kyde_config::agents::NewTask) -> String
     )
 }
 
+/// The note for an agent started on a task in `wt` (a seeded tab, `ky agent new`): only how
+/// to move to another worktree — see [`task_brief`]. `None` without Kyde's hook (nothing
+/// hands it over) or in Scratch (no worktrees to move to).
+pub(crate) fn seeded_brief(
+    cfg: &kyde_config::agents::AgentsCfg,
+    wt: &std::path::Path,
+) -> Option<String> {
+    (cfg.claude_hooks && !cfg.is_scratch(wt)).then(|| task_brief(&Busy::default(), cfg.new_task))
+}
+
 /// The worktree a Claude Code session is in, canonical: the one holding `cwd`, when the
 /// session file `transcript` is in that worktree's Claude Code project folder (Claude Code's
 /// `EnterWorktree` moves both; a shell `cd` leaves the session behind — `None` then). Stats a
