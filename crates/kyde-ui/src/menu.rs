@@ -52,6 +52,7 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         "Pull Requests" => "icons/git-pull-request.svg",
         "CI" => "icons/circle-play.svg",
         "New Group" => "icons/folder-plus.svg",
+        "Add Project" => "icons/plus.svg",
         "Remove Group" | "Remove from Group" => "icons/x.svg",
         _ if l.starts_with("Move to") => "icons/folder.svg",
         _ if l.starts_with("Close") => "icons/x.svg",

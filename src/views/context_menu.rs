@@ -667,6 +667,7 @@ impl Kyde {
             MenuTarget::AgentRow(wt) => out = self.agents_row_menu(wt),
             MenuTarget::AgentSpace(space) => out = self.agents_space_menu(space),
             MenuTarget::AgentGroup(id) => out = self.agents_group_menu(*id),
+            MenuTarget::AgentsAdd => out = Self::agents_add_menu(),
             #[cfg(feature = "terminal")]
             MenuTarget::AgentTab(wt, id) => out = self.agents_tab_menu(wt, id),
             // One menu of the menu bar (Linux).
@@ -838,11 +839,14 @@ impl Kyde {
             // upward/leftward instead of being clipped). `deferred` paints it above the rest.
             .child({
                 // Branch actions fly out LEFT of the branch popup: `at` is the popup's left
-                // edge, so anchor the menu's top-RIGHT corner there (every other menu hangs
-                // from its top-left at the cursor).
+                // edge, so anchor the menu's top-RIGHT corner there. The Agents sidebar's
+                // footer ⊕ sits at the window's bottom, so its menu stands on `at` (bottom-
+                // left). Every other menu hangs from its top-left at the cursor.
                 let mut anchored = gpui::anchored().position(menu.at);
-                if matches!(menu.target, MenuTarget::Branch(_)) {
-                    anchored = anchored.anchor(gpui::Corner::TopRight);
+                match menu.target {
+                    MenuTarget::Branch(_) => anchored = anchored.anchor(gpui::Corner::TopRight),
+                    MenuTarget::AgentsAdd => anchored = anchored.anchor(gpui::Corner::BottomLeft),
+                    _ => {}
                 }
                 gpui::deferred(anchored.snap_to_window_with_margin(px(8.0)).child(panel))
                     .with_priority(1)
