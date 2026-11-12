@@ -273,7 +273,7 @@ impl Render for Kyde {
                 Mode::Commit => self.render_commit(ui, fs, window, cx),
                 Mode::Browse => self.render_browse(ui, fs, window, cx),
                 Mode::History => self.render_history(ui, fs, window, cx),
-                Mode::Agents => self.render_agents(ui, cx),
+                Mode::Agents => self.render_agents(ui, window, cx),
             }
         };
         // Frame gap around the island panels (rail provides the left chrome).

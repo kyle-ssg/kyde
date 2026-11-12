@@ -77,6 +77,8 @@ const ROW_PAD_Y: f32 = 1.0;
 const CHEVRON_W: f32 = 14.0;
 const DOT: f32 = 10.0;
 const GAP: f32 = 8.0;
+/// The context panel's width, beside a worktree's tabs.
+const CONTEXT_W: f32 = 320.0;
 /// Space between two tabs of a worktree's strip (px) — the drop line sits in the middle.
 #[cfg(feature = "terminal")]
 const AGENT_TAB_GAP: f32 = 4.0;
@@ -4652,13 +4654,11 @@ impl Kyde {
     pub(crate) fn render_agents(
         &mut self,
         ui: &'static str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         #[cfg(feature = "terminal")]
-        {
-            self.agents_mark_seen();
-            self.agents_reveal_tab();
-        }
+        self.agents_mark_seen();
         if self
             .agents
             .cfg
@@ -4728,7 +4728,7 @@ impl Kyde {
                 d.child(self.render_agents_sidebar(ui, cx)).child(divider)
             })
             .child(if self.agents.side_tab == SideTab::Code {
-                self.render_agents_main(ui, cx)
+                self.render_agents_main(ui, window, cx)
             } else {
                 self.render_agents_gh_detail(ui, cx)
             })
@@ -4760,36 +4760,6 @@ impl Kyde {
                 };
                 tab.shown = AgentState::of_tab(&signals, now);
             }
-        }
-    }
-
-    /// Keep the shown tab in sight. The strip scrolls sideways once its tabs outgrow the pane
-    /// (`render_agents_tabs`), so the tab or background agent that just came on screen —
-    /// clicked, cycled to, opened, jumped to — is scrolled into view. Only when that changes:
-    /// in between, the wheel is free to look along the strip.
-    #[cfg(feature = "terminal")]
-    fn agents_reveal_tab(&mut self) {
-        let Some(wt) = self.agents.selected.clone() else {
-            return;
-        };
-        let group = self.agents.tabs.get(&wt);
-        // Its place in the strip: the tabs first, then the background agents.
-        let shown = match self.agents_visible_sub() {
-            Some(id) => self
-                .agents_subs_in(&wt)
-                .map(|(.., s)| s)
-                .chain(self.agents_done_in(&wt).map(|d| &d.sub))
-                .position(|s| s.id == id)
-                .map(|k| (group.map_or(0, |g| g.tabs.len()) + k, id.to_string())),
-            None => group.and_then(|g| Some((g.active, g.tabs.get(g.active)?.id.clone()))),
-        };
-        let Some((ix, id)) = shown else {
-            return;
-        };
-        let now = (wt, id);
-        if self.agents.tab_revealed.as_ref() != Some(&now) {
-            self.agents.tab_scroll.scroll_to_item(ix);
-            self.agents.tab_revealed = Some(now);
         }
     }
 
@@ -4910,16 +4880,7 @@ impl Kyde {
         // Each tab's pill width (full label, short label), measured: a pill's padding +
         // border, its label, and its count badge when it has one.
         let pill_w = {
-            let ts = cx.text_system().clone();
-            let font = ts.resolve_font(&gpui::font(ui));
-            let text_w = move |s: &str, size: f32| -> f32 {
-                s.chars()
-                    .map(|c| {
-                        ts.advance(font, px(size), c)
-                            .map_or(size * 0.6, |a| f32::from(a.width))
-                    })
-                    .sum()
-            };
+            let text_w = text_width(cx, ui);
             move |label: &str, count: usize| {
                 let badge = if count > 0 {
                     6.0 + 10.0 + text_w(&count.to_string(), 10.0)
@@ -7691,7 +7652,12 @@ impl Kyde {
 
     /// The selected worktree: its tab strip (with Open in editor at the right) and the active
     /// terminal. No header — the sidebar row already says which worktree this is.
-    fn render_agents_main(&self, ui: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_agents_main(
+        &self,
+        ui: &'static str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let t = theme::get();
         let fs = t.ui_font_size;
         if let Some(c) = self
@@ -7757,7 +7723,7 @@ impl Kyde {
                             .flex_col()
                             .flex_1()
                             .min_w_0()
-                            .child(self.render_agents_tabs(&wt, ui, cx)),
+                            .child(self.render_agents_tabs(&wt, ui, window, cx)),
                     )
                     .when(self.agents.context_open, |d| {
                         d.child(div().w(px(1.0)).h_full().flex_none().bg(t.divider))
@@ -7765,6 +7731,74 @@ impl Kyde {
                     }),
             )
             .into_any_element()
+    }
+
+    /// The selected worktree's pane (its tab strip's) width: the window less the rail (an
+    /// Agents-only window's frame gap instead), the sidebar and its divider, the context panel
+    /// and the frame's right gap — as `render`, `render_agents` and `render_agents_main` lay
+    /// them out.
+    #[cfg(feature = "terminal")]
+    fn agents_pane_w(&self, window: &Window) -> f32 {
+        let win_w = f32::from(window.viewport_size().width);
+        let left = if self.agents_only() {
+            theme::FRAME_GAP
+        } else {
+            RAIL_W
+        };
+        let sidebar = if self.agents.sidebar_hidden {
+            0.0
+        } else {
+            self.agents.sidebar_w + theme::FRAME_GAP
+        };
+        let context = if self.agents.context_open {
+            1.0 + CONTEXT_W
+        } else {
+            0.0
+        };
+        win_w - left - theme::FRAME_GAP - sidebar - context
+    }
+
+    /// The strip's `▾` menu: the tabs it had no room for, each led by its status dot.
+    #[cfg(feature = "terminal")]
+    pub(crate) fn agents_more_tabs_menu(
+        &self,
+        wt: &Path,
+        tabs: &[(StripTab, SharedString, AgentState)],
+    ) -> Vec<MenuEntry> {
+        tabs.iter()
+            .map(|(tab, title, state)| {
+                let (wt, tab) = (wt.to_path_buf(), tab.clone());
+                MenuEntry::Item {
+                    label: title.clone(),
+                    lead: crate::views::MenuLead::Status(*state),
+                    dim: false,
+                    run: std::rc::Rc::new(move |this, _w, cx| {
+                        this.agents_show_strip_tab(&wt, &tab, cx);
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// Bring one of worktree `wt`'s strip tabs on screen, as clicking it does.
+    #[cfg(feature = "terminal")]
+    fn agents_show_strip_tab(&mut self, wt: &Path, tab: &StripTab, cx: &mut Context<Self>) {
+        match tab {
+            StripTab::Tab(id) => {
+                if let Some(g) = self.agents.tabs.get_mut(wt) {
+                    if let Some(i) = g.tabs.iter().position(|t| &t.id == id) {
+                        g.active = i;
+                    }
+                }
+                self.agents.sub_shown = None;
+                self.agents.focus_pending = true;
+            }
+            StripTab::Sub(id) => {
+                self.agents.sub_shown = Some(id.clone());
+                self.agents.sub_scroll.scroll_to_bottom();
+            }
+        }
+        cx.notify();
     }
 
     /// The context panel beside the terminal: what this worktree is (its agent's AI title,
@@ -7814,7 +7848,7 @@ impl Kyde {
         });
         div()
             .id("agents-context")
-            .w(px(320.0))
+            .w(px(CONTEXT_W))
             .flex_none()
             .h_full()
             .overflow_y_scroll()
@@ -7915,6 +7949,7 @@ impl Kyde {
         &self,
         wt: &Path,
         ui: &'static str,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let t = theme::get();
@@ -7984,24 +8019,126 @@ impl Kyde {
         } else {
             group.map(|g| g.tabs.as_slice()).unwrap_or_default()
         };
-        // The tabs scroll sideways once they outgrow the pane, so the strip's tools (`+`, the
-        // context toggle, …) stay put on the right and no tab is ever out of reach.
-        // `agents_reveal_tab` keeps the shown one in view.
+        let titles: Vec<String> = tabs
+            .iter()
+            .map(|tab| tab.name.clone().unwrap_or_else(|| tab_auto_title(tab, cx)))
+            .collect();
+        let renamed = |tab: &AgentTab| {
+            self.agents.renaming == Some(RenameTarget::Tab(wt.to_path_buf(), tab.id.clone()))
+        };
+        // The tabs that fit show, and the rest wait behind a `▾` menu — as the sidebar's tabs
+        // do — so none is ever clipped off the strip. The one on screen (or being renamed)
+        // always shows. Each pill's width is measured as it's laid out below: border and
+        // padding, its parts and the 6 px gaps between them, capped at 260.
+        let widths: Vec<(f32, f32)> = {
+            let text_w = text_width(cx, ui);
+            let fs = t.ui_font_size;
+            let tab_w = |tab: &AgentTab, title: &str| {
+                let label = if renamed(tab) {
+                    140.0
+                } else {
+                    text_w(title, fs)
+                };
+                let mut w = 2.0 + 8.0 + DOT + 6.0 + label + 6.0 + 18.0 + 4.0;
+                if !tab.subs.is_empty() {
+                    w += 6.0 + 12.0 + 2.0 + text_w(&tab.subs.len().to_string(), fs - 1.0);
+                }
+                if tab.verdict.is_some() {
+                    w += 6.0 + text_w("✓", fs);
+                }
+                w.min(260.0)
+            };
+            let sub_w = |bg: &Bg| {
+                let (mark, end) = match bg {
+                    Bg::Live(..) => (DOT, 8.0),
+                    Bg::Done(d) => (
+                        text_w(if d.finished { "✓" } else { "–" }, fs),
+                        6.0 + 18.0 + 4.0,
+                    ),
+                };
+                let what = text_w(&bg.sub().what, fs);
+                (2.0 + 8.0 + mark + 6.0 + 13.0 + 6.0 + what + end).min(260.0)
+            };
+            tabs.iter()
+                .zip(&titles)
+                .map(|(tab, title)| tab_w(tab, title))
+                .chain(subs.iter().map(sub_w))
+                .map(|w| (w, w))
+                .collect()
+        };
+        let keep = tabs
+            .iter()
+            .position(renamed)
+            .or_else(|| match shown_sub {
+                Some(b) => subs
+                    .iter()
+                    .position(|s| s.sub().id == b.sub().id)
+                    .map(|k| tabs.len() + k),
+                None => group.map(|g| g.active),
+            })
+            .unwrap_or(0);
+        // The strip's room for them: the pane less its padding (8 px a side) and its four 24 px
+        // tools, 4 px apart — the spacer between those takes none when it's tight.
+        let room = self.agents_pane_w(window) - 16.0 - 4.0 * 24.0 - 5.0 * 4.0;
+        let (shown, _) = fit_tabs(room, &widths, keep, AGENT_TAB_GAP, 24.0);
+        let hidden: Vec<(StripTab, SharedString, AgentState)> = (0..widths.len())
+            .filter(|i| !shown.contains(i))
+            .filter_map(|i| {
+                if let Some(tab) = tabs.get(i) {
+                    let title = titles[i].clone().into();
+                    return Some((StripTab::Tab(tab.id.clone()), title, tab.shown));
+                }
+                let bg = subs.get(i - tabs.len())?;
+                let state = match bg {
+                    Bg::Live(..) => AgentState::Working,
+                    Bg::Done(d) if d.finished => AgentState::Idle,
+                    Bg::Done(_) => AgentState::None,
+                };
+                let sub = bg.sub();
+                Some((
+                    StripTab::Sub(sub.id.clone()),
+                    sub.what.clone().into(),
+                    state,
+                ))
+            })
+            .collect();
+        let more = (!hidden.is_empty()).then(|| {
+            let (n, wt) = (hidden.len(), wt.to_path_buf());
+            ui::icon_btn("agents-tab-more", 24.0)
+                .debug_selector(|| "agents-tab-more".into())
+                .tooltip(ui::tip(format!(
+                    "{n} more tab{}",
+                    if n == 1 { "" } else { "s" }
+                )))
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .size(px(14.0))
+                        .text_color(t.line_number),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                        let at = gpui::point(e.position.x - px(8.0), e.position.y + px(12.0));
+                        this.open_menu(at, MenuTarget::AgentTabs(wt.clone(), hidden.clone()), cx);
+                    }),
+                )
+        });
         let mut pills = div()
-            .id("agents-tabs-scroll")
             .flex()
             .flex_row()
             .items_center()
             .gap(px(AGENT_TAB_GAP))
-            // Room inside the scroll clip for a drop line past the first / last tab, given
-            // back outside so the tabs sit where they would without it.
+            // Room inside the clip for a drop line past the first / last tab, given back
+            // outside so the tabs sit where they would without it.
             .px(px(AGENT_TAB_GAP))
             .mx(px(-AGENT_TAB_GAP))
             .min_w_0()
-            .overflow_x_scroll()
-            // (gpui scrolls it with a plain mouse's vertical wheel too.)
-            .track_scroll(&self.agents.tab_scroll);
+            .overflow_hidden();
         for (i, tab) in tabs.iter().enumerate() {
+            if !shown.contains(&i) {
+                continue;
+            }
             let active = group.is_some_and(|g| g.active == i) && shown_sub.is_none();
             // Dragged along the strip to reorder: it dims, and the tab under the cursor
             // shows the line it would land on.
@@ -8011,13 +8148,8 @@ impl Kyde {
                 .tab_drag
                 .line(&tab.id, |k| tabs.iter().position(|t| &t.id == k));
             let (press, hover) = (tab.id.clone(), tab.id.clone());
-            let title: SharedString = tab
-                .name
-                .clone()
-                .unwrap_or_else(|| tab_auto_title(tab, cx))
-                .into();
-            let renaming =
-                self.agents.renaming == Some(RenameTarget::Tab(wt.to_path_buf(), tab.id.clone()));
+            let title = SharedString::from(titles[i].clone());
+            let renaming = renamed(tab);
             let grp = SharedString::from(format!("agents-tab-{i}"));
             let (sel, menu_wt) = (wt.to_path_buf(), wt.to_path_buf());
             let (tab_id, close, menu_id) = (tab.id.clone(), tab.id.clone(), tab.id.clone());
@@ -8038,7 +8170,8 @@ impl Kyde {
                     }))
                     .flex()
                     .flex_row()
-                    .flex_none()
+                    // (Gives way — truncating its title — only if the measure above was short.)
+                    .min_w_0()
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))
@@ -8161,6 +8294,9 @@ impl Kyde {
             );
         }
         for (k, &bg) in subs.iter().enumerate() {
+            if !shown.contains(&(tabs.len() + k)) {
+                continue;
+            }
             let sub = bg.sub();
             let active = shown_sub.is_some_and(|b| b.sub().id == sub.id);
             let (id, gone) = (sub.id.clone(), sub.id.clone());
@@ -8189,7 +8325,7 @@ impl Kyde {
                     .group(grp.clone())
                     .flex()
                     .flex_row()
-                    .flex_none()
+                    .min_w_0()
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))
@@ -8259,7 +8395,7 @@ impl Kyde {
             );
         }
         if !bare {
-            strip = strip.child(pills);
+            strip = strip.child(pills).children(more);
         }
         let (new_agent, new_shell, open) = (wt.to_path_buf(), wt.to_path_buf(), wt.to_path_buf());
         let cmd = self.agents.cfg.default_command().to_string();
@@ -8303,6 +8439,7 @@ impl Kyde {
             .child({
                 let open = self.agents.context_open;
                 ui::icon_btn("agents-context-toggle", 24.0)
+                    .debug_selector(|| "agents-context-toggle".into())
                     .when(open, |d| d.bg(t.bg_light))
                     .tooltip(ui::tip(if open {
                         "Hide context"
@@ -8603,6 +8740,7 @@ impl Kyde {
         &self,
         _wt: &Path,
         ui: &'static str,
+        _window: &Window,
         _cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         ui::empty_state("This build has no terminal support", ui).into_any_element()
@@ -8864,10 +9002,11 @@ pub(crate) const SIDE_TABS: [(SideTab, &str, &str, &str); 4] = [
     (SideTab::Ci, "agents-tab-ci", "CI", "CI"),
 ];
 
-/// Which sidebar tabs fit in `avail` px, given each one's (full, short) pill width, `gap`
-/// between pills and the width of the ▾ that holds the rest: every tab at full width if
-/// they fit, else every tab short, else the `active` one plus as many others as fit (in
-/// order), short. Returns the shown tabs' indices in order, and whether they're short.
+/// Which tabs fit in `avail` px, given each one's (full, short) pill width, `gap` between
+/// pills and the width of the ▾ that holds the rest: every tab at full width if they fit,
+/// else every tab short, else the `active` one plus as many others as fit (in order), short.
+/// Returns the shown tabs' indices in order, and whether they're short. The sidebar's tabs
+/// have a short label; a worktree's strip passes each tab's one width twice.
 fn fit_tabs(
     avail: f32,
     widths: &[(f32, f32)],
@@ -8901,6 +9040,21 @@ fn fit_tabs(
     }
     shown.sort_unstable();
     (shown, true)
+}
+
+/// How wide `text` sets in `family` at `size` px: each char's advance, summed. Close enough
+/// to fit tabs into a strip before it's laid out (`fit_tabs`).
+fn text_width(cx: &gpui::App, family: &'static str) -> impl Fn(&str, f32) -> f32 {
+    let ts = cx.text_system().clone();
+    let font = ts.resolve_font(&gpui::font(family));
+    move |text, size| {
+        text.chars()
+            .map(|c| {
+                ts.advance(font, px(size), c)
+                    .map_or(size * 0.6, |a| f32::from(a.width))
+            })
+            .sum()
+    }
 }
 
 /// A GitHub list row's action button (`agents_gh_row`).
@@ -9749,7 +9903,7 @@ fn badge_icon(icon: &'static str, n: usize, color: kyde_color::Color) -> gpui::D
 }
 
 /// An 8 px status dot: working = accent, done-but-unseen = green, idle = ring, none = faint ring.
-fn status_dot(state: AgentState) -> gpui::Div {
+pub(crate) fn status_dot(state: AgentState) -> gpui::Div {
     let t = theme::get();
     let d = div().flex_none().size(px(DOT)).rounded_full();
     match state {

@@ -13,11 +13,10 @@ pub(crate) type MenuRun = Rc<dyn Fn(&mut Kyde, &mut Window, &mut Context<Kyde>)>
 /// One row of a context menu.
 #[derive(Clone)]
 pub(crate) enum MenuEntry {
-    /// A pickable row. `file` swaps the label-derived icon for that file's type badge, and
-    /// `dim` mutes the text (both used by the tab list).
+    /// A pickable row, led by `lead`; `dim` mutes the text (the tab list's other tabs).
     Item {
         label: SharedString,
-        file: Option<PathBuf>,
+        lead: MenuLead,
         dim: bool,
         run: MenuRun,
     },
@@ -43,6 +42,18 @@ pub(crate) enum MenuEntry {
     },
 }
 
+/// What leads a menu item's label.
+#[derive(Clone)]
+pub(crate) enum MenuLead {
+    /// The icon its label calls for (`menu_icon`), if any.
+    Auto,
+    /// That file's type badge (the tab list).
+    File(PathBuf),
+    /// An agent's status dot (the agent strip's `▾`).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Status(crate::agents::AgentState),
+}
+
 impl MenuEntry {
     /// A plain item, its icon picked from the label (`menu_icon`).
     pub(crate) fn item(
@@ -51,7 +62,7 @@ impl MenuEntry {
     ) -> Self {
         Self::Item {
             label: label.into(),
-            file: None,
+            lead: MenuLead::Auto,
             dim: false,
             run: Rc::new(run),
         }
@@ -618,7 +629,7 @@ impl Kyde {
                         .into();
                     out.push(MenuEntry::Item {
                         label: name,
-                        file: Some(p.clone()),
+                        lead: MenuLead::File(p.clone()),
                         dim: self.browse.open_path.as_ref() != Some(p),
                         run: Rc::new(move |this, _w, cx| {
                             if let Some(p) = this.browse.open_tabs.get(i).cloned() {
@@ -628,6 +639,8 @@ impl Kyde {
                     });
                 }
             }
+            #[cfg(feature = "terminal")]
+            MenuTarget::AgentTabs(wt, tabs) => out = self.agents_more_tabs_menu(wt, tabs),
             MenuTarget::SideTabs(tabs) => {
                 for &tab in tabs {
                     let Some(&(_, _, label, _)) =
@@ -866,16 +879,24 @@ impl Kyde {
         match entry {
             MenuEntry::Item {
                 label,
-                file,
+                lead,
                 dim,
                 run,
             } => {
-                let icon = match file {
-                    Some(p) => div()
+                let icon = match lead {
+                    MenuLead::Auto => icon_slot(menu_icon(label)).into_any_element(),
+                    MenuLead::File(p) => div()
                         .flex_none()
                         .child(badge_inner(file_badge(p), 0.0))
                         .into_any_element(),
-                    None => icon_slot(menu_icon(label)).into_any_element(),
+                    MenuLead::Status(s) => div()
+                        .flex_none()
+                        .size(px(16.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(crate::views::status_dot(*s))
+                        .into_any_element(),
                 };
                 let id = match at {
                     (i, None) => SharedString::from(format!("menu-row-{i}")),
