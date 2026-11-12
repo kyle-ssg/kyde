@@ -45,6 +45,21 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.16.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.15.1...kyde-v2.16.0) (2026-11-12)
+
+
+### Features
+
+* **agents:** fold Add project / New group into a ⊕ menu ([#192](https://github.com/kyle-ssg/kyde/issues/192)) ([49f53a0](https://github.com/kyle-ssg/kyde/commit/49f53a03382814c11b1645ff43c6d7045826a390))
+* **agents:** Issues / PRs / CI on a worktree's right-click menu ([#191](https://github.com/kyle-ssg/kyde/issues/191)) ([7a78611](https://github.com/kyle-ssg/kyde/commit/7a78611ffa717e38a98e8df41b6f67c65ee26a54))
+
+
+### Bug Fixes
+
+* **agents:** closing a tab ends everything its agent started ([#196](https://github.com/kyle-ssg/kyde/issues/196)) ([76e5422](https://github.com/kyle-ssg/kyde/commit/76e54222dc5055c1bd27e3bdc241a15936a4cd90))
+* **agents:** tabs that don't fit the strip go behind a ▾ menu ([#194](https://github.com/kyle-ssg/kyde/issues/194)) ([c9727bd](https://github.com/kyle-ssg/kyde/commit/c9727bd7bc1a0eec0e122dd77fcdd858f13044ee))
+* **terminal:** the prompt pill steps back through your prompts ([#195](https://github.com/kyle-ssg/kyde/issues/195)) ([0e1c612](https://github.com/kyle-ssg/kyde/commit/0e1c612c778a2d9d055f9bf9cb9af28e3b36554c))
+
 ## [2.15.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.15.0...kyde-v2.15.1) (2026-11-12)
 
 
