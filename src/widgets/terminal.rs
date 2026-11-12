@@ -1267,14 +1267,21 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Your newest prompt, when it's scrolled off above the view: its text, for the pill
-    /// that jumps back to it.
+    /// The prompt ⌘↑ would land on, for the pill that jumps to it: its text. So each click
+    /// steps one prompt further back. On the live screen only once your newest prompt has
+    /// scrolled off (while it's on screen, the turn you're reading is right there); at the
+    /// top of the scrollback, none.
     fn prompt_above(&self) -> Option<String> {
         let t = self.term.lock();
-        let top = -i32::try_from(t.grid().display_offset()).unwrap_or(0);
-        last_prompt(&t)
-            .filter(|l| l.0 < top)
-            .map(|l| prompt_text(&t, l))
+        let (hist, off) = (
+            i32::try_from(t.grid().history_size()).unwrap_or(0),
+            i32::try_from(t.grid().display_offset()).unwrap_or(0),
+        );
+        if off >= hist {
+            return None;
+        }
+        let to = prompt_before(&t, Line(-off))?;
+        (off > 0 || last_prompt(&t) == Some(to)).then(|| prompt_text(&t, to))
     }
 
     /// Map a window-space cursor position to a grid point + which half of the cell it's in.
@@ -1539,6 +1546,15 @@ fn prompt_lines<T>(term: &Term<T>) -> Vec<Line> {
 /// The newest prompt you sent that's still in the buffer.
 fn last_prompt<T>(term: &Term<T>) -> Option<Line> {
     (term.topmost_line().0..=term.bottommost_line().0)
+        .rev()
+        .map(Line)
+        .find(|&l| prompt_tint(term, l).is_some())
+}
+
+/// The prompt ⌘↑ lands on from the view's top line `top`: the newest one at or above it
+/// (`prompt_jump` puts the view a row above it). Scans back from `top`, so it stays cheap.
+fn prompt_before<T>(term: &Term<T>, top: Line) -> Option<Line> {
+    (term.topmost_line().0..=top.0.min(term.bottommost_line().0))
         .rev()
         .map(Line)
         .find(|&l| prompt_tint(term, l).is_some())
@@ -1927,7 +1943,7 @@ impl TerminalView {
             .right(px(SB_BAR + 6.0))
             .max_w(px(360.0))
             .occlude()
-            .tooltip(crate::ui::tip(format!("Back to your last prompt  ({key})")))
+            .tooltip(crate::ui::tip(format!("Back to this prompt  ({key})")))
             .on_mouse_down(MouseButton::Right, |_e, _w, cx| cx.stop_propagation())
             .on_mouse_down(
                 MouseButton::Left,
@@ -3163,6 +3179,10 @@ mod tests {
         assert_eq!(prompt_jump(&prompts, a, true), None);
         assert_eq!(prompt_jump(&prompts, a, false), Some(b));
         assert_eq!(prompt_jump(&prompts, b, false), None);
+        // The pill names where ⌘↑ goes next, so a click on it steps back the same way.
+        assert_eq!(prompt_before(&term, Line(0)), Some(second));
+        assert_eq!(prompt_before(&term, Line(b)), Some(first));
+        assert_eq!(prompt_before(&term, Line(a)), None);
     }
 
     /// Perf guard (see CLAUDE.md "Performance regression tests"): every frame finds the
@@ -3177,6 +3197,7 @@ mod tests {
         let term = term_with(120, 40, out.as_bytes());
         let t0 = Instant::now();
         assert_eq!(last_prompt(&term), None);
+        assert_eq!(prompt_before(&term, Line(0)), None);
         assert!(prompt_lines(&term).is_empty());
         let top = term.topmost_line();
         assert!(prompt_rows(&term, top, 40).iter().all(Option::is_none));
