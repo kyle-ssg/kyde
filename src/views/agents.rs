@@ -754,7 +754,7 @@ impl Kyde {
         for wt in std::iter::once(&removed.path).chain(&removed.worktrees) {
             if let Some(g) = self.agents.tabs.remove(wt) {
                 for t in &g.tabs {
-                    t.view.read(cx).kill_host();
+                    t.view.read(cx).kill_host(&t.id);
                 }
             }
         }
@@ -1684,7 +1684,7 @@ impl Kyde {
         {
             if let Some(g) = self.agents.tabs.remove(wt) {
                 for t in &g.tabs {
-                    t.view.read(cx).kill_host();
+                    t.view.read(cx).kill_host(&t.id);
                 }
             }
             // Its stopped background agents' tabs go too.
@@ -2507,7 +2507,7 @@ impl Kyde {
         let gone = g.tabs.remove(idx);
         // Closing the tab ends its agent (quitting Kyde doesn't) — and its background agents,
         // whose work stays where they worked until dismissed.
-        gone.view.read(cx).kill_host();
+        gone.view.read(cx).kill_host(&gone.id);
         let from = gone
             .name
             .clone()

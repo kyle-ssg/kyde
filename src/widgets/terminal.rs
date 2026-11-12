@@ -578,14 +578,21 @@ impl TerminalView {
 
     /// End a hosted terminal's agent for good (closing its tab). A local terminal ends when
     /// the view drops.
-    pub fn kill_host(&self) {
+    pub fn kill_host(&self, id: &str) {
         #[cfg(unix)]
         if let Backend::Host { stream, .. } = &self.backend {
+            use crate::agent_host as host;
             let mut s = stream
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let _ = crate::agent_host::write_frame(&mut *s, crate::agent_host::KILL, &[]);
+            // Over a fresh connection if this one's gone: a close that never arrives leaves
+            // the agent running with no tab.
+            if host::write_frame(&mut *s, host::KILL, &[]).is_err() {
+                let _ = host::send(id, host::KILL, &[]);
+            }
         }
+        #[cfg(not(unix))]
+        let _ = id;
     }
 
     /// Handle one event from the IO thread. Returns `false` once the pump should stop.
