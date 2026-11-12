@@ -833,6 +833,18 @@ enum MenuTarget {
     /// its right.
     #[cfg(feature = "terminal")]
     AgentTab(PathBuf, String),
+    /// A worktree's strip `▾`: the tabs it has no room for, each with its title and status
+    /// (as the strip last drew them) — pick one to show it.
+    #[cfg(feature = "terminal")]
+    AgentTabs(PathBuf, Vec<(StripTab, SharedString, agents::AgentState)>),
+}
+
+/// One of a worktree's strip tabs, by id: its own tab, or a background agent's.
+#[cfg(feature = "terminal")]
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum StripTab {
+    Tab(String),
+    Sub(String),
 }
 
 struct ContextMenu {
@@ -1460,13 +1472,6 @@ struct AgentsView {
     /// Its work's scroll — kept at the newest step while you're there.
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
     sub_scroll: ScrollHandle,
-    /// The tab strip's sideways scroll — its tabs can outgrow the pane.
-    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
-    tab_scroll: ScrollHandle,
-    /// The tab (or background agent) the strip last scrolled into view: its worktree and id.
-    /// The strip follows the shown tab only when this changes (`agents_reveal_tab`).
-    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
-    tab_revealed: Option<(PathBuf, String)>,
     /// Background agents that stopped: their work stays in the worktree each worked in until
     /// you dismiss it (saved, so a relaunch keeps it too — `agents::done_path`).
     #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
@@ -2017,8 +2022,6 @@ impl AgentsView {
             hooks_polling: false,
             sub_shown: None,
             sub_scroll: ScrollHandle::new(),
-            tab_scroll: ScrollHandle::new(),
-            tab_revealed: None,
             done_subs: Vec::new(),
             hooks_synced: false,
             renaming: None,
@@ -8369,60 +8372,86 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
-    /// More tabs than the pane is wide: the strip scrolls instead of clipping them, and the
-    /// shown tab is always in view — the newest (last) one, then the first when you go back.
+    /// More tabs than the strip has room for: as many as fit show, at full width and the one
+    /// on screen among them, and the rest wait behind a `▾` whose menu brings one up.
     #[cfg(feature = "terminal")]
     #[gpui::test]
-    fn agents_tab_strip_scrolls_to_the_shown_tab(cx: &mut TestAppContext) {
+    fn agents_tab_strip_overflows_into_a_menu(cx: &mut TestAppContext) {
         let (handle, dir) = boot(cx);
+        // `n` tabs, all named alike.
+        let fill = |k: &mut Kyde, n: usize, cx: &mut Context<Kyde>| {
+            while k.agents.tabs.get(&dir).map_or(0, |g| g.tabs.len()) < n {
+                k.agents_new_tab(dir.clone(), false, None, cx);
+            }
+            for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                t.name = Some("a tab with a long enough name".into());
+            }
+        };
         handle
             .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
                 k.agents.cfg.command = "true".into(); // never launch a real agent in tests
                 k.switch_mode(Mode::Agents, cx);
                 k.agents_add_space(dir.clone(), cx);
+                fill(k, 2, cx);
             })
             .unwrap();
-        cx.run_until_parked();
-        handle
-            .update(cx, |k, _w, cx| {
-                for _ in 0..11 {
-                    k.agents_new_tab(dir.clone(), false, None, cx);
-                }
-                for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
-                    t.name = Some("a tab with a long enough name".into());
-                }
-            })
-            .unwrap();
+        // (`debug_bounds` takes a `'static` selector.)
+        let tab = |vcx: &mut gpui::VisualTestContext, i: usize| {
+            vcx.debug_bounds(format!("agents-tab-{i}").leak())
+        };
         let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
         vcx.run_until_parked();
-        // (An item's bounds are where it's laid out — before the scroll moves it.)
-        let in_view = |k: &Kyde, i: usize| {
-            let scroll = &k.agents.tab_scroll;
-            let (strip, tab, by) = (
-                scroll.bounds(),
-                scroll.bounds_for_item(i).unwrap(),
-                scroll.offset().x,
-            );
-            tab.left() + by >= strip.left() && tab.right() + by <= strip.right()
-        };
+        assert!(vcx.debug_bounds("agents-tab-more").is_none(), "two fit");
+        let full = vcx.debug_bounds("agents-tab-0").unwrap().size.width;
         handle
-            .update(&mut vcx, |k, _w, cx| {
-                assert!(
-                    k.agents.tab_scroll.max_offset().width > gpui::px(0.0),
-                    "the tabs outgrow the strip, which scrolls"
-                );
-                assert!(in_view(k, 11), "the newest tab is in view");
-                assert!(!in_view(k, 0));
-                k.agents.tabs.get_mut(&dir).unwrap().active = 0;
-                cx.notify();
+            .update(&mut vcx, |k, _w, cx| fill(k, 12, cx))
+            .unwrap();
+        vcx.run_until_parked();
+        let shown: Vec<usize> = (0..12).filter(|&i| tab(&mut vcx, i).is_some()).collect();
+        assert!(shown.len() > 1 && shown.len() < 12, "{shown:?}");
+        assert!(shown.contains(&11), "the newest tab, on screen, shows");
+        for i in &shown {
+            let w = tab(&mut vcx, *i).unwrap().size.width;
+            assert!((w - full).abs() < gpui::px(0.5), "tab {i} squeezed: {w:?}");
+        }
+        // The strip is full: past the ▾, + and the shell button, too little room is left
+        // for another tab.
+        let more = vcx
+            .debug_bounds("agents-tab-more")
+            .expect("a ▾ for the rest");
+        let tools = vcx.debug_bounds("agents-context-toggle").unwrap();
+        let spare = tools.left() - more.right() - gpui::px(4.0 * 4.0 + 2.0 * 24.0);
+        assert!(
+            spare >= gpui::px(0.0) && spare < full + gpui::px(4.0),
+            "{spare:?}"
+        );
+        vcx.simulate_mouse_down(
+            more.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        let hidden = (0..12).find(|i| !shown.contains(i)).unwrap();
+        handle
+            .update(&mut vcx, |k, window, cx| {
+                let entries = k
+                    .context_menu
+                    .take()
+                    .expect("the ▾ opened its menu")
+                    .entries;
+                assert_eq!(entries.len(), 12 - shown.len(), "one row per hidden tab");
+                let Some(MenuEntry::Item { run, .. }) = entries.first() else {
+                    panic!("a tab row");
+                };
+                run(k, window, cx);
+                assert_eq!(k.agents.tabs[&dir].active, hidden);
             })
             .unwrap();
         vcx.run_until_parked();
-        handle
-            .update(&mut vcx, |k, _w, _cx| {
-                assert!(in_view(k, 0), "back to the first");
-            })
-            .unwrap();
+        assert!(
+            tab(&mut vcx, hidden).is_some(),
+            "picked from the menu, it shows"
+        );
     }
 
     /// Dragging an agent tab onto another moves it there — through real mouse events on the

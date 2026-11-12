@@ -32,7 +32,9 @@ mod terminal_panel;
 mod toolbar;
 mod worktree;
 
-pub(crate) use agents::SIDE_TABS;
+pub(crate) use agents::{status_dot, SIDE_TABS};
 pub(crate) use context_menu::MenuEntry;
+#[cfg(feature = "terminal")]
+pub(crate) use context_menu::MenuLead;
 pub(crate) use file_ops::{REVEAL_IN_FILES, REVEAL_IN_TERMINAL};
 pub(crate) use keyboard::{nav_keys, NavTarget};
