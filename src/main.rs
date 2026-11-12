@@ -827,6 +827,8 @@ enum MenuTarget {
     AgentSpace(PathBuf),
     /// A group's header in the Agents sidebar — rename it, remove it.
     AgentGroup(u32),
+    /// The Agents sidebar's footer ⊕ — Add Project…, New Group. Opens upward from it.
+    AgentsAdd,
     /// A tab in a worktree's strip (worktree, tab id) — close it / the others / those to
     /// its right.
     #[cfg(feature = "terminal")]
@@ -3735,6 +3737,8 @@ impl gpui::AssetSource for Assets {
             "icons/pin-off.svg" => include_bytes!("../assets/icons/pin-off.svg"),
             "icons/info.svg" => include_bytes!("../assets/icons/info.svg"),
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
+            // The Agents sidebar footer's add menu (Add Project… / New Group).
+            "icons/circle-plus.svg" => include_bytes!("../assets/icons/circle-plus.svg"),
             // A project row's `…` menu: jump to its issues / pull requests / CI.
             "icons/ellipsis.svg" => include_bytes!("../assets/icons/ellipsis.svg"),
             "icons/circle-dot.svg" => include_bytes!("../assets/icons/circle-dot.svg"),
@@ -4349,9 +4353,10 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // last worktree on screen, its tab's background agent at work there and another one
         // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`). `agents-groups`
         // (manual, validation): the project in a Work group, a folded Personal group of two
-        // more, and one ungrouped — mid-drag onto Work's header.
+        // more, and one ungrouped — mid-drag onto Work's header. `agents-add` (manual,
+        // validation): the sidebar footer's ⊕ menu open.
         #[cfg(feature = "terminal")]
-        "agents" | "agents-background" | "agents-code" | "agents-groups" => {
+        "agents" | "agents-background" | "agents-code" | "agents-groups" | "agents-add" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
@@ -4519,6 +4524,13 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 if std::env::var_os("KYDE_SHOT_WT_MENU").is_some() {
                     view.open_menu(gpui::point(px(300.0), px(36.0)), MenuTarget::Worktrees, cx);
                 }
+            }
+            // The sidebar footer's ⊕ menu open, standing on the button.
+            if name == "agents-add" {
+                let gap = px(theme::FRAME_GAP);
+                let x = gap + px(view.agents.sidebar_w / 2.0) - px(8.0);
+                let y = window.viewport_size().height - gap - px(34.0);
+                view.open_menu(gpui::point(x, y), MenuTarget::AgentsAdd, cx);
             }
             cx.notify();
         }

@@ -4560,6 +4560,18 @@ impl Kyde {
         out
     }
 
+    /// The sidebar footer's ⊕ menu.
+    pub(crate) fn agents_add_menu() -> Vec<MenuEntry> {
+        vec![
+            MenuEntry::item("Add Project…", |this, _w, cx| {
+                this.agents_add_space_prompt(cx);
+            }),
+            MenuEntry::item("New Group", |this, window, cx| {
+                this.agents_new_group(None, window, cx);
+            }),
+        ]
+    }
+
     /// A sidebar group header's right-click menu.
     pub(crate) fn agents_group_menu(&self, id: u32) -> Vec<MenuEntry> {
         vec![
@@ -5052,49 +5064,35 @@ impl Kyde {
                     .children(rows),
             )
             .when(tab == SideTab::Code, |d| {
-                let link = |id: &'static str, icon: &'static str, label: &'static str| {
-                    div()
-                        .id(id)
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_color(t.primary)
-                        .hover(|d| d.bg(t.bg_mid))
-                        .child(svg().path(icon).size(px(14.0)).text_color(t.primary))
-                        .child(label)
-                };
+                // ⊕ → Add Project… / New Group, opening upward. Lit while its menu is open.
+                let open = self
+                    .context_menu
+                    .as_ref()
+                    .is_some_and(|m| matches!(m.target, MenuTarget::AgentsAdd));
+                let add = ui::icon_btn("agents-add", 26.0)
+                    .debug_selector(|| "agents-add".into())
+                    .tooltip(ui::tip("Add a project or a group"))
+                    .when(open, |d| d.bg(t.bg_light))
+                    .child(
+                        svg()
+                            .path("icons/circle-plus.svg")
+                            .size(px(16.0))
+                            .text_color(t.secondary_text),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, e: &gpui::MouseDownEvent, _w, cx| {
+                            let at = gpui::point(e.position.x - px(8.0), e.position.y - px(14.0));
+                            this.open_menu(at, MenuTarget::AgentsAdd, cx);
+                        }),
+                    );
                 d.child(
                     div()
                         .flex()
-                        .flex_row()
-                        .flex_wrap()
                         .flex_none()
                         .justify_center()
-                        .gap_1()
-                        .py_2()
-                        .child(
-                            link("agents-add-space", "icons/plus.svg", "Add project")
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _e, _w, cx| {
-                                        this.agents_add_space_prompt(cx);
-                                    }),
-                                ),
-                        )
-                        .child(
-                            link("agents-new-group", "icons/folder-plus.svg", "New group")
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(|this, _e, window, cx| {
-                                        this.agents_new_group(None, window, cx);
-                                    }),
-                                ),
-                        ),
+                        .py_1p5()
+                        .child(add),
                 )
             })
             .children(note)
