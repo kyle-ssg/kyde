@@ -7,6 +7,7 @@
 use crate::agent_host as host;
 use crate::agents::Hook;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The subcommands — `ky agent <one of these>` is the CLI; anything else after `agent` is a
@@ -21,7 +22,8 @@ ky agent — see and drive the agents running in Kyde (each in its own tab).
 Every agent has an id (12 hex digits). You, if you run in a Kyde tab, are $KYDE_AGENT_ID.
 Run these as \"$KYDE_BIN\" agent … (or `ky agent …` if Kyde's shell command is installed).
 
-  ky agent list [--json]                 every running agent: id, state, folder, name
+  ky agent list [--json]                 every running agent: id, state, folder (where its
+                                         tab is now), name
   ky agent read <id> [--lines N]         its screen + recent scrollback as text (default 80)
   ky agent prompt <id> <text>            type <text> and press Enter (submits a prompt)
   ky agent send <id> <text>              type <text> without Enter
@@ -116,19 +118,41 @@ fn session_of(id: &str) -> Option<String> {
         .and_then(|r| r.session)
 }
 
+/// Its tab in Kyde, if Kyde has one: the worktree the tab is in, and the tab.
+fn tab_of<'a>(
+    cfg: &'a kyde_config::agents::AgentsCfg,
+    id: &str,
+) -> Option<(&'a Path, &'a kyde_config::agents::SavedTab)> {
+    cfg.tabs.iter().find_map(|(wt, tabs)| {
+        let t = tabs.iter().find(|t| t.id.as_deref() == Some(id))?;
+        Some((wt.as_path(), t))
+    })
+}
+
 /// The name you gave its tab in Kyde, if any.
-fn name_of(id: &str) -> Option<String> {
-    kyde_config::agents::AgentsCfg::load()
-        .tabs
-        .values()
-        .flatten()
-        .find(|t| t.id.as_deref() == Some(id))
-        .and_then(|t| t.name.clone())
+fn name_of(cfg: &kyde_config::agents::AgentsCfg, id: &str) -> Option<String> {
+    tab_of(cfg, id).and_then(|(_, t)| t.name.clone())
+}
+
+/// Where it is now, not the folder it `started` in: the worktree its Kyde tab is in (the
+/// tab follows its agent between worktrees), else the worktree its session moved to
+/// (Claude Code's `EnterWorktree`), else `started`.
+fn folder_of(cfg: &kyde_config::agents::AgentsCfg, id: &str, started: &Path) -> PathBuf {
+    if let Some((wt, _)) = tab_of(cfg, id) {
+        return wt.to_path_buf();
+    }
+    std::fs::read_to_string(crate::agents::state_path(id))
+        .ok()
+        .and_then(|s| crate::agents::parse_hook(&s))
+        .and_then(|r| crate::agents::session_worktree(r.cwd.as_deref()?, r.transcript.as_deref()?))
+        .filter(|wt| !started.starts_with(wt))
+        .unwrap_or_else(|| started.to_path_buf())
 }
 
 fn list(json: bool) -> Res {
     let me = std::env::var("KYDE_AGENT_ID").ok();
     let hosts = host::live_hosts();
+    let cfg = kyde_config::agents::AgentsCfg::load();
     if json {
         let rows: Vec<serde_json::Value> = hosts
             .iter()
@@ -136,9 +160,10 @@ fn list(json: bool) -> Res {
                 serde_json::json!({
                     "id": h.id,
                     "state": state_of(&h.id),
-                    "folder": h.cwd,
+                    "folder": folder_of(&cfg, &h.id, &h.cwd),
+                    "started_in": h.cwd,
                     "agent": h.agent,
-                    "name": name_of(&h.id),
+                    "name": name_of(&cfg, &h.id),
                     "session": session_of(&h.id),
                     "started": h.started,
                     "you": me.as_deref() == Some(h.id.as_str()),
@@ -161,14 +186,14 @@ fn list(json: bool) -> Res {
         } else {
             ""
         };
-        let name = name_of(&h.id)
+        let name = name_of(&cfg, &h.id)
             .map(|n| format!("  \"{n}\""))
             .unwrap_or_default();
         println!(
             "{}  {:<11}  {}{name}{you}",
             h.id,
             state_of(&h.id),
-            h.cwd.display()
+            folder_of(&cfg, &h.id, &h.cwd).display()
         );
     }
     Ok(0)
@@ -299,6 +324,21 @@ fn wait(rest: &[String]) -> Res {
 }
 
 fn new(rest: &[String]) -> Res {
+    let spec = new_spec(rest, &kyde_config::agents::AgentsCfg::load())?;
+    host::spawn(&spec).map_err(|e| e.to_string())?;
+    host::wait_registered(&spec.id);
+    println!("{}", spec.id);
+    let _ = std::io::stdout().flush();
+    Ok(0)
+}
+
+/// The host `ky agent new <rest>` starts. Its agent gets the note a seeded Kyde tab's does
+/// (`agents::seeded_brief`), left for its first prompt: without it, it makes a worktree with
+/// `git worktree add` and works there by `cd`, and its tab stays where it started.
+fn new_spec(
+    rest: &[String],
+    cfg: &kyde_config::agents::AgentsCfg,
+) -> Result<host::HostSpec, String> {
     let folder = rest
         .first()
         .filter(|a| !a.starts_with("--"))
@@ -306,13 +346,21 @@ fn new(rest: &[String]) -> Res {
         .map_err(|e| e.to_string())?;
     let shell_only = rest.iter().any(|a| a == "--shell");
     let prompt = flag(rest, "--prompt");
-    let cfg = kyde_config::agents::AgentsCfg::load();
     let line = (!shell_only).then(|| match &prompt {
         Some(p) => crate::agents::seeded_line(cfg.default_command(), p),
         None => cfg.default_command().to_string(),
     });
     let id = crate::agents::tab_id();
-    let spec = host::HostSpec {
+    let note = (!shell_only)
+        .then(|| crate::agents::seeded_brief(cfg, &folder))
+        .flatten();
+    if let Some(note) = note {
+        let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+        std::fs::write(crate::agents::brief_path(&id), note).map_err(|e| e.to_string())?;
+        // If it moves out, Claude Code's worktree mustn't make this checkout read as dirty.
+        crate::agents::exclude_claude_worktrees(&folder);
+    }
+    Ok(host::HostSpec {
         id: id.clone(),
         cwd: folder,
         shell: crate::terminal::default_shell(),
@@ -321,12 +369,7 @@ fn new(rest: &[String]) -> Res {
         cols: 120,
         rows: 32,
         agent: !shell_only,
-    };
-    host::spawn(&spec).map_err(|e| e.to_string())?;
-    host::wait_registered(&id);
-    println!("{id}");
-    let _ = std::io::stdout().flush();
-    Ok(0)
+    })
 }
 
 /// The value after `name` (`--lines 40`).
@@ -347,5 +390,38 @@ mod tests {
         let raw = b"hello\x1b[31m world\x1b[0m\r\nabc\x1b[2Dxy\r\n";
         assert_eq!(render(raw, 40, 10, 80), "hello world\naxy\n");
         assert_eq!(render(raw, 40, 10, 1), "axy\n");
+    }
+
+    /// An agent `ky agent new` starts hears with its first prompt how to move to another
+    /// worktree (so its tab follows it), like a tab Kyde opens; a plain shell hears nothing.
+    #[test]
+    fn a_new_agent_hears_how_to_move_worktrees() {
+        crate::gpui_smoke_tests::isolate_history(); // a throwaway agents dir
+        let dir = std::env::temp_dir().join(format!("kyde-cli-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = kyde_config::agents::AgentsCfg::default();
+        let args = |a: &[&str]| -> Vec<String> {
+            std::iter::once(dir.to_string_lossy().into_owned())
+                .chain(a.iter().map(|s| (*s).to_string()))
+                .collect()
+        };
+        let agent = new_spec(&args(&["--prompt", "add a route"]), &cfg).unwrap();
+        let note = std::fs::read_to_string(crate::agents::brief_path(&agent.id)).unwrap();
+        assert!(note.contains("EnterWorktree"), "{note}");
+        let shell = new_spec(&args(&["--shell"]), &cfg).unwrap();
+        assert!(!crate::agents::brief_path(&shell.id).exists());
+    }
+
+    /// `list` shows an agent where its Kyde tab followed it, not the folder it started in.
+    #[test]
+    fn list_shows_an_agent_where_its_tab_is_now() {
+        let mut cfg = kyde_config::agents::AgentsCfg::default();
+        let tab = kyde_config::agents::SavedTab {
+            id: Some("acb541da6d50".into()),
+            ..Default::default()
+        };
+        let task = PathBuf::from("/r/.kyde/worktrees/r/task");
+        cfg.tabs.insert(task.clone(), vec![tab]);
+        assert_eq!(folder_of(&cfg, "acb541da6d50", Path::new("/r")), task);
     }
 }
