@@ -5144,6 +5144,65 @@ mod gpui_smoke_tests {
         assert!(!wt.exists(), "Enter removed the worktree");
     }
 
+    /// The row's × removes a worktree with nothing to lose without asking — but still asks
+    /// when it's pinned, or when it has changes the row's (stale) counts haven't caught yet.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn removing_a_finished_worktree_skips_the_confirmation(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = PathBuf::from(format!("{}-wt", dir.display()));
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        };
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "agent/done",
+            wt.to_str().unwrap(),
+        ]);
+        // Its branch is on the remote: nothing to push.
+        git(&["update-ref", "refs/remotes/origin/agent/done", "HEAD"]);
+        let remove = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, _w, cx| {
+                    k.agents.git.insert(wt.clone(), agents::WtGit::default());
+                    k.agents_confirm_remove(dir.clone(), wt.clone(), cx);
+                })
+                .unwrap();
+            cx.run_until_parked();
+            handle
+                .update(cx, |k, _w, cx| {
+                    let asked = k.remove_wt_win.is_some();
+                    k.agents.removing = None;
+                    k.close_modal_window(ModalKind::RemoveWorktree, cx);
+                    asked
+                })
+                .unwrap()
+        };
+        handle
+            .update(cx, |k, _w, _cx| k.agents.cfg.pinned.insert(wt.clone()))
+            .unwrap();
+        assert!(remove(cx), "pinned: asks");
+        handle
+            .update(cx, |k, _w, _cx| k.agents.cfg.pinned.remove(&wt))
+            .unwrap();
+        std::fs::write(wt.join("new.txt"), "x").unwrap();
+        assert!(
+            remove(cx),
+            "an uncommitted change the row hadn't seen: asks"
+        );
+        std::fs::remove_file(wt.join("new.txt")).unwrap();
+        assert!(!remove(cx), "nothing to lose: no window");
+        assert!(!wt.exists(), "…and it's removed");
+    }
+
     /// A select's open list closes on a click outside it — and a click on the control while
     /// open closes it, rather than the outside-click closing it and the control reopening it.
     #[gpui::test]

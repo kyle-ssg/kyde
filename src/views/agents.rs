@@ -1515,8 +1515,58 @@ impl Kyde {
         .detach();
     }
 
-    /// The worktree row's ×: ask first, in a native window that says what would be lost.
-    fn agents_confirm_remove(&mut self, space: PathBuf, wt: PathBuf, cx: &mut Context<Self>) {
+    /// The worktree row's ×. One with nothing to lose ([`Self::agents_wt_disposable`]) goes
+    /// at once; anything else asks first. Git is re-read before removing unasked — the row's
+    /// counts can lag a fresh edit, and the removal is `--force`.
+    pub(crate) fn agents_confirm_remove(
+        &mut self,
+        space: PathBuf,
+        wt: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.agents_wt_disposable(&space, &wt) {
+            self.agents_ask_remove(space, wt, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            let dir = wt.clone();
+            let read = cx
+                .background_executor()
+                .spawn(async move { crate::agents::read_git(&dir) })
+                .await;
+            this.update(cx, |this, cx| {
+                match read {
+                    Some((_, g)) => this.agents.git.insert(wt.clone(), g),
+                    None => this.agents.git.remove(&wt),
+                };
+                if this.agents_wt_disposable(&space, &wt) {
+                    this.agents_remove_worktree(space, wt, cx);
+                } else {
+                    this.agents_ask_remove(space, wt, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Removing worktree `wt` loses nothing worth asking about: it isn't pinned, and it's
+    /// finished — what the Clean Up window ticks by default (nothing uncommitted, nothing
+    /// unpushed, no agent busy). Without agent tabs (no `terminal`) it always asks.
+    fn agents_wt_disposable(&self, space: &Path, wt: &Path) -> bool {
+        #[cfg(feature = "terminal")]
+        {
+            !self.agents.cfg.pinned.contains(wt) && self.agents_wt_cleanup(space, wt).1
+        }
+        #[cfg(not(feature = "terminal"))]
+        {
+            let _ = (space, wt);
+            false
+        }
+    }
+
+    /// Ask before removing worktree `wt`, in a native window that says what would be lost.
+    fn agents_ask_remove(&mut self, space: PathBuf, wt: PathBuf, cx: &mut Context<Self>) {
         self.agents.removing = Some((space, wt));
         self.open_modal_window(
             ModalKind::RemoveWorktree,
@@ -1618,9 +1668,9 @@ impl Kyde {
         }
     }
 
-    /// Remove a linked worktree the user confirmed: `git worktree remove --force` (its
-    /// uncommitted changes were shown in the confirmation), then close its tabs and drop it
-    /// from the space. The branch is kept. A folder already gone from disk is just forgotten.
+    /// Remove a linked worktree the user confirmed, or one with nothing to lose: `git worktree
+    /// remove --force` (any uncommitted changes were shown in the confirmation), then close its
+    /// tabs and drop it from the space. The branch is kept. A folder already gone from disk is just forgotten.
     fn agents_remove_worktree(&mut self, space: PathBuf, wt: PathBuf, cx: &mut Context<Self>) {
         self.agents_remove_in_background(vec![(space, wt)], cx);
     }
@@ -9000,8 +9050,7 @@ impl Kyde {
                 .iter()
                 .filter(|s| !s.scratch)
                 .flat_map(|s| s.worktrees.iter().map(move |w| (s.path.clone(), w.clone())))
-                .filter(|(_, wt)| !self.agents.cfg.pinned.contains(wt))
-                .filter(|(space, wt)| self.agents_wt_cleanup(space, wt).1)
+                .filter(|(space, wt)| self.agents_wt_disposable(space, wt))
                 .map(|(_, wt)| wt)
                 .collect();
             self.agents.cleanup_tabs = self
