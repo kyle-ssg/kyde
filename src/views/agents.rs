@@ -9150,7 +9150,7 @@ impl CheckOutcome {
         match self {
             Self::Pass => ("✓", t.status_added),
             Self::Fail => ("✗", t.status_conflict),
-            Self::Pending => ("●", t.status_modified),
+            Self::Pending => ("●", t.status_pending),
         }
     }
 }

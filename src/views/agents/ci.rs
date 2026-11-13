@@ -570,7 +570,7 @@ impl Kyde {
             };
         let superseded = !superseding.is_empty();
         let pill_color = match state {
-            RunState::Running => t.status_modified,
+            RunState::Running => t.status_pending,
             RunState::Failed => t.status_conflict,
             RunState::Passed => t.status_added,
         };
