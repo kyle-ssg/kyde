@@ -5146,6 +5146,7 @@ mod gpui_smoke_tests {
 
     /// The row's × removes a worktree with nothing to lose without asking — but still asks
     /// when it's pinned, or when it has changes the row's (stale) counts haven't caught yet.
+    #[cfg(feature = "terminal")]
     #[gpui::test]
     fn removing_a_finished_worktree_skips_the_confirmation(cx: &mut TestAppContext) {
         let (handle, dir) = boot(cx);

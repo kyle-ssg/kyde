@@ -1549,9 +1549,17 @@ impl Kyde {
 
     /// Removing worktree `wt` loses nothing worth asking about: it isn't pinned, and it's
     /// finished — what the Clean Up window ticks by default (nothing uncommitted, nothing
-    /// unpushed, no agent busy).
+    /// unpushed, no agent busy). Without agent tabs (no `terminal`) it always asks.
     fn agents_wt_disposable(&self, space: &Path, wt: &Path) -> bool {
-        !self.agents.cfg.pinned.contains(wt) && self.agents_wt_cleanup(space, wt).1
+        #[cfg(feature = "terminal")]
+        {
+            !self.agents.cfg.pinned.contains(wt) && self.agents_wt_cleanup(space, wt).1
+        }
+        #[cfg(not(feature = "terminal"))]
+        {
+            let _ = (space, wt);
+            false
+        }
     }
 
     /// Ask before removing worktree `wt`, in a native window that says what would be lost.
