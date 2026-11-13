@@ -257,12 +257,21 @@ pub struct TerminalView {
     link: Option<Link>,
 }
 
-/// A link in the grid: its row, the columns it spans, and where it goes.
+/// A link in the grid: the columns it spans on each row it's on — more than one when it
+/// wrapped — and where it goes.
 #[derive(Clone, Debug, PartialEq)]
 struct Link {
-    line: Line,
-    cols: std::ops::Range<usize>,
+    rows: Vec<(Line, std::ops::Range<usize>)>,
     target: Target,
+}
+
+impl Link {
+    /// Whether the link takes in column `col` of grid row `line`.
+    fn covers(&self, line: Line, col: usize) -> bool {
+        self.rows
+            .iter()
+            .any(|(l, c)| *l == line && c.contains(&col))
+    }
 }
 
 /// Where a link goes: a web page, or a file to open (at a line, if it named one).
@@ -1569,7 +1578,8 @@ impl TerminalView {
     }
 
     /// The link at a window-space position — an OSC-8 hyperlink if the cell carries one,
-    /// else a URL or file path scanned out of that grid row. `None` off the drawn rows.
+    /// else a URL or file path scanned out of the grid, followed onto the rows above and
+    /// below it wrapped onto. `None` off the drawn rows.
     fn link_at(&self, pos: gpui::Point<Pixels>) -> Option<Link> {
         if !self.bounds?.contains(&pos) {
             return None;
@@ -1581,23 +1591,53 @@ impl TerminalView {
         if p.line.0 + off >= i32::try_from(t.screen_lines()).unwrap_or(0) {
             return None;
         }
-        let cell = |c: usize| &grid[GridPoint::new(p.line, Column(c))];
-        let at = p.column.0;
-        if let Some(h) = cell(at).hyperlink() {
-            let same = |c: &usize| cell(*c).hyperlink().as_ref() == Some(&h);
-            let start = (0..at).rev().take_while(same).last().unwrap_or(at);
-            let end = (at..t.columns()).take_while(same).count() + at;
+        let (cols, at) = (t.columns(), p.column.0);
+        let last = cols.saturating_sub(1);
+        let top = Line((p.line.0 - LINK_REACH).max(t.topmost_line().0));
+        let bottom = Line((p.line.0 + LINK_REACH).min(t.bottommost_line().0));
+        let cell = |l: Line, c: usize| &grid[l][Column(c)];
+        if let Some(h) = cell(p.line, at).hyperlink() {
+            // The hyperlink's run of cells — on into the rows before and after where it
+            // carries on over the row's edge.
+            let same = |l: Line, c: usize| cell(l, c).hyperlink().as_ref() == Some(&h);
+            let mut first = p.line;
+            while first > top && same(first, 0) && same(Line(first.0 - 1), last) {
+                first = Line(first.0 - 1);
+            }
+            let mut end = p.line;
+            while end < bottom && same(end, last) && same(Line(end.0 + 1), 0) {
+                end = Line(end.0 + 1);
+            }
+            let run = |l: Line, a: usize| {
+                let start = (0..a).rev().take_while(|&c| same(l, c)).last().unwrap_or(a);
+                (l, start..(a..cols).take_while(|&c| same(l, c)).count() + a)
+            };
             return Some(Link {
-                line: p.line,
-                cols: start..end,
+                rows: (first.0..=end.0)
+                    .map(|l| match l.cmp(&p.line.0) {
+                        std::cmp::Ordering::Less => run(Line(l), last),
+                        std::cmp::Ordering::Equal => run(Line(l), at),
+                        std::cmp::Ordering::Greater => run(Line(l), 0),
+                    })
+                    .collect(),
                 target: Target::from_uri(h.uri()),
             });
         }
-        let row: Vec<char> = (0..t.columns()).map(|c| cell(c).c).collect();
-        let (cols, target) = link_in(&row, at)?;
+        let rows: Vec<(Vec<char>, bool)> = (top.0..=bottom.0)
+            .map(|l| {
+                let l = Line(l);
+                let chars = (0..cols).map(|c| cell(l, c).c).collect();
+                (chars, cell(l, last).flags.contains(Flags::WRAPLINE))
+            })
+            .collect();
+        let scan: Vec<(&[char], bool)> = rows.iter().map(|(c, w)| (c.as_slice(), *w)).collect();
+        let row = usize::try_from(p.line.0 - top.0).ok()?;
+        let (pieces, target) = link_in(&scan, row, at)?;
         Some(Link {
-            line: p.line,
-            cols,
+            rows: pieces
+                .into_iter()
+                .map(|(r, c)| (Line(top.0 + i32::try_from(r).unwrap_or(0)), c))
+                .collect(),
             target,
         })
     }
@@ -1612,12 +1652,115 @@ impl TerminalView {
     }
 }
 
-/// The link token in `row` covering char column `col`: the columns it spans, and where it
-/// goes.
-fn link_in(row: &[char], col: usize) -> Option<(std::ops::Range<usize>, Target)> {
-    let r = link_spans(row).find(|r| r.contains(&col))?;
-    let text: String = row[r.clone()].iter().collect();
-    Some((r, Target::parse(&text)))
+/// How many rows above and below the one under the mouse a wrapped link is followed onto.
+const LINK_REACH: i32 = 48;
+
+/// A run of grid rows as the link scan sees them: each row's chars, and whether the
+/// terminal wrapped it onto the next (alacritty's `WRAPLINE` on its last cell).
+type ScanRows<'a> = [(&'a [char], bool)];
+
+/// One link in a [`ScanRows`]: the chars it covers on each row it's on, top to bottom.
+type Pieces = Vec<(usize, std::ops::Range<usize>)>;
+
+/// One row's part of rows joined into a line: where it starts in the line, which row it is,
+/// and the columns of it taken.
+type Part = (usize, usize, std::ops::Range<usize>);
+
+/// The link covering char `col` of row `at` in `rows` — the columns it covers on each row,
+/// and where it goes.
+fn link_in(rows: &ScanRows, at: usize, col: usize) -> Option<(Pieces, Target)> {
+    let pieces = row_links(rows)
+        .into_iter()
+        .find(|p| p.iter().any(|(r, c)| *r == at && c.contains(&col)))?;
+    let text: String = pieces
+        .iter()
+        .flat_map(|(r, c)| &rows[*r].0[c.clone()])
+        .collect();
+    Some((pieces, Target::parse(&text)))
+}
+
+/// Every link in `rows` (see [`link_spans`]). One that goes on over a row's edge is taken
+/// whole: where the terminal wrapped it, and where an app broke it onto the next row with a
+/// newline of its own (Claude Code's sign-in URL) — see [`run_on`].
+fn row_links(rows: &ScanRows) -> Vec<Pieces> {
+    let mut out = Vec::new();
+    // The rows joined into one line, and each one's part of it.
+    let mut line: Vec<char> = Vec::new();
+    let mut parts: Vec<Part> = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        line.clear();
+        parts.clear();
+        line.extend_from_slice(rows[i].0);
+        parts.push((0, i, 0..rows[i].0.len()));
+        let mut r = i;
+        // The column the link the line ends in begins at: found once, then carried on down
+        // the rows an app broke it onto, not looked for again at each.
+        let mut begins = None;
+        while let Some(&(next, _)) = rows.get(r + 1) {
+            let cols = if rows[r].1 {
+                begins = None;
+                0..next.len()
+            } else {
+                if !line.last().is_some_and(|&c| url_char(c)) {
+                    break;
+                }
+                begins = begins.or_else(|| link_begins(&line, &parts));
+                match begins.and_then(|col| run_on(col, next)) {
+                    Some(cols) => cols,
+                    None => break,
+                }
+            };
+            parts.push((line.len(), r + 1, cols.clone()));
+            line.extend_from_slice(&next[cols]);
+            r += 1;
+        }
+        // Every link has a `/` in it; most lines have none, and skip the scan.
+        if line.contains(&'/') {
+            for span in link_spans(&line) {
+                out.push(
+                    parts
+                        .iter()
+                        .filter_map(|(at, row, cols)| {
+                            let (a, b) = (span.start.max(*at), span.end.min(at + cols.len()));
+                            (a < b).then(|| (*row, cols.start + a - at..cols.start + b - at))
+                        })
+                        .collect(),
+                );
+            }
+        }
+        i = r + 1;
+    }
+    out
+}
+
+/// The column (in its row) where the link `line` ends in begins — `line` being rows joined,
+/// as `parts` places them — or `None` when its last word isn't a link.
+fn link_begins(line: &[char], parts: &[Part]) -> Option<usize> {
+    let word = line
+        .iter()
+        .rposition(|c| c.is_whitespace())
+        .map_or(0, |p| p + 1);
+    let begins = word + link_spans(&line[word..]).next()?.start;
+    let (at, _, cols) = parts.iter().rfind(|(at, ..)| *at <= begins)?;
+    Some(cols.start + begins - at)
+}
+
+/// The columns of `next` that carry on a link that ran to the last column of the row above,
+/// where an app broke it with a newline rather than letting the terminal wrap it: `next`
+/// holds nothing but more of it, set in no further than column `begins`, where the link
+/// began — so a line of prose under a URL that happened to reach the edge isn't taken in.
+/// From its first char on, so the link reads on without the indent.
+fn run_on(begins: usize, next: &[char]) -> Option<std::ops::Range<usize>> {
+    let indent = next.iter().position(|c| !c.is_whitespace())?;
+    let end = indent + next[indent..].iter().take_while(|&&c| url_char(c)).count();
+    (end > indent && indent <= begins && next[end..].iter().all(|c| c.is_whitespace()))
+        .then_some(indent..next.len())
+}
+
+/// A char a URL or path holds as is — what one broken onto the next row goes on with.
+fn url_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
 }
 
 /// Every link token in `chars`, as char ranges: http(s) URLs, and absolute (or `~/`) file
@@ -2526,7 +2669,6 @@ impl Element for TerminalElement {
 
         let selection = content.selection;
         let sel_bg: Hsla = theme::get().selected_bg.into();
-        let mut lines: Vec<ShapedLine> = Vec::new();
         // Background and selection runs — one quad per run of same-coloured cells, not per
         // cell: a full-width coloured line was ~200 quads, and quads were most of a frame.
         // Laid out once the shift is known.
@@ -2535,57 +2677,14 @@ impl Element for TerminalElement {
         // Last row with anything on it, for bottom-anchoring.
         let mut last_used: i32 = -1;
         let mut base_line: Option<i32> = None;
-        // Each cell's char, colour, and whether it's in the ⌘-hovered link (underlined).
-        let mut cur_row: Vec<(char, Hsla, bool)> = Vec::new();
+        // Each drawn cell's char, colour, and whether it's in the ⌘-hovered link
+        // (underlined), row after row; and each row's cells, and whether the terminal
+        // wrapped it onto the next. Shaped once every row is in, as links can span rows.
+        let mut cells: Vec<(char, Hsla, bool)> = Vec::new();
+        let mut row_cells: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
+        let (mut row_start, mut wrapped) = (0, false);
+        let last_col = term.columns().saturating_sub(1);
         let mut cur_line_idx: i32 = i32::MIN;
-
-        // Reused across rows: the link scan's chars, without an allocation per row.
-        let mut chars: Vec<char> = Vec::new();
-        let mut flush_row = |lines: &mut Vec<ShapedLine>, row: &mut Vec<(char, Hsla, bool)>| {
-            // Coalesce a row into one shaped line with a run per color / underline change.
-            let text: String = row.iter().map(|(c, ..)| *c).collect();
-            // Every link has a `/` in it; most rows have none, and skip the scan.
-            if text.contains('/') {
-                chars.clear();
-                chars.extend(row.iter().map(|(c, ..)| *c));
-                for r in link_spans(&chars) {
-                    for (_, color, _) in &mut row[r] {
-                        *color = Hsla {
-                            a: color.a,
-                            ..link_fg
-                        };
-                    }
-                }
-            }
-            let mut runs: Vec<TextRun> = Vec::new();
-            for &(c, color, link) in row.iter() {
-                let len = c.len_utf8();
-                if let Some(last) = runs.last_mut() {
-                    if last.color == color && last.underline.is_some() == link {
-                        last.len += len;
-                        continue;
-                    }
-                }
-                runs.push(TextRun {
-                    len,
-                    font: font.clone(),
-                    color,
-                    background_color: None,
-                    underline: link.then(|| UnderlineStyle {
-                        thickness: px(1.0),
-                        color: Some(color),
-                        wavy: false,
-                    }),
-                    strikethrough: None,
-                });
-            }
-            lines.push(
-                window
-                    .text_system()
-                    .shape_line(text.into(), font_size, &runs, None),
-            );
-            row.clear();
-        };
 
         for cell in content.display_iter {
             let line = cell.point.line.0;
@@ -2594,10 +2693,14 @@ impl Element for TerminalElement {
                 base_line = Some(line);
                 cur_line_idx = line;
             }
-            // New grid row → flush the accumulated one.
+            // New grid row → close off the accumulated one.
             if line != cur_line_idx {
-                flush_row(&mut lines, &mut cur_row);
+                row_cells.push((row_start..cells.len(), wrapped));
+                (row_start, wrapped) = (cells.len(), false);
                 cur_line_idx = line;
+            }
+            if col == last_col {
+                wrapped = cell.flags.contains(Flags::WRAPLINE);
             }
             // Second half of a wide char is a spacer — skip (the wide glyph already shaped).
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
@@ -2676,10 +2779,62 @@ impl Element for TerminalElement {
             let in_link = view
                 .link
                 .as_ref()
-                .is_some_and(|l| l.line == cell.point.line && l.cols.contains(&col));
-            cur_row.push((if ch == '\0' { ' ' } else { ch }, fg, in_link));
+                .is_some_and(|l| l.covers(cell.point.line, col));
+            cells.push((if ch == '\0' { ' ' } else { ch }, fg, in_link));
         }
-        flush_row(&mut lines, &mut cur_row);
+        row_cells.push((row_start..cells.len(), wrapped));
+
+        // Links in the terminal's blue — one wrapped onto more rows, every row of it.
+        let chars: Vec<char> = cells.iter().map(|(c, ..)| *c).collect();
+        let scan: Vec<(&[char], bool)> = row_cells
+            .iter()
+            .map(|(r, w)| (&chars[r.clone()], *w))
+            .collect();
+        for link in row_links(&scan) {
+            for (row, cols) in link {
+                let at = row_cells[row].0.start;
+                for (_, color, _) in &mut cells[at + cols.start..at + cols.end] {
+                    *color = Hsla {
+                        a: color.a,
+                        ..link_fg
+                    };
+                }
+            }
+        }
+
+        // Each row coalesced into one shaped line with a run per color / underline change.
+        let mut lines: Vec<ShapedLine> = Vec::with_capacity(row_cells.len());
+        for (range, _) in &row_cells {
+            let row = &cells[range.clone()];
+            let text: String = row.iter().map(|(c, ..)| *c).collect();
+            let mut runs: Vec<TextRun> = Vec::new();
+            for &(c, color, link) in row {
+                let len = c.len_utf8();
+                if let Some(last) = runs.last_mut() {
+                    if last.color == color && last.underline.is_some() == link {
+                        last.len += len;
+                        continue;
+                    }
+                }
+                runs.push(TextRun {
+                    len,
+                    font: font.clone(),
+                    color,
+                    background_color: None,
+                    underline: link.then(|| UnderlineStyle {
+                        thickness: px(1.0),
+                        color: Some(color),
+                        wavy: false,
+                    }),
+                    strikethrough: None,
+                });
+            }
+            lines.push(
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &runs, None),
+            );
+        }
 
         // Bottom-anchor a terminal that hasn't filled its pane yet — live screen, no
         // scrollback, not a fullscreen (alt-screen) app: push the content down so the prompt
@@ -2713,7 +2868,6 @@ impl Element for TerminalElement {
             .chain(&sel_runs)
             .map(|r| quad(r.row, r.col, r.len, r.color))
             .collect();
-        let last_col = term.columns().saturating_sub(1);
         let find_bg: Hsla = theme::get().find_match_bg.into();
         let mut find_quads: Vec<gpui::PaintQuad> = found
             .iter()
@@ -3312,9 +3466,38 @@ mod tests {
             l.target,
             Target::Url("https://github.com/o/r/pull/491".into())
         );
-        assert_eq!(l.cols, 7..38, "the whole URL, not the period after it");
+        assert_eq!(
+            l.rows,
+            [(Line(0), 7..38)],
+            "the whole URL, not the period after it"
+        );
         vcx.simulate_modifiers_change(gpui::Modifiers::none());
         assert_eq!(link(vcx), None, "letting go of ⌘ unmarks it");
+
+        // A URL longer than a row, wrapped by the terminal (rows 1–2) and by an app's own
+        // newline at the edge (rows 3–4, Claude Code's sign-in URL): ⌘ over the last row of
+        // either takes the whole URL.
+        let cols = view.read_with(vcx, |v, _| v.term.lock().columns());
+        let url = format!("https://claude.com/oauth?code={}&state=Z", "a".repeat(cols));
+        let tail = url.len() - cols;
+        view.update(vcx, |v, _| {
+            let mut p: alacritty_terminal::vte::ansi::Processor =
+                alacritty_terminal::vte::ansi::Processor::new();
+            let hard = format!("{url}\r\n{}\r\n{}\r\n", &url[..cols], &url[cols..]);
+            p.advance(&mut *v.term.lock(), hard.as_bytes());
+        });
+        vcx.run_until_parked();
+        for (row, y) in [(2, 2.5), (4, 4.5)] {
+            let at = bounds.origin + gpui::point(gpui::px(cw * 2.5), gpui::px(ch * y));
+            vcx.simulate_mouse_move(at, None, gpui::Modifiers::secondary_key());
+            let l = link(vcx).expect("⌘ over the wrapped URL's last row marks it");
+            assert_eq!(l.target, Target::Url(url.clone()), "row {row}");
+            assert_eq!(
+                l.rows,
+                [(Line(row - 1), 0..cols), (Line(row), 0..tail)],
+                "row {row}"
+            );
+        }
     }
 
     #[test]
@@ -3488,7 +3671,10 @@ mod tests {
 
     #[test]
     fn link_in_finds_urls_and_file_paths_under_the_column() {
-        let at = |line: &str, col| link_in(&line.chars().collect::<Vec<_>>(), col);
+        let at = |line: &str, col| {
+            let chars: Vec<char> = line.chars().collect();
+            link_in(&[(&chars, false)], 0, col).map(|(mut p, t)| (p.remove(0).1, t))
+        };
         let url = |u: &str| Target::Url(u.to_string());
         let file = |p: &str, line| Target::File {
             path: PathBuf::from(p),
@@ -3528,22 +3714,84 @@ mod tests {
         );
     }
 
-    /// Every drawn row with a `/` is scanned for links each frame (see `prepaint`); a
-    /// screenful of long link-heavy rows must stay cheap. Loose budget on purpose — see
-    /// CLAUDE.md.
+    /// A link that runs over a row's edge is taken whole — wrapped by the terminal, or broken
+    /// by an app's newline — but a line of text under a URL that just reached the edge isn't.
     #[test]
-    fn perf_link_spans() {
-        let row: Vec<char> = "see https://x.com/o/r/pull/491, (/Users/k/src/a.rs:42). a/b "
+    fn link_in_joins_a_link_wrapped_onto_more_rows() {
+        // Rows of `rows`, each padded to a 20-column grid; `true` = the terminal wrapped it.
+        let grid = |rows: &[(&str, bool)]| -> Vec<(Vec<char>, bool)> {
+            rows.iter()
+                .map(|(r, w)| (format!("{r:<20}").chars().collect(), *w))
+                .collect()
+        };
+        let at = |rows: &[(Vec<char>, bool)], row, col| {
+            let scan: Vec<(&[char], bool)> = rows.iter().map(|(c, w)| (&c[..], *w)).collect();
+            link_in(&scan, row, col)
+        };
+        let url = |u: &str| Target::Url(u.to_string());
+
+        // The terminal's wrap: taken from either row.
+        let soft = grid(&[("see https://x.com/ab", true), ("c/d. ok", false)]);
+        let whole = (vec![(0, 4..20), (1, 0..3)], url("https://x.com/abc/d"));
+        assert_eq!(at(&soft, 0, 6), Some(whole.clone()));
+        assert_eq!(at(&soft, 1, 1), Some(whole));
+
+        // An app's newline at the edge, over three rows: the URL and every row of it.
+        let hard = grid(&[
+            ("https://x.com/a?b=c.", false),
+            ("d%2Fe+user%3Aplugins", false),
+            ("&s=Z", false),
+        ]);
+        assert_eq!(
+            at(&hard, 2, 1),
+            Some((
+                vec![(0, 0..20), (1, 0..20), (2, 0..4)],
+                url("https://x.com/a?b=c.d%2Fe+user%3Aplugins&s=Z")
+            ))
+        );
+        // Set in under a reply's gutter, no further than where it began.
+        let indented = grid(&[("⏺ https://x.com/abcd", false), ("  efg", false)]);
+        assert_eq!(
+            at(&indented, 1, 3).map(|(_, t)| t),
+            Some(url("https://x.com/abcdefg"))
+        );
+
+        // Prose wrapped under a URL that reached the edge, or text set in further than the
+        // URL began, isn't more of it.
+        for next in ["and more words", "    tail"] {
+            let rows = grid(&[("https://x.com/abcdef", false), (next, false)]);
+            assert_eq!(
+                at(&rows, 0, 3).map(|(_, t)| t),
+                Some(url("https://x.com/abcdef"))
+            );
+            assert_eq!(at(&rows, 1, 5), None, "{next:?}");
+        }
+    }
+
+    /// Every drawn row is scanned for links each frame (see `prepaint`), joined onto the
+    /// next where one runs over its edge; a screenful of long link-heavy rows, then one of a
+    /// single URL an app broke down every row, must stay cheap. Loose budget on purpose —
+    /// see CLAUDE.md.
+    #[test]
+    fn perf_row_links() {
+        let busy: Vec<char> = "see https://x.com/o/r/pull/491, (/Users/k/src/a.rs:42). a/b "
             .repeat(8)
             .chars()
             .collect();
+        let first: Vec<char> = format!("https://x.com/{}", "a".repeat(busy.len() - 14))
+            .chars()
+            .collect();
+        let more = vec!['b'; busy.len()];
+        let mut rows: Vec<(&[char], bool)> = vec![(&busy, false); 60];
+        rows.push((&first, false));
+        rows.extend(vec![(&more[..], false); 59]);
         let t0 = Instant::now();
         let mut n = 0;
-        for _ in 0..10_000 {
-            n += link_spans(&row).count();
+        for _ in 0..1_000 {
+            n += row_links(&rows).len();
         }
         let took = t0.elapsed();
-        assert_eq!(n, 160_000);
+        assert_eq!(n, 1_000 * (60 * 16 + 1));
         assert!(took < Duration::from_secs(2), "link scan took {took:?}");
     }
 
