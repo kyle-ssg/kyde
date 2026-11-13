@@ -935,7 +935,14 @@ impl Kyde {
                     .truncate()
                     .child(SharedString::from(self.agents_wt_title(space, wt)));
                 let line = self
-                    .agents_wt_line("menu-wt-git", space, wt, at.0, title.into_any_element())
+                    .agents_wt_line(
+                        "menu-wt-git",
+                        space,
+                        wt,
+                        at.0,
+                        title.into_any_element(),
+                        None,
+                    )
                     .flex_1()
                     .min_w_0();
                 let run = run.clone();

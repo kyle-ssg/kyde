@@ -111,6 +111,121 @@ impl Kyde {
         .detach();
     }
 
+    /// The projects whose Code-tab rows show a CI icon: the unfolded git ones (none with the
+    /// row setting off).
+    fn ci_row_spaces(&self) -> Vec<PathBuf> {
+        let cfg = &self.agents.cfg;
+        if !cfg.row.ci {
+            return Vec::new();
+        }
+        let folded = |g: u32| cfg.groups.iter().any(|x| x.id == g && x.collapsed);
+        cfg.spaces
+            .iter()
+            .filter(|s| !s.scratch && !s.collapsed && !s.group.is_some_and(folded))
+            .filter(|s| self.agents.git_spaces.contains(&s.path))
+            .map(|s| s.path.clone())
+            .collect()
+    }
+
+    /// Load the runs the rows' CI icons need that aren't in yet (a project just unfolded, or
+    /// the view just opened).
+    pub(super) fn agents_load_row_ci(&mut self, cx: &mut Context<Self>) {
+        for space in self.ci_row_spaces() {
+            if !self.agents.ci.runs.contains_key(&space) {
+                self.agents_fetch_runs(space, true, cx);
+            }
+        }
+    }
+
+    /// The ticker's re-load of the rows' CI runs while the Code tab shows: like the CI tab's
+    /// lists, faster for a project with a run under way.
+    #[cfg(feature = "terminal")]
+    pub(super) fn agents_refresh_row_ci(&mut self, ticks: u32, cx: &mut Context<Self>) {
+        for space in self.ci_row_spaces() {
+            let every = if self.agents_ci_running(&space) > 0 {
+                CI_EVERY_TICKS
+            } else {
+                GH_EVERY_TICKS
+            };
+            if ticks.is_multiple_of(every) {
+                self.agents_fetch_runs(space, true, cx);
+            }
+        }
+    }
+
+    /// A worktree of `space` just pushed (its unpushed count fell to 0): re-load the
+    /// project's runs once GitHub has had a moment to start the new ones, so its row's CI
+    /// icon doesn't keep showing the previous run's outcome.
+    pub(super) fn agents_ci_after_push(&mut self, space: PathBuf, cx: &mut Context<Self>) {
+        if !self.agents.ci.runs.contains_key(&space) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(6))
+                .await;
+            this.update(cx, |this, cx| this.agents_fetch_runs(space, true, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Worktree `wt`'s CI icon: its branch's run most worth a look in the project's list —
+    /// failed, under way or passed, the tooltip naming it. Given `cx`, a click opens that run
+    /// in the CI tab. Nothing until the list is in, or for a branch with no runs.
+    pub(crate) fn agents_row_ci(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        space: &Path,
+        wt: &Path,
+        cx: Option<&mut Context<Self>>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let Some(GhList::Ready(runs)) = self.agents.ci.runs.get(space) else {
+            return None;
+        };
+        let branch = self.agents.branches.get(wt)?;
+        let run = kyde_git::github::branch_headline(runs, branch)?;
+        let state = run.state();
+        let (_, color) = state_glyph(state);
+        let icon = match state {
+            RunState::Passed => "icons/circle-check.svg",
+            RunState::Failed => "icons/circle-x.svg",
+            RunState::Running => "icons/circle-dot.svg",
+        };
+        let mut tip = format!(
+            "CI: {} #{} {}",
+            run.workflow,
+            run.number,
+            run_label(&run.status, &run.conclusion).to_lowercase()
+        );
+        let ago = crate::agents::iso_ago(&run.created_at);
+        if state != RunState::Running && !ago.is_empty() {
+            tip.push_str(&format!(" · {ago}"));
+        }
+        if cx.is_some() {
+            tip.push_str(" — click to open it");
+        }
+        let (space, run_id) = (space.to_path_buf(), run.id);
+        Some(
+            div()
+                .id(id)
+                .flex_none()
+                .tooltip(ui::tip(tip))
+                .child(svg().path(icon).size(px(12.0)).text_color(color))
+                .when_some(cx, |d, cx| {
+                    d.cursor_pointer().on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            // Not the row's own click (select / drag).
+                            cx.stop_propagation();
+                            this.agents_jump_gh(space.clone(), SideTab::Ci, cx);
+                            this.agents_select_gh(space.clone(), SideTab::Ci, run_id, cx);
+                        }),
+                    )
+                }),
+        )
+    }
+
     /// Whether the list shows `run`: it passes the filter and matches the search (`query`,
     /// lowercased) on its title, workflow or branch.
     fn ci_shows(&self, run: &WorkflowRun, query: &str) -> bool {

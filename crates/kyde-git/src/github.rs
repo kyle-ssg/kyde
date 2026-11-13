@@ -1358,11 +1358,38 @@ pub fn branch_runs(dir: &Path, branch: &str) -> Result<Vec<WorkflowRun>> {
 /// ```
 #[must_use]
 pub fn headline_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
-    let latest = || runs.iter().filter(|r| r.superseded_by.is_none());
+    headline(runs, |_| true)
+}
+
+/// [`headline_run`] of just `runs`' runs on `branch` — what the sidebar's CI icon for a
+/// worktree on that branch shows, from the project's whole list (no per-branch `gh` call).
+///
+/// ```
+/// use kyde_git::github::{branch_headline, parse_runs};
+/// let v = parse_runs(
+///     r#"[{"databaseId":3,"workflowName":"build","headBranch":"main","status":"in_progress"},
+///        {"databaseId":2,"workflowName":"build","headBranch":"fix-y","status":"completed",
+///         "conclusion":"success"},
+///        {"databaseId":1,"workflowName":"lint","headBranch":"fix-y","status":"completed",
+///         "conclusion":"failure"}]"#,
+/// ).unwrap();
+/// assert_eq!(branch_headline(&v, "fix-y").map(|r| r.id), Some(1)); // not main's run
+/// assert_eq!(branch_headline(&v, "main").map(|r| r.id), Some(3));
+/// assert!(branch_headline(&v, "never-pushed").is_none());
+/// ```
+#[must_use]
+pub fn branch_headline<'a>(runs: &'a [WorkflowRun], branch: &str) -> Option<&'a WorkflowRun> {
+    headline(runs, |r| r.branch == branch)
+}
+
+/// [`headline_run`] of the `runs` that `keep` lets through.
+fn headline(runs: &[WorkflowRun], keep: impl Fn(&WorkflowRun) -> bool) -> Option<&WorkflowRun> {
+    let kept = || runs.iter().filter(|r| keep(r));
+    let latest = || kept().filter(|r| r.superseded_by.is_none());
     latest()
         .find(|r| r.state() == RunState::Failed)
         .or_else(|| latest().find(|r| r.state() == RunState::Running))
-        .or_else(|| runs.first())
+        .or_else(|| kept().next())
 }
 
 /// Parse `gh run list --json databaseId,number,…` (see `RUN_FIELDS`; newest first), marking

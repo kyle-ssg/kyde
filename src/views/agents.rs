@@ -492,6 +492,7 @@ impl Kyde {
                 if this.agents_adopt_worktrees(listed) {
                     this.agents_save(cx);
                 }
+                this.agents_load_row_ci(cx);
                 cx.notify();
                 this.agents
                     .cfg
@@ -510,6 +511,24 @@ impl Kyde {
                 .spawn(async move { crate::agents::per_worktree(all, crate::agents::read_git) })
                 .await;
             this.update(cx, |this, cx| {
+                // A worktree whose unpushed commits are gone just pushed: its CI is starting.
+                let pushed: Vec<PathBuf> = this
+                    .agents
+                    .cfg
+                    .spaces
+                    .iter()
+                    .filter(|s| {
+                        read.iter().any(|(wt, r)| {
+                            r.as_ref().is_some_and(|(_, g)| g.ahead == 0)
+                                && this.agents.git.get(wt).is_some_and(|o| o.ahead > 0)
+                                && (s.path == *wt || s.worktrees.contains(wt))
+                        })
+                    })
+                    .map(|s| s.path.clone())
+                    .collect();
+                for space in pushed {
+                    this.agents_ci_after_push(space, cx);
+                }
                 this.agents.git.clear();
                 for (wt, r) in read {
                     if let Some((branch, g)) = r {
@@ -2984,6 +3003,10 @@ impl Kyde {
         };
         if self.mode == Mode::Agents && gh_tab != SideTab::Code && ticks.is_multiple_of(every) {
             self.agents_refresh_gh(gh_tab, true, cx);
+        }
+        // The Code tab's rows show their branch's CI.
+        if self.mode == Mode::Agents && gh_tab == SideTab::Code {
+            self.agents_refresh_row_ci(ticks, cx);
         }
         if self.mode == Mode::Agents
             && ticks.is_multiple_of(SUB_AGE_TICKS)
@@ -7468,8 +7491,9 @@ impl Kyde {
 
     /// A worktree's line as its sidebar row draws it: the status dot, a branch glyph on the
     /// project's own checkout, `title`, then what needs saying — "needs input" / "done", how
-    /// long ago it was active, its git badges (each per the row settings). `ns` + `id` keep
-    /// the badges' element id unique where it's drawn.
+    /// long ago it was active, its branch's CI, its git badges (each per the row settings).
+    /// `ns` + `id` keep the badges' element ids unique where it's drawn; given `cx`, a click
+    /// on the CI icon opens its run.
     pub(crate) fn agents_wt_line(
         &self,
         ns: &'static str,
@@ -7477,6 +7501,7 @@ impl Kyde {
         wt: &Path,
         id: usize,
         title: gpui::AnyElement,
+        cx: Option<&mut Context<Self>>,
     ) -> gpui::Div {
         let t = theme::get();
         let fields = self.agents.cfg.row;
@@ -7505,11 +7530,17 @@ impl Kyde {
                     .text_color(t.line_number)
                     .child(SharedString::from(short_age(at.elapsed())))
             });
+        let ci = fields
+            .ci
+            .then(|| {
+                self.agents_row_ci((SharedString::from(format!("{ns}-ci")), id), space, wt, cx)
+            })
+            .flatten();
         let badges = fields
             .git
             .then(|| git_badges((ns, id), self.agents.git.get(wt)))
             .flatten();
-        // One line: dot, title, then what needs saying (status, activity, git).
+        // One line: dot, title, then what needs saying (status, activity, CI, git).
         title_line()
             .child(status_dot(state))
             .when(is_default, |d| {
@@ -7539,6 +7570,7 @@ impl Kyde {
             })
             .children(status)
             .children(activity)
+            .children(ci)
             .children(badges)
     }
 
@@ -7581,7 +7613,7 @@ impl Kyde {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .child(self.agents_wt_line("agents-wt-git", space, wt, id, title_el));
+            .child(self.agents_wt_line("agents-wt-git", space, wt, id, title_el, Some(cx)));
         // Any row drags to a new place in its project (the checkout too).
         let drag_item = (!self.agents.cfg.sort_attention).then(|| DragItem::Worktree {
             space: space.to_path_buf(),

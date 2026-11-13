@@ -112,6 +112,9 @@ pub struct RowFields {
     /// How long since its agent last did anything.
     #[serde(default)]
     pub activity: bool,
+    /// Its branch's CI: the GitHub Actions run most worth a look (failed / running / passed).
+    #[serde(default = "yes")]
+    pub ci: bool,
 }
 
 impl Default for RowFields {
@@ -121,6 +124,7 @@ impl Default for RowFields {
             git: true,
             status: true,
             activity: false,
+            ci: true,
         }
     }
 }

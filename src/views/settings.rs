@@ -1031,6 +1031,13 @@ impl Kyde {
                 cx,
             ))
             .child(toggle(
+                "agents-row-ci",
+                row.ci,
+                "CI — its branch's GitHub Actions: failed, running or passed",
+                |c| c.row.ci = !c.row.ci,
+                cx,
+            ))
+            .child(toggle(
                 "agents-row-activity",
                 row.activity,
                 "How long since its agent last did anything",
