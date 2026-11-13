@@ -84,6 +84,9 @@ const CONTEXT_W: f32 = 320.0;
 /// Space between two tabs of a worktree's strip (px) — the drop line sits in the middle.
 #[cfg(feature = "terminal")]
 const AGENT_TAB_GAP: f32 = 4.0;
+/// How far a strip tab's title shortens (px of text) before tabs go behind the `▾`.
+#[cfg(feature = "terminal")]
+const AGENT_TAB_BRIEF: f32 = 80.0;
 /// A worktree row's tree line sits under its space's dot centre…
 const WT_LINE_X: f32 = ROW_PAD_X + CHEVRON_W + GAP + DOT / 2.0;
 /// …and its own dot starts a stub's length to the right.
@@ -8044,27 +8047,29 @@ impl Kyde {
         let renamed = |tab: &AgentTab| {
             self.agents.renaming == Some(RenameTarget::Tab(wt.to_path_buf(), tab.id.clone()))
         };
-        // The tabs that fit show, and the rest wait behind a `▾` menu — as the sidebar's tabs
-        // do — so none is ever clipped off the strip. The one on screen (or being renamed)
-        // always shows. Each pill's width is measured as it's laid out below: border and
-        // padding, its parts and the 6 px gaps between them, capped at 260.
+        // Short of room, the titles shorten (to `AGENT_TAB_BRIEF`) before any tab goes behind
+        // a `▾` menu — as the sidebar's tabs do — so none is ever clipped off the strip. The
+        // one on screen (or being renamed) always shows. Each pill's width is measured as it's
+        // laid out below: border and padding, its parts and the 6 px gaps between them, capped
+        // at 260 — in full, and with its title shortened.
         let widths: Vec<(f32, f32)> = {
             let text_w = text_width(cx, ui);
             let fs = t.ui_font_size;
             let tab_w = |tab: &AgentTab, title: &str| {
-                let label = if renamed(tab) {
-                    140.0
+                let (label, brief) = if renamed(tab) {
+                    (140.0, 140.0)
                 } else {
-                    text_w(title, fs)
+                    let w = text_w(title, fs);
+                    (w, w.min(AGENT_TAB_BRIEF))
                 };
-                let mut w = 2.0 + 8.0 + DOT + 6.0 + label + 6.0 + 18.0 + 4.0;
+                let mut w = 2.0 + 8.0 + DOT + 6.0 + 6.0 + 18.0 + 4.0;
                 if !tab.subs.is_empty() {
                     w += 6.0 + 12.0 + 2.0 + text_w(&tab.subs.len().to_string(), fs - 1.0);
                 }
                 if tab.verdict.is_some() {
                     w += 6.0 + text_w("✓", fs);
                 }
-                w.min(260.0)
+                ((w + label).min(260.0), (w + brief).min(260.0))
             };
             let sub_w = |bg: &Bg| {
                 let (mark, end) = match bg {
@@ -8075,13 +8080,16 @@ impl Kyde {
                     ),
                 };
                 let what = text_w(&bg.sub().what, fs);
-                (2.0 + 8.0 + mark + 6.0 + 13.0 + 6.0 + what + end).min(260.0)
+                let w = 2.0 + 8.0 + mark + 6.0 + 13.0 + 6.0 + end;
+                (
+                    (w + what).min(260.0),
+                    (w + what.min(AGENT_TAB_BRIEF)).min(260.0),
+                )
             };
             tabs.iter()
                 .zip(&titles)
                 .map(|(tab, title)| tab_w(tab, title))
                 .chain(subs.iter().map(sub_w))
-                .map(|w| (w, w))
                 .collect()
         };
         let keep = tabs
@@ -8098,7 +8106,9 @@ impl Kyde {
         // The strip's room for them: the pane less its padding (8 px a side) and its four 24 px
         // tools, 4 px apart — the spacer between those takes none when it's tight.
         let room = self.agents_pane_w(window) - 16.0 - 4.0 * 24.0 - 5.0 * 4.0;
-        let (shown, _) = fit_tabs(room, &widths, keep, AGENT_TAB_GAP, 24.0);
+        let (shown, short) = fit_tabs(room, &widths, keep, AGENT_TAB_GAP, 24.0);
+        // Shortened, the shown tabs share the room out, none narrower than its brief width.
+        let floor = |i: usize| short.then(|| px(widths[i].1));
         let hidden: Vec<(StripTab, SharedString, AgentState)> = (0..widths.len())
             .filter(|i| !shown.contains(i))
             .filter_map(|i| {
@@ -8167,6 +8177,13 @@ impl Kyde {
                 .line(&tab.id, |k| tabs.iter().position(|t| &t.id == k));
             let (press, hover) = (tab.id.clone(), tab.id.clone());
             let title = SharedString::from(titles[i].clone());
+            // A title that may be cut short is in full on hover.
+            let tip = match (&tab.verdict, short && widths[i].1 < widths[i].0) {
+                (Some(why), true) => Some(format!("{title} — finished: {why}")),
+                (Some(why), false) => Some(format!("Finished: {why}")),
+                (None, true) => Some(title.to_string()),
+                (None, false) => None,
+            };
             let renaming = renamed(tab);
             let grp = SharedString::from(format!("agents-tab-{i}"));
             let (sel, menu_wt) = (wt.to_path_buf(), wt.to_path_buf());
@@ -8188,8 +8205,10 @@ impl Kyde {
                     }))
                     .flex()
                     .flex_row()
-                    // (Gives way — truncating its title — only if the measure above was short.)
+                    // (Gives way — truncating its title — down to its brief width when the
+                    // strip's short of room, and further only if the measure above was off.)
                     .min_w_0()
+                    .when_some(floor(i), gpui::Styled::min_w)
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))
@@ -8251,10 +8270,10 @@ impl Kyde {
                                 .child(SharedString::from(n.to_string())),
                         )
                     })
+                    .when_some(tip, |d, tip| d.tooltip(ui::tip(tip)))
                     // The cleanup found it finished (closable from the Clean Up window).
-                    .when_some(tab.verdict.clone(), |d, why| {
-                        d.tooltip(ui::tip(format!("Finished: {why}")))
-                            .child(div().flex_none().text_color(t.status_added).child("✓"))
+                    .when(tab.verdict.is_some(), |d| {
+                        d.child(div().flex_none().text_color(t.status_added).child("✓"))
                     })
                     .child(
                         div()
@@ -8344,6 +8363,7 @@ impl Kyde {
                     .flex()
                     .flex_row()
                     .min_w_0()
+                    .when_some(floor(tabs.len() + k), gpui::Styled::min_w)
                     .items_center()
                     .gap_1p5()
                     .max_w(px(260.0))

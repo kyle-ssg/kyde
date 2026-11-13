@@ -8486,8 +8486,9 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
-    /// More tabs than the strip has room for: as many as fit show, at full width and the one
-    /// on screen among them, and the rest wait behind a `▾` whose menu brings one up.
+    /// More tabs than the strip has room for: their titles shorten first, then as many as fit
+    /// show — the one on screen among them — and the rest wait behind a `▾` whose menu brings
+    /// one up.
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn agents_tab_strip_overflows_into_a_menu(cx: &mut TestAppContext) {
@@ -8525,19 +8526,24 @@ mod gpui_smoke_tests {
         let shown: Vec<usize> = (0..12).filter(|&i| tab(&mut vcx, i).is_some()).collect();
         assert!(shown.len() > 1 && shown.len() < 12, "{shown:?}");
         assert!(shown.contains(&11), "the newest tab, on screen, shows");
+        let brief = tab(&mut vcx, 11).unwrap().size.width;
+        assert!(brief < full - gpui::px(1.0), "not shortened: {brief:?}");
         for i in &shown {
             let w = tab(&mut vcx, *i).unwrap().size.width;
-            assert!((w - full).abs() < gpui::px(0.5), "tab {i} squeezed: {w:?}");
+            assert!(
+                (w - brief).abs() <= gpui::px(1.0),
+                "tab {i} squeezed: {w:?}"
+            );
         }
         // The strip is full: past the ▾, + and the shell button, too little room is left
-        // for another tab.
+        // for another shortened tab.
         let more = vcx
             .debug_bounds("agents-tab-more")
             .expect("a ▾ for the rest");
         let tools = vcx.debug_bounds("agents-context-toggle").unwrap();
         let spare = tools.left() - more.right() - gpui::px(4.0 * 4.0 + 2.0 * 24.0);
         assert!(
-            spare >= gpui::px(0.0) && spare < full + gpui::px(4.0),
+            spare >= gpui::px(0.0) && spare < brief + gpui::px(4.0),
             "{spare:?}"
         );
         vcx.simulate_mouse_down(
