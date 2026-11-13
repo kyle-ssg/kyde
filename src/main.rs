@@ -3762,6 +3762,9 @@ impl gpui::AssetSource for Assets {
             // A project row's `…` menu: jump to its issues / pull requests / CI.
             "icons/ellipsis.svg" => include_bytes!("../assets/icons/ellipsis.svg"),
             "icons/circle-dot.svg" => include_bytes!("../assets/icons/circle-dot.svg"),
+            // A worktree row's CI icon: its branch's runs passed / failed (running: circle-dot).
+            "icons/circle-check.svg" => include_bytes!("../assets/icons/circle-check.svg"),
+            "icons/circle-x.svg" => include_bytes!("../assets/icons/circle-x.svg"),
             "icons/git-pull-request.svg" => {
                 include_bytes!("../assets/icons/git-pull-request.svg")
             }

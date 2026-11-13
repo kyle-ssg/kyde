@@ -99,6 +99,9 @@ pub struct Theme {
     /// Merge-conflict file status colour.
     #[serde(with = "hex")]
     pub status_conflict: Rgba,
+    /// Under-way status colour: a CI run or PR check still queued / running.
+    #[serde(with = "hex")]
+    pub status_pending: Rgba,
 
     // Diff hunk backgrounds
     /// Inserted-line background in the diff.
@@ -275,6 +278,9 @@ fn apply_cvd(base: Theme, a: Cvd) -> Theme {
         status_modified: c(a.modified),
         status_deleted: c(a.deleted),
         status_conflict: c(a.conflict),
+        // Pending rides the modified accent: already tuned apart from pass (added) and
+        // fail (conflict) for the deficiency.
+        status_pending: c(a.modified),
         diff_inserted_bg: c(a.ins_bg),
         diff_deleted_bg: c(a.del_bg),
         diff_modified_bg: c(a.mod_bg),
@@ -328,6 +334,8 @@ impl Default for Theme {
             // "new" (green) like a staged addition rather than a scary red.
             status_untracked: c(0x73BD79),
             status_conflict: c(0xDE6A66),
+            // Amber: a CI run / check under way — clear of pass green, fail red, modified blue.
+            status_pending: c(0xE0A84A),
 
             diff_inserted_bg: c(0x294436),
             diff_deleted_bg: c(0x484A4A),
@@ -400,6 +408,7 @@ impl Theme {
             status_deleted: c(0x777779), // dark300
             status_untracked: c(0x21A848),
             status_conflict: c(0xD70015), // danger900
+            status_pending: c(0xB7791F),  // amber, darkened for contrast on white
 
             // Diff hunk backgrounds (faint tints on white)
             diff_inserted_bg: c(0xE3F6E9),
@@ -1065,6 +1074,7 @@ mod tests {
                 ("status_added", t.status_added),
                 ("status_modified", t.status_modified),
                 ("status_conflict", t.status_conflict),
+                ("status_pending", t.status_pending),
                 ("syn_string", t.syn_string),
                 ("syn_keyword", t.syn_keyword),
                 ("syn_number", t.syn_number),
