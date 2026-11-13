@@ -45,6 +45,20 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.18.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.17.0...kyde-v2.18.0) (2026-11-13)
+
+
+### Features
+
+* **agents:** each worktree row shows its branch's CI ([#201](https://github.com/kyle-ssg/kyde/issues/201)) ([c5db3e2](https://github.com/kyle-ssg/kyde/commit/c5db3e280956ceb5658775884fccbda0364ff5aa))
+
+
+### Bug Fixes
+
+* **agents:** removing a finished worktree doesn't ask first ([#204](https://github.com/kyle-ssg/kyde/issues/204)) ([c9b0b80](https://github.com/kyle-ssg/kyde/commit/c9b0b80cca69fdc981cbb8f88f26f1cf2caa7969))
+* **agents:** tab titles shorten before tabs go behind the ▾ ([#203](https://github.com/kyle-ssg/kyde/issues/203)) ([ebe1edb](https://github.com/kyle-ssg/kyde/commit/ebe1edb019cc6affc095327d3dc2fd5d230e9f9a))
+* **terminal:** ⌘-click takes a URL wrapped onto more rows whole ([#200](https://github.com/kyle-ssg/kyde/issues/200)) ([23aa7fc](https://github.com/kyle-ssg/kyde/commit/23aa7fcee46fcea5667f29d51dccd3d1402847c9))
+
 ## [2.17.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.16.0...kyde-v2.17.0) (2026-11-12)
 
 
