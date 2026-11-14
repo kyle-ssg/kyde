@@ -81,11 +81,11 @@ pub struct Release {
     pub version: String,
     /// Raw tag, e.g. "v1.0.1".
     pub tag: String,
-    /// `browser_download_url` of the macOS `.app` zip (empty if the release has no zip asset).
-    /// May be a `file://` URL in tests.
+    /// `browser_download_url` of the macOS `.app` zip for this CPU (empty off macOS, where
+    /// there is no in-place install). May be a `file://` URL in tests.
     pub zip_url: String,
-    /// URL of the zip's `.sha256` checksum asset (empty when the release has none — only
-    /// pre-checksum releases and bare dev fixtures; https installs refuse to proceed then).
+    /// URL of the zip's `.sha256` checksum asset (empty off macOS; an https install refuses
+    /// to proceed without one).
     pub sha256_url: String,
     /// Release page URL — the fallback when we can't swap in place (dev binary / no asset).
     pub page_url: String,
@@ -172,34 +172,37 @@ pub fn running_bundle() -> Option<PathBuf> {
         .map(std::path::Path::to_path_buf)
 }
 
-/// Pull the latest-release metadata and return it only when it's newer than what's running.
-/// `Ok(None)` = already up to date; `Err` = network/parse failure (callers stay quiet).
+/// Pull the latest-release metadata and return it only when it's newer than what's running
+/// and this platform's build is attached to it.
+/// `Ok(None)` = nothing to offer yet; `Err` = network/parse failure (callers stay quiet).
 pub fn check() -> Result<Option<Release>> {
     let body = curl_text(&feed_url())?;
-    Ok(parse_feed(&body, &current_version()).map(|r| for_os(r, std::env::consts::OS)))
+    Ok(parse_feed(
+        &body,
+        &current_version(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ))
 }
 
-/// Release zips are macOS `.app` bundles, so only macOS keeps one. Anywhere else the release
-/// carries no zip, and the update banner's Download opens the release page — where that
-/// platform's own build (the Linux `AppImage`) lives — instead of fetching a Mac zip.
-fn for_os(mut rel: Release, os: &str) -> Release {
-    if os != "macos" {
-        rel.zip_url.clear();
-        rel.sha256_url.clear();
-    }
-    rel
-}
-
-/// Pure feed → `Option<Release>` so it's unit-testable without the network.
-pub fn parse_feed(body: &str, current: &str) -> Option<Release> {
+/// Pure feed → `Option<Release>` so it's unit-testable without the network. `os` / `arch`
+/// are `std::env::consts::{OS, ARCH}`.
+///
+/// A release is only offered once it carries a build for `os`: release-please publishes the
+/// release *before* CI attaches the assets, one platform at a time, and a slice can fail
+/// outright (e.g. Mac notarization) while the others land.
+/// - macOS installs the zip in place, so it needs the zip for this CPU *and* its `.sha256`
+///   (an https install refuses without one).
+/// - Linux has no in-place swap — the banner opens the release page — so that page must
+///   have an `AppImage` on it. Release zips are Mac `.app` bundles, never offered here.
+/// - Kyde ships nothing else, so nowhere else is offered a release.
+pub fn parse_feed(body: &str, current: &str, os: &str, arch: &str) -> Option<Release> {
     let json: serde_json::Value = serde_json::from_str(body).ok()?;
     let tag = json["tag_name"].as_str().unwrap_or("").trim().to_string();
     if tag.is_empty() || !is_newer(&tag, current) {
         return None;
     }
     let page_url = json["html_url"].as_str().unwrap_or("").to_string();
-    // Pick the asset matching the running CPU (e.g. `kyde-macos-arm64.zip` on Apple Silicon,
-    // `kyde-macos-x86_64.zip` on Intel), falling back to a generic/legacy zip. Empty if none.
     let urls: Vec<&str> = json["assets"]
         .as_array()
         .map(|assets| {
@@ -209,15 +212,20 @@ pub fn parse_feed(body: &str, current: &str) -> Option<Release> {
                 .collect()
         })
         .unwrap_or_default();
-    let zip_url = pick_asset_url(&urls, std::env::consts::ARCH).unwrap_or_default();
-    // The checksum asset sits next to the zip as `<asset>.sha256`, so its download URL is
-    // exactly the zip's with that suffix. Empty when the release didn't publish one.
-    let want_sha = format!("{zip_url}.sha256");
-    let sha256_url = urls
-        .iter()
-        .find(|u| **u == want_sha)
-        .map(|u| (*u).to_string())
-        .unwrap_or_default();
+    let (zip_url, sha256_url) = match os {
+        "macos" => {
+            // The asset matching the running CPU (e.g. `kyde-macos-x86_64.zip` on Intel).
+            let zip = pick_asset_url(&urls, arch)?;
+            // The checksum sits next to the zip as `<asset>.sha256`.
+            let sha = format!("{zip}.sha256");
+            if !urls.contains(&sha.as_str()) {
+                return None;
+            }
+            (zip, sha)
+        }
+        "linux" if urls.iter().any(|u| u.ends_with(".AppImage")) => (String::new(), String::new()),
+        _ => return None,
+    };
     Some(Release {
         version: norm(&tag),
         tag,
@@ -312,9 +320,10 @@ const ALL_ARCH_TOKENS: &[&str] = &["arm64", "aarch64", "x86_64", "x86-64", "x64"
 
 /// Choose the `.zip` asset for `arch` from a release's asset URLs:
 ///   1. an asset whose name carries this arch's token (`…-arm64.zip` / `…-x86_64.zip`);
-///   2. else a *generic* zip with no arch token (covers single-asset / legacy releases like
-///      `kyde-macos.zip`);
-///   3. else `None` — never install an explicitly wrong-arch build.
+///   2. else, on Apple Silicon only, a *generic* zip with no arch token: `kyde-macos.zip` is
+///      the arm64 build (it kept its pre-per-arch name, see release.yml), so Intel taking it
+///      — e.g. while the Intel zip is still uploading — would install an app that can't run;
+///   3. else `None` — never install a wrong-arch build.
 pub fn pick_asset_url(urls: &[&str], arch: &str) -> Option<String> {
     let mine = arch_tokens(arch);
     let zips = || {
@@ -327,6 +336,9 @@ pub fn pick_asset_url(urls: &[&str], arch: &str) -> Option<String> {
         mine.iter().any(|t| l.contains(t))
     }) {
         return Some(u.to_string());
+    }
+    if arch != "aarch64" {
+        return None;
     }
     if let Some(u) = zips().find(|u| {
         let l = u.to_lowercase();
@@ -590,30 +602,72 @@ mod tests {
         }"#;
         // Newer than 1.0.0 → surfaced, picks the .zip asset (NOT its .sha256 sibling) and
         // the matching checksum asset.
-        let r = parse_feed(feed, "1.0.0").expect("should surface a newer release");
+        let r =
+            parse_feed(feed, "1.0.0", "macos", "aarch64").expect("should surface a newer release");
         assert_eq!(r.version, "1.2.0");
         assert_eq!(r.tag, "v1.2.0");
         assert_eq!(r.zip_url, "https://example.com/kyde-macos.zip");
         assert_eq!(r.sha256_url, "https://example.com/kyde-macos.zip.sha256");
         assert!(r.page_url.contains("v1.2.0"));
         // Same/newer current → nothing to offer.
-        assert_eq!(parse_feed(feed, "1.2.0"), None);
-        assert_eq!(parse_feed(feed, "1.3.0"), None);
+        assert_eq!(parse_feed(feed, "1.2.0", "macos", "aarch64"), None);
+        assert_eq!(parse_feed(feed, "1.3.0", "macos", "aarch64"), None);
     }
 
-    /// A release without a checksum asset parses (old releases exist), but an https install
-    /// from it must be refused — never swap in an unverifiable binary.
+    /// The banner must not appear before this platform's build is on the release. v2.18.0:
+    /// Mac notarization failed, the Linux `AppImage` landed, and Macs were told to update to
+    /// a release with nothing for them.
+    #[test]
+    fn a_release_is_offered_only_once_this_platforms_build_is_attached() {
+        let feed = |assets: &[&str]| {
+            let assets: Vec<String> = assets
+                .iter()
+                .map(|a| format!(r#"{{ "browser_download_url": "https://x/{a}" }}"#))
+                .collect();
+            format!(
+                r#"{{ "tag_name": "kyde-v9.9.9", "html_url": "u", "assets": [{}] }}"#,
+                assets.join(",")
+            )
+        };
+        let linux_only = feed(&[
+            "kyde-linux-x86_64.AppImage",
+            "kyde-linux-x86_64.AppImage.sha256",
+        ]);
+        assert_eq!(parse_feed(&linux_only, "1.0.0", "macos", "aarch64"), None);
+        let on_linux =
+            parse_feed(&linux_only, "1.0.0", "linux", "x86_64").expect("Linux build is up");
+        assert_eq!(on_linux.page_url, "u");
+
+        // Zip uploaded, checksum not yet — installing now would be refused, so don't offer.
+        assert_eq!(
+            parse_feed(&feed(&["kyde-macos.zip"]), "1.0.0", "macos", "aarch64"),
+            None
+        );
+
+        // Mac-only release: Linux isn't told to update. Once both are up, Linux links the
+        // page but is never handed the Mac `.app` zip.
+        let mac = ["kyde-macos.zip", "kyde-macos.zip.sha256"];
+        assert_eq!(parse_feed(&feed(&mac), "1.0.0", "linux", "x86_64"), None);
+        let both = feed(&[mac[0], mac[1], "kyde-linux-x86_64.AppImage"]);
+        let r = parse_feed(&both, "1.0.0", "linux", "x86_64").expect("both builds are up");
+        assert!(r.zip_url.is_empty() && r.sha256_url.is_empty());
+
+        // Only the arm64 slice is up (the generic name): Intel waits for its own zip.
+        assert!(parse_feed(&feed(&mac), "1.0.0", "macos", "aarch64").is_some());
+        assert_eq!(parse_feed(&feed(&mac), "1.0.0", "macos", "x86_64"), None);
+
+        // Nothing attached yet: nowhere is offered it.
+        for os in ["macos", "linux", "windows"] {
+            assert_eq!(parse_feed(&feed(&[]), "1.0.0", os, "aarch64"), None, "{os}");
+        }
+    }
+
+    /// An https install without a checksum asset must be refused — never swap in an
+    /// unverifiable binary.
     #[test]
     fn https_install_requires_a_checksum_asset() {
-        let feed = r#"{
-            "tag_name": "v9.9.9",
-            "html_url": "u",
-            "assets": [ { "browser_download_url": "https://example.com/kyde-macos.zip" } ]
-        }"#;
-        let r = parse_feed(feed, "1.0.0").expect("release parses");
-        assert!(r.sha256_url.is_empty());
         let tmp = std::env::temp_dir().join("kyde-nochecksum-test.app");
-        let err = download_and_swap(&r.zip_url, &r.sha256_url, &tmp)
+        let err = download_and_swap("https://example.com/kyde-macos.zip", "", &tmp)
             .expect_err("https install without a checksum must be refused");
         assert!(matches!(err, UpdateError::MissingChecksum));
     }
@@ -655,16 +709,14 @@ mod tests {
         // Each arch picks its own slice.
         assert_eq!(pick_asset_url(&urls, "aarch64").as_deref(), Some(arm));
         assert_eq!(pick_asset_url(&urls, "x86_64").as_deref(), Some(intel));
-        // A generic/legacy single asset is used by any arch.
-        let legacy = ["https://x/kyde-macos.zip"];
+        // The generic `kyde-macos.zip` is the arm64 build: Apple Silicon takes it, Intel
+        // never does — e.g. a release whose Intel zip hasn't been uploaded yet.
+        let arm_only = ["https://x/kyde-macos.zip"];
         assert_eq!(
-            pick_asset_url(&legacy, "aarch64").as_deref(),
+            pick_asset_url(&arm_only, "aarch64").as_deref(),
             Some("https://x/kyde-macos.zip")
         );
-        assert_eq!(
-            pick_asset_url(&legacy, "x86_64").as_deref(),
-            Some("https://x/kyde-macos.zip")
-        );
+        assert_eq!(pick_asset_url(&arm_only, "x86_64"), None);
         // Never install an explicitly wrong-arch build (only arm offered, we're Intel).
         assert_eq!(pick_asset_url(&[arm], "x86_64"), None);
         // No zip at all.
@@ -733,38 +785,5 @@ mod tests {
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].version, "1.2.3");
         assert_eq!(one[0].date, "", "no timestamp → empty date, not a panic");
-    }
-
-    /// The zips are Mac app bundles: a Linux (or any non-macOS) build must never be offered
-    /// one, while macOS keeps exactly what the feed picked.
-    #[test]
-    fn only_macos_keeps_the_zip() {
-        let rel = Release {
-            version: "9.9.9".into(),
-            tag: "v9.9.9".into(),
-            zip_url: "https://x/kyde-macos-x86_64.zip".into(),
-            sha256_url: "https://x/kyde-macos-x86_64.zip.sha256".into(),
-            page_url: "https://x/releases/v9.9.9".into(),
-        };
-        assert_eq!(for_os(rel.clone(), "macos"), rel);
-        for os in ["linux", "windows", "freebsd"] {
-            let r = for_os(rel.clone(), os);
-            assert!(r.zip_url.is_empty() && r.sha256_url.is_empty(), "{os}");
-            assert_eq!(
-                r.page_url, rel.page_url,
-                "{os} still links the release page"
-            );
-        }
-    }
-
-    #[test]
-    fn parse_feed_handles_release_with_no_zip_asset() {
-        let feed = r#"{ "tag_name": "v9.9.9", "html_url": "u", "assets": [] }"#;
-        let r = parse_feed(feed, "1.0.0").unwrap();
-        assert!(
-            r.zip_url.is_empty(),
-            "no zip → empty url, page link still works"
-        );
-        assert_eq!(r.page_url, "u");
     }
 }
