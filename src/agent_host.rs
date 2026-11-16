@@ -4,9 +4,12 @@
 //! `kyde --agent-host <spec> <fd>` — that owns the tab's PTY and shell, keeps the last few MB
 //! of output, and serves them on a Unix socket in `~/.kyde/agents/<id>.sock`. Kyde's terminal
 //! view is a client: it attaches, gets the buffered output replayed, then the live stream, and
-//! sends keystrokes / resizes back. Quitting Kyde only disconnects; the next launch reattaches
-//! (`live_hosts`). Closing the tab sends `KILL`, which ends the agent and everything it started
-//! (`end_tree`). The `ky agent …` CLI talks to the same sockets.
+//! sends keystrokes / resizes back. Quitting Kyde only disconnects, and a host nobody is
+//! attached to keeps its agent just as long as it has something to finish (`watch`): a turn
+//! under way stays until it's done, then the host ends it, as it does an idle one
+//! straight away. The next launch reattaches to the ones still at work (`live_hosts`) and
+//! resumes the rest's sessions. Closing the tab sends `KILL`, which ends the agent and
+//! everything it started (`end_tree`). The `ky agent …` CLI talks to the same sockets.
 //!
 //! Wire format, both directions: `[kind: u8][len: u32 LE][payload]`.
 
@@ -18,6 +21,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
@@ -49,6 +53,8 @@ const MAX_FRAME: usize = 64 * 1024 * 1024;
 const HANGUP_GRACE: Duration = Duration::from_secs(5);
 /// Then how long SIGTERM gets before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(2);
+/// How often a host checks whether its agent is still watched or at work (`watch`).
+const WATCH_EVERY: Duration = Duration::from_secs(2);
 
 /// Client → host: start streaming (answered with `HELLO`, the buffered `OUT`, then live).
 pub(crate) const ATTACH: u8 = 1;
@@ -338,10 +344,22 @@ struct Shared {
     /// Recent output. Its lock also orders a new viewer's replay before any live output.
     ring: Mutex<Ring>,
     viewers: Mutex<Vec<UnixStream>>,
+    /// Attached connections still open: somebody (Kyde) is watching. Not `viewers`: one too
+    /// slow to take output is dropped from that list, but is still there.
+    watchers: AtomicUsize,
     writer: Mutex<std::fs::File>,
     pty: Mutex<tty::Pty>,
+    /// The PTY master (`pty`'s, open as long as it is).
+    master: i32,
     size: Mutex<(u16, u16)>,
     child: u32,
+    /// Runs the start command (vs a plain shell tab).
+    agent: bool,
+    started: Instant,
+    last_output: Mutex<Instant>,
+    /// When somebody was last there (a viewer attached, a client sent something) or the agent
+    /// had work to finish. `None` once the host has given up on it and is ending it (`watch`).
+    attended: Mutex<Option<Instant>>,
     /// Set (and `closed_cv` signalled) once the agent's terminal has closed.
     closed: Mutex<bool>,
     closed_cv: Condvar,
@@ -386,6 +404,49 @@ impl Shared {
         }
     }
 
+    /// Somebody is there (or the agent is at work): the unwatched clock starts over. `false`
+    /// once the host has given up and is ending the agent.
+    fn touch(&self) -> bool {
+        match &mut *lock(&self.attended) {
+            Some(at) => {
+                *at = Instant::now();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether something runs in the shell (the agent, or a command): the terminal's
+    /// foreground process group isn't the shell's own.
+    fn running(&self) -> bool {
+        // SAFETY: reads the foreground process group of the PTY master this process owns,
+        // open as long as `self.pty`.
+        let fg = unsafe { libc::tcgetpgrp(self.master) };
+        // A failed probe counts as running: never a reason to end an agent.
+        u32::try_from(fg) != Ok(self.child)
+    }
+
+    /// What's known of the agent right now, for `agents::has_work`.
+    fn unwatched(&self, report: Option<&Report>) -> crate::agents::Unwatched {
+        let now = std::time::SystemTime::now();
+        crate::agents::Unwatched {
+            agent: self.agent,
+            running: self.running(),
+            hook: report.map(|r| {
+                // Background agents report to files of their own.
+                let at = if r.background {
+                    r.at.max(newest_in(&crate::agents::sub_dir(&self.id)))
+                } else {
+                    r.at
+                };
+                (r.hook.clone(), now.duration_since(at).unwrap_or_default())
+            }),
+            background: report.is_some_and(|r| r.background),
+            quiet: lock(&self.last_output).elapsed(),
+            age: self.started.elapsed(),
+        }
+    }
+
     /// The agent's terminal closed (or is being abandoned): tell viewers and unregister.
     fn unregister(&self) {
         for v in lock(&self.viewers).iter_mut() {
@@ -397,6 +458,71 @@ impl Shared {
         let log = kyde_config::agents::agents_dir().join(format!("{}.log", self.id));
         if std::fs::metadata(&log).is_ok_and(|m| m.len() == 0) {
             let _ = std::fs::remove_file(log);
+        }
+    }
+}
+
+// ── ending an agent nobody is watching ───────────────────────────────────────────────────
+
+/// The agent's latest hook report, as the host keeps it.
+struct Report {
+    hook: crate::agents::Hook,
+    /// Its last finished turn left background tasks running.
+    background: bool,
+    /// When it was written.
+    at: std::time::SystemTime,
+}
+
+/// When the newest file in `dir` was written (the epoch if there's none).
+fn newest_in(dir: &std::path::Path) -> std::time::SystemTime {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// Until the agent's terminal closes: end the agent once nobody has been attached and it has
+/// had nothing to finish for `UNWATCHED_GRACE` — Kyde quit (or never knew it), and its
+/// session is resumed at the next launch. One still at work is kept until it's done.
+fn watch(shared: &Shared) {
+    let state = crate::agents::state_path(&shared.id);
+    let (mut report, mut read): (Option<Report>, _) = (None, None);
+    while !shared.wait_closed(WATCH_EVERY) {
+        // Kept across reads: an event that says nothing of its state (a notification)
+        // overwrites the file too.
+        let at = std::fs::metadata(&state).and_then(|m| m.modified()).ok();
+        if let Some(at) = at.filter(|_| at != read) {
+            read = Some(at);
+            let new = std::fs::read_to_string(&state)
+                .ok()
+                .and_then(|s| crate::agents::parse_hook(&s));
+            if let Some(r) = new {
+                let was = report.as_ref().is_some_and(|r| r.background);
+                report = Some(Report {
+                    background: crate::agents::left_background(was, &r),
+                    hook: r.hook,
+                    at,
+                });
+            }
+        }
+        let watched = shared.watchers.load(Ordering::Relaxed) > 0;
+        if watched || crate::agents::has_work(&shared.unwatched(report.as_ref())) {
+            shared.touch();
+            continue;
+        }
+        let mut attended = lock(&shared.attended);
+        if attended.is_some_and(|at| at.elapsed() >= crate::agents::UNWATCHED_GRACE) {
+            *attended = None;
+            drop(attended);
+            // Unregistered first: a Kyde launching now resumes its session rather than
+            // attaching to an agent on its way out.
+            let _ = std::fs::remove_file(sock_path(&shared.id));
+            let _ = std::fs::remove_file(info_path(&shared.id));
+            shared.end();
+            return;
         }
     }
 }
@@ -575,10 +701,16 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         id: spec.id.clone(),
         ring: Mutex::new(Ring::default()),
         viewers: Mutex::new(Vec::new()),
+        watchers: AtomicUsize::new(0),
         writer: Mutex::new(writer),
         pty: Mutex::new(pty),
+        master: master_fd,
         size: Mutex::new((spec.cols, spec.rows)),
         child,
+        agent: spec.agent,
+        started: Instant::now(),
+        last_output: Mutex::new(Instant::now()),
+        attended: Mutex::new(Some(Instant::now())),
         closed: Mutex::new(false),
         closed_cv: Condvar::new(),
         ending: Mutex::new(()),
@@ -608,6 +740,10 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
             }
         });
     }
+    {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || watch(&shared));
+    }
     pump(master, &shared);
     // The agent's terminal closed: let a `KILL` under way know, and outlast it.
     *lock(&shared.closed) = true;
@@ -631,6 +767,7 @@ fn pump(mut master: std::fs::File, shared: &Shared) {
         let bytes = &buf[..n];
         let mut ring = lock(&shared.ring);
         ring.push(bytes);
+        *lock(&shared.last_output) = Instant::now();
         lock(&shared.viewers).retain_mut(|v| write_frame(v, OUT, bytes).is_ok());
     }
 }
@@ -640,11 +777,18 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
     // A viewer that stops reading is dropped rather than stalling the agent.
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let mut frames = FrameReader::default();
+    // Whether this connection attached: a watcher until it hangs up.
+    let mut attached = false;
     while let Ok(Some((kind, payload))) = frames.next(&mut stream) {
+        // Whoever this is, somebody's there. (Not once the agent is being ended: no viewer
+        // then, so Kyde resumes its session instead.)
+        if !shared.touch() && kind != KILL {
+            break;
+        }
         match kind {
             ATTACH => {
                 let Ok(mut out) = stream.try_clone() else {
-                    return;
+                    break;
                 };
                 let ring = lock(&shared.ring);
                 let (cols, rows) = *lock(&shared.size);
@@ -659,6 +803,9 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
                     && write_frame(&mut out, OUT, &ring.bytes()).is_ok()
                 {
                     lock(&shared.viewers).push(out);
+                    if !std::mem::replace(&mut attached, true) {
+                        shared.watchers.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 drop(ring);
                 // Repaint for the new viewer (the replay may start mid-screen).
@@ -685,14 +832,17 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
                 let hello = serde_json::to_vec(&hello).unwrap_or_default();
                 let _ = write_frame(&mut stream, HELLO, &hello)
                     .and_then(|()| write_frame(&mut stream, OUT, &bytes));
-                return;
+                break;
             }
             KILL => {
                 shared.end();
-                return;
+                break;
             }
             _ => {}
         }
+    }
+    if attached {
+        shared.watchers.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

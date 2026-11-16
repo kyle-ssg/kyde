@@ -46,7 +46,7 @@ A home for Claude Code (or any agent CLI): projects → worktrees → tabs, each
 * **Issue to agent in one click** — start a GitHub issue or review a PR and get a fresh worktree with an agent already briefed.
 * **GitHub in the sidebar** — issues and PRs render in-app with comments, commits, changed files and checks. Comment or close without opening a browser.
 * **New task, new worktree** — ask a busy agent for something unrelated and it moves itself to a clean worktree.
-* **Outlives the window** — quit Kyde and agents keep working; reopen and they're back.
+* **Outlives the window** — quit Kyde and working agents finish their task; reopen and every session is back.
 * **Cleans up** — spots merged or finished work and closes its tabs and worktrees.
 * **Scriptable** — `ky agent …` drives agents from the shell, so agents can drive each other.
 * **Agents only** — hide the rest of the IDE when the agents are all you need. One click opens a worktree in the editor.
