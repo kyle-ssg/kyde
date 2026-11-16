@@ -58,6 +58,10 @@ pub(crate) struct HookReport {
     pub transcript: Option<std::path::PathBuf>,
     /// A `Stop`'s background agents still at work, by id (`None` when it doesn't say).
     pub background: Option<Vec<String>>,
+    /// A `UserPromptSubmit`'s: whether Claude Code started this turn itself — to tell the
+    /// session a background task finished or a Monitor fired — rather than you (`None` for
+    /// other events).
+    pub woken: Option<bool>,
 }
 
 /// The subagent an event came from (Claude Code's `agent_id`) — `None` for the session's own.
@@ -106,13 +110,37 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
             .map(|t| Some(t.get("id")?.as_str()?.to_string()))
             .collect()
     });
+    // Claude Code hands a background task's news to the session as a prompt of its own.
+    let woken = (s("hook_event_name") == "UserPromptSubmit")
+        .then(|| s("prompt").trim_start().starts_with("<task-notification>"));
     Some(HookReport {
         hook,
         session,
         cwd: path("cwd"),
         transcript: path("transcript_path"),
         background,
+        woken,
     })
+}
+
+/// The alert a tab's new hook report is worth while you're not looking at it: it started
+/// waiting on you, or it finished a turn — one you gave it (a turn Claude Code woke it for
+/// isn't news: a Monitor timing out, a background command ending), with no background agents
+/// of its still at work (it'll pick up again when they're done).
+pub(crate) fn alert_for(
+    was: Option<&Hook>,
+    now: &Hook,
+    woken: bool,
+    background: bool,
+) -> Option<crate::alert::Sound> {
+    match (was, now) {
+        (Some(Hook::Blocked(_)), Hook::Blocked(_)) => None,
+        (_, Hook::Blocked(_)) => Some(crate::alert::Sound::NeedsInput),
+        (Some(Hook::Working | Hook::Blocked(_)), Hook::Done) if !woken && !background => {
+            Some(crate::alert::Sound::Done)
+        }
+        _ => None,
+    }
 }
 
 /// A file an agent wrote (`Edit` / `Write` / `NotebookEdit`), and where its session was then.
@@ -1825,6 +1853,26 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_claude_code_woke_itself_for_finishes_without_a_chime() {
+        let prompt = |p: &str| {
+            let json = serde_json::json!({ "hook_event_name": "UserPromptSubmit", "prompt": p });
+            parse_hook(&json.to_string()).unwrap().woken.unwrap()
+        };
+        // What Claude Code submits when a Monitor fires or a background command ends.
+        let woken = prompt("<task-notification>\n<task-id>b1</task-id>\n<status>completed");
+        let typed = prompt("run the tests");
+        let finished = |woken| alert_for(Some(&Hook::Working), &Hook::Done, woken, false);
+        assert_eq!(finished(typed), Some(crate::alert::Sound::Done));
+        assert_eq!(finished(woken), None);
+        // It still asks you when a woken turn needs your permission.
+        let ask = Hook::Blocked("Bash permission".into());
+        assert_eq!(
+            alert_for(Some(&Hook::Working), &ask, woken, false),
+            Some(crate::alert::Sound::NeedsInput)
+        );
+    }
+
+    #[test]
     fn hook_events_drive_the_dot_and_an_interrupt_falls_back_to_output() {
         let ev = |json: &str| parse_hook(json).map(|r| r.hook);
         assert_eq!(
@@ -1835,6 +1883,7 @@ mod tests {
                 cwd: None,
                 transcript: None,
                 background: None,
+                woken: None,
             })
         );
         assert_eq!(
@@ -2160,6 +2209,7 @@ mod tests {
             cwd: None,
             transcript: None,
             background: Some(ids.iter().map(ToString::to_string).collect()),
+            woken: None,
         };
         assert!(sub_live(&sub, t(10), Some((&stop(&["a1"]), t(20))), t(30)));
         assert!(!sub_live(&sub, t(10), Some((&stop(&[]), t(20))), t(30)));

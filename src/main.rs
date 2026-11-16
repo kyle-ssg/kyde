@@ -1844,6 +1844,9 @@ struct AgentTab {
     /// It holds real work — started on a task, resumed, or prompted — so the "never used"
     /// cleanup rule leaves it alone.
     used: bool,
+    /// Its current turn is one Claude Code woke it for (`agents::HookReport::woken`), not
+    /// one you gave it — finishing it plays no alert.
+    woken: bool,
     /// When it started — matched against new Claude Code session files to learn `session`.
     spawned_at: std::time::SystemTime,
     /// Its Claude Code session id, once known (saved, so a relaunch can `--resume` it).
@@ -8791,6 +8794,7 @@ mod gpui_smoke_tests {
             cwd: Some(cwd.clone()),
             transcript: Some(transcript.clone()),
             background: None,
+            woken: None,
         };
         let to = agents::moved_worktree(&dir, Some(&report), None).expect("EnterWorktree'd");
         handle

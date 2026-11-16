@@ -2567,6 +2567,7 @@ impl Kyde {
             shown: AgentState::Idle,
             prompted: seeded,
             used: seeded || session.is_some(),
+            woken: false,
             spawned_at,
             session,
             verdict: None,
@@ -2992,6 +2993,8 @@ impl Kyde {
         let first = !tab.prompted;
         tab.prompted = true;
         tab.used = true;
+        // You typed this one (its hook report may come too late to say so).
+        tab.woken = false;
         if !tab.agent || !(first || untitled) {
             return;
         }
@@ -3326,19 +3329,20 @@ impl Kyde {
                 t.session = Some(s);
                 learned = true;
             }
-            let looking = on_screen && active;
+            if let Some(woken) = r.woken {
+                t.woken = woken;
+            }
             let was = t.hook.as_ref().map(|(h, _)| h);
-            match (was, &r.hook) {
-                (Some(Hook::Blocked(_)), Hook::Blocked(_)) => {}
-                (_, Hook::Blocked(_)) if !looking => sound = Some(alert::Sound::NeedsInput),
-                (Some(Hook::Working | Hook::Blocked(_)), Hook::Done) => {
-                    t.unseen |= !on_screen;
-                    // Its background agents still work: it'll pick up again — not done yet.
-                    if !looking && sound.is_none() && t.subs.is_empty() {
-                        sound = Some(alert::Sound::Done);
-                    }
+            if matches!(was, Some(Hook::Working | Hook::Blocked(_))) && r.hook == Hook::Done {
+                t.unseen |= !on_screen;
+            }
+            if !(on_screen && active) {
+                // Needs-input outranks done in a burst.
+                match crate::agents::alert_for(was, &r.hook, t.woken, !t.subs.is_empty()) {
+                    Some(alert::Sound::Done) if sound.is_some() => {}
+                    Some(chime) => sound = Some(chime),
+                    None => {}
                 }
-                _ => {}
             }
             if r.hook == Hook::Working {
                 t.used = true;
