@@ -28,6 +28,7 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         "Scratch File" => "icons/file-clock.svg",
         "Directory" => "icons/folder.svg",
         "Rename" => "icons/pencil.svg",
+        "Save As" => "icons/save.svg",
         "Delete" => "icons/trash.svg",
         "Cut" => "icons/scissors.svg",
         "Copy" => "icons/copy.svg",
