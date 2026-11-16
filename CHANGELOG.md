@@ -45,6 +45,22 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.19.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.18.1...kyde-v2.19.0) (2026-11-16)
+
+
+### Features
+
+* **agents:** dim sidebar worktrees with no session open ([7dbe27e](https://github.com/kyle-ssg/kyde/commit/7dbe27eded84774c4b0994cd160872a1126a1ab1))
+* **browse:** Save As… and Reveal in Finder for the open file ([#208](https://github.com/kyle-ssg/kyde/issues/208)) ([f9fee08](https://github.com/kyle-ssg/kyde/commit/f9fee0863643337a5f77ca51dc1a53321882ece5))
+* **editor:** Reformat Code pretty-prints JSON files ([#210](https://github.com/kyle-ssg/kyde/issues/210)) ([da390b8](https://github.com/kyle-ssg/kyde/commit/da390b8849ada0f454af7f57a168ad08f4e1c057))
+
+
+### Bug Fixes
+
+* **agents:** build without the terminal feature again ([#211](https://github.com/kyle-ssg/kyde/issues/211)) ([5fc7f0e](https://github.com/kyle-ssg/kyde/commit/5fc7f0e208d15b2ab5c0ed63d3103275d33b9074))
+* **agents:** end agents with nothing to finish once Kyde is closed ([#214](https://github.com/kyle-ssg/kyde/issues/214)) ([7dbe27e](https://github.com/kyle-ssg/kyde/commit/7dbe27eded84774c4b0994cd160872a1126a1ab1))
+* **find:** Tab moves between the Find and Replace boxes ([#209](https://github.com/kyle-ssg/kyde/issues/209)) ([83e7c78](https://github.com/kyle-ssg/kyde/commit/83e7c78c465a6e6f3917c4e8f08d0b47ea623e1f))
+
 ## [2.18.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.18.0...kyde-v2.18.1) (2026-11-16)
 
 
