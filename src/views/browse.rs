@@ -255,6 +255,7 @@ impl Kyde {
                             this.browse
                                 .editor
                                 .update(cx, |ed, cx| ed.caret_to(e.position, cx));
+                            let reformat = Lang::from_path(&p).can_reformat();
                             let (lines, keys) = {
                                 let ed = this.browse.editor.read(cx);
                                 let sel = ed.selection();
@@ -267,7 +268,8 @@ impl Kyde {
                                     keys || editor::sort_lines_in(ed.text(), sel.clone()).is_some();
                                 (lines, keys)
                             };
-                            this.open_menu(e.position, MenuTarget::EditorGit(p, lines, keys), cx);
+                            let target = MenuTarget::EditorGit(p, lines, keys, reformat);
+                            this.open_menu(e.position, target, cx);
                         }
                     }),
                 );
@@ -892,6 +894,51 @@ impl Kyde {
             });
         }
         true
+    }
+
+    /// Reformat Code: pretty-print the whole open file (JSON so far — see
+    /// `kyde_syntax::reformat`), the caret staying on the token it was on. One undo
+    /// step; already-formatted text leaves the buffer clean. A file it can't format
+    /// (another language, or JSON that doesn't parse) says why in the op-error banner
+    /// instead of silently doing nothing. Language comes from the file name, not the
+    /// editor, so it works without the JSON pack installed. No-op outside Browse or
+    /// with no file open.
+    pub(crate) fn reformat_code(&mut self, cx: &mut Context<Self>) {
+        const ERR: &str = "Can't reformat";
+        if self.mode != Mode::Browse {
+            return;
+        }
+        let Some(path) = self.browse.open_path.clone() else {
+            return;
+        };
+        let result = {
+            let ed = self.browse.editor.read(cx);
+            highlight::reformat(ed.text(), Lang::from_path(&path), ed.selection().start)
+        };
+        match result {
+            Ok(r) => {
+                if self.op_error.as_deref().is_some_and(|m| m.starts_with(ERR)) {
+                    self.op_error = None; // the JSON was fixed since
+                }
+                if self.browse.editor.read(cx).text()[r.range.clone()] != r.text {
+                    self.browse.editor.update(cx, |e, cx| {
+                        e.replace_range_text(r.range, &r.text, cx);
+                        e.select_range(r.caret..r.caret, cx);
+                    });
+                }
+            }
+            Err(e) => self.op_error = Some(format!("{ERR}: {e}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn act_reformat(
+        &mut self,
+        _: &Reformat,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.reformat_code(cx);
     }
 
     pub(crate) fn act_sort_lines(

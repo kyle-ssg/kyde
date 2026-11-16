@@ -108,6 +108,7 @@ actions!(
         NewScratch,
         SortLines,
         SortKeys,
+        Reformat,
         NavBack,
         NavForward,
         EscapeKey,
@@ -399,6 +400,7 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "new_scratch", NewScratch);
     bind_app(cx, km, "sort_lines", SortLines);
     bind_app(cx, km, "sort_keys", SortKeys);
+    bind_app(cx, km, "reformat", Reformat);
     bind_app(cx, km, "nav_back", NavBack);
     bind_app(cx, km, "nav_forward", NavForward);
     bind_app(cx, km, "push", GitPush);
@@ -720,6 +722,7 @@ enum PaletteAction {
     Fonts,
     SortLines,
     SortKeys,
+    Reformat,
     NavBack,
     NavForward,
     LocalHistory,
@@ -742,6 +745,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ),
     ("Sort Lines", PaletteAction::SortLines, "sort_lines"),
     ("Sort Object Keys", PaletteAction::SortKeys, "sort_keys"),
+    ("Reformat Code", PaletteAction::Reformat, "reformat"),
     ("Back (previous file)", PaletteAction::NavBack, "nav_back"),
     (
         "Forward (next file)",
@@ -779,11 +783,12 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
 enum MenuTarget {
     /// A path in the Browse tree (`bool` = `is_dir`), or the open editor file.
     BrowseFile(PathBuf, bool),
-    /// Right-click inside the editor pane — git commands plus the buffer sort
-    /// ops. The bools (computed at menu-open, so the menu never parses per
-    /// frame) gate the items: `.0` = selection spans ≥2 lines (Sort Lines),
-    /// `.1` = caret inside a JSON/JS/TS object (Sort Object Keys).
-    EditorGit(PathBuf, bool, bool),
+    /// Right-click inside the editor pane — git commands plus the buffer ops.
+    /// The bools (computed at menu-open, so the menu never parses per frame)
+    /// gate the items: `.0` = selection spans ≥2 lines (Sort Lines), `.1` =
+    /// caret inside a JSON/JS/TS object (Sort Object Keys), `.2` = a language
+    /// Reformat Code supports.
+    EditorGit(PathBuf, bool, bool, bool),
     /// A path (file or folder) in the Commit tree — `bool` = `is_dir`.
     CommitPath(PathBuf, bool),
     /// A changed file in the Rollback modal, by index into `files` (→ View Diff).
@@ -4180,7 +4185,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             if let Some(p) = view.browse.open_path.clone() {
                 view.open_menu(
                     gpui::point(px(560.0), px(200.0)),
-                    MenuTarget::EditorGit(p, true, true),
+                    MenuTarget::EditorGit(p, true, true, true),
                     cx,
                 );
             }
@@ -6030,6 +6035,38 @@ mod gpui_smoke_tests {
                     k.browse.editor.read(cx).text(),
                     "{\n  \"a\": 2,\n  \"b\": 1\n}",
                     "no sorting outside Browse"
+                );
+            })
+            .unwrap();
+    }
+
+    /// Reformat Code from the actions palette pretty-prints the open JSON file — even as
+    /// `PlainText` (no JSON pack) — and JSON that doesn't parse stays untouched while the
+    /// banner says where it broke.
+    #[gpui::test]
+    fn reformat_pretty_prints_json_from_the_palette(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::write(dir.join("data.json"), "{}").unwrap();
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(PathBuf::from("data.json"), cx);
+                let set = |k: &mut Kyde, text: &str, cx: &mut Context<Kyde>| {
+                    k.browse.editor.update(cx, |e, cx| {
+                        e.set_content(text.into(), Lang::PlainText, cx);
+                    });
+                };
+                set(k, r#"{"a":1,"b":[true]}"#, cx);
+                k.run_palette(PaletteAction::Reformat, w, cx);
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "{\n  \"a\": 1,\n  \"b\": [\n    true\n  ]\n}"
+                );
+                set(k, "{\"a\" 1}", cx);
+                k.run_palette(PaletteAction::Reformat, w, cx);
+                assert_eq!(k.browse.editor.read(cx).text(), "{\"a\" 1}");
+                assert_eq!(
+                    k.op_error.as_deref(),
+                    Some("Can't reformat: invalid JSON at line 1, column 6: expected ':'")
                 );
             })
             .unwrap();

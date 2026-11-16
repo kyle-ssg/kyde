@@ -585,6 +585,10 @@ impl Kyde {
                 window.focus(&self.focus_handle);
                 self.sort_object_keys_at_caret(cx);
             }
+            PaletteAction::Reformat => {
+                window.focus(&self.focus_handle);
+                self.reformat_code(cx);
+            }
             PaletteAction::NavBack => {
                 window.focus(&self.focus_handle);
                 self.nav_back(cx);
