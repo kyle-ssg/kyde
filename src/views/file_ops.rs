@@ -17,6 +17,19 @@ pub(crate) const REVEAL_IN_TERMINAL: &str = if cfg!(target_os = "macos") {
     "Open in Terminal"
 };
 
+/// `abs` relative to the project `root`, if it lies inside it — through symlinks too
+/// (`/var` → `/private/var`), since a save panel and git may spell a folder differently.
+fn project_rel(root: &std::path::Path, abs: &std::path::Path) -> Option<PathBuf> {
+    if let Ok(rel) = abs.strip_prefix(root) {
+        return Some(rel.to_path_buf());
+    }
+    let root = std::fs::canonicalize(root).ok()?;
+    let abs = std::fs::canonicalize(abs).ok()?;
+    abs.strip_prefix(&root)
+        .ok()
+        .map(std::path::Path::to_path_buf)
+}
+
 /// If `p` is `old` or lives under it, return `p` with the `old` prefix replaced by `new`
 /// (so renaming a folder repoints every path beneath it); `None` when `p` is unrelated.
 pub(crate) fn remap_under(
@@ -872,6 +885,118 @@ impl Kyde {
             }
             _ => PathBuf::new(),
         }
+    }
+
+    /// The file the File menu's Save As… / Reveal in Finder act on: the open tab, while the
+    /// Browse view (where it shows) is on screen.
+    pub(crate) fn file_menu_target(&self) -> Option<&std::path::Path> {
+        if self.mode == Mode::Browse {
+            self.browse.open_path.as_deref()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn act_save_as(&mut self, _: &SaveFileAs, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(p) = self.file_menu_target().map(std::path::Path::to_path_buf) {
+            self.save_as(p, cx);
+        }
+    }
+
+    pub(crate) fn act_reveal_file(
+        &mut self,
+        _: &RevealFile,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(p) = self.file_menu_target().map(std::path::Path::to_path_buf) {
+            self.reveal_in_os(&p, cx);
+        }
+    }
+
+    /// Save As…: ask where with the native save panel, write `path` there, and edit the new
+    /// file in its place. The original stays as it was. A scratch's panel opens in the project
+    /// root (keeping one is why you'd save it as something); any other file's in its folder.
+    pub(crate) fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        // One native dialog at a time: off macOS it doesn't block Kyde (`prompt_folder`).
+        if self.folder_picker_open {
+            return;
+        }
+        let dir = if path.is_absolute() {
+            root
+        } else {
+            root.join(&path)
+                .parent()
+                .map_or_else(|| root.clone(), std::path::Path::to_path_buf)
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        self.folder_picker_open = true;
+        let rx = cx.prompt_for_new_path(&dir, name.as_deref());
+        cx.spawn(async move |this, cx| {
+            let picked = rx.await;
+            this.update(cx, |this, cx| {
+                this.folder_picker_open = false;
+                match picked {
+                    Ok(Ok(Some(dest))) => this.finish_save_as(&path, &dest, cx),
+                    Ok(Err(e)) => this.fail("Opening the save dialog", e),
+                    Ok(Ok(None)) | Err(_) => {} // cancelled
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write `src` to the absolute `dest` — the editor's buffer when `src` is the open text
+    /// file (unsaved edits included), else its bytes on disk — then swap its tab for `dest`'s.
+    fn finish_save_as(
+        &mut self,
+        src: &std::path::Path,
+        dest: &std::path::Path,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(root) = self.repo_root.clone() else {
+            return;
+        };
+        let src_abs = root.join(src);
+        let text =
+            (self.browse.open_path.as_deref() == Some(src) && !is_image(src) && !is_font_file(src))
+                .then(|| self.browse.editor.read(cx).text().to_string());
+        let same = std::fs::canonicalize(&src_abs).ok() == std::fs::canonicalize(dest).ok();
+        let written = match text {
+            Some(text) => std::fs::write(dest, text),
+            // Copying a file onto itself would truncate it — and there's nothing to do.
+            None if same => Ok(()),
+            None => std::fs::copy(&src_abs, dest).map(drop),
+        };
+        if let Err(e) = written {
+            self.fail("Saving file", e);
+            return;
+        }
+        // The tab's path: project-relative inside the project (so the tree and git see it),
+        // else absolute, as a scratch's is.
+        let tab = project_rel(&root, dest).unwrap_or_else(|| dest.to_path_buf());
+        if tab.is_relative() {
+            for a in tab.ancestors().skip(1) {
+                self.browse.expanded.insert(a.to_path_buf());
+            }
+        }
+        if let Some(i) = self.browse.open_tabs.iter().position(|t| t == src) {
+            if self.browse.open_tabs.contains(&tab) {
+                self.browse.open_tabs.remove(i);
+            } else {
+                self.browse.open_tabs[i] = tab.clone();
+            }
+        }
+        if self.browse.preview_tab.as_deref() == Some(src) {
+            self.browse.preview_tab = None;
+        }
+        self.refresh(cx);
+        self.open_file(tab, cx);
     }
 
     pub(crate) fn act_new_scratch(

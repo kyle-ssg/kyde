@@ -100,6 +100,7 @@ actions!(
         GoToFile,
         FindInFiles,
         SaveFile,
+        SaveFileAs,
         DoCommit,
         OpenKeymap,
         ModeCommit,
@@ -163,7 +164,8 @@ actions!(
         FindPrev,
         CloseFind,
         ReplaceOne,
-        ReplaceAll
+        ReplaceAll,
+        FindSwitchField
     ]
 );
 // The Agents view's shortcuts (configurable; bound in its "Agents" key context).
@@ -198,7 +200,8 @@ actions!(
         ClearData,
         OpenPlugins,
         OpenProject,
-        OpenChangelog
+        OpenChangelog,
+        RevealFile
     ]
 );
 
@@ -237,6 +240,7 @@ fn app_menus(recents: &Recents) -> Vec<Menu> {
             items: recent_items,
         }));
     }
+    file_items.extend(open_file_items());
     vec![
         Menu {
             name: "Kyde".into(),
@@ -255,6 +259,16 @@ fn app_menus(recents: &Recents) -> Vec<Menu> {
             name: "File".into(),
             items: file_items,
         },
+    ]
+}
+
+/// The File menu's items for the open file. Greyed out while no file is open: their actions
+/// are only listened for while there is one (`render`).
+fn open_file_items() -> [MenuItem; 3] {
+    [
+        MenuItem::separator(),
+        MenuItem::action("Save As…", SaveFileAs),
+        MenuItem::action(views::REVEAL_IN_FILES, RevealFile),
     ]
 }
 
@@ -316,6 +330,7 @@ fn menu_bar_menus(recents: &Recents) -> Vec<Menu> {
         file_items.push(MenuItem::separator());
         file_items.extend(recent);
     }
+    file_items.extend(open_file_items());
     file_items.extend([
         MenuItem::separator(),
         MenuItem::action("Settings…", OpenKeymap),
@@ -392,6 +407,7 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "go_to_file", GoToFile);
     bind_app(cx, km, "find_in_files", FindInFiles);
     bind_app(cx, km, "save", SaveFile);
+    bind_app(cx, km, "save_as", SaveFileAs);
     bind_app(cx, km, "commit", DoCommit);
     bind_app(cx, km, "mode_commit", ModeCommit);
     bind_app(cx, km, "mode_browse", ModeBrowse);
@@ -536,6 +552,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("escape", CloseFind, Some("FindBar")),
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
+        // After the editor's Tab = Indent, which ties on depth (later wins). Single-line
+        // inputs don't handle Indent, so without this Tab typed a literal tab into the query.
+        KeyBinding::new("tab", FindSwitchField, Some("FindBar")),
+        KeyBinding::new("shift-tab", FindSwitchField, Some("FindBar")),
     ]);
     // ⌘F (Ctrl+Shift+F elsewhere — Ctrl+F is the shell's) in a terminal searches its own
     // scrollback. After the context-less ⌘F above, which ties with it on depth (later wins).
@@ -716,6 +736,7 @@ enum PaletteAction {
     SelectInTree,
     Rollback,
     Settings,
+    SaveAs,
     RevealInFinder,
     RevealInTerminal,
     Plugins,
@@ -737,6 +758,7 @@ enum PaletteAction {
 /// chip — `""` when the action has no bindable key and so shows none).
 const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ("Select in File View", PaletteAction::SelectInTree, ""),
+    ("Save File As…", PaletteAction::SaveAs, "save_as"),
     (views::REVEAL_IN_FILES, PaletteAction::RevealInFinder, ""),
     (
         views::REVEAL_IN_TERMINAL,
@@ -2777,8 +2799,9 @@ struct Kyde {
     welcome_frame: u32,
     /// Contents of `crash.log` if the previous run crashed — drives the report banner.
     pending_crash: Option<String>,
-    /// A native folder picker is open (Open / New Project / Add space): another press waits
-    /// for it, since off macOS the picker doesn't block Kyde (`Kyde::prompt_folder`).
+    /// A native folder picker (Open / New Project / Add space) or Save As panel is open:
+    /// another press waits for it, since off macOS it doesn't block Kyde
+    /// (`Kyde::prompt_folder`, `Kyde::save_as`).
     folder_picker_open: bool,
     /// Last failed git operation (commit/push/rollback/branch/checkout/status), surfaced
     /// in a dismissible banner so a silent failure never looks like success. Cleared on
@@ -3216,6 +3239,10 @@ impl Render for ModalWindow {
             }))
             .on_action(cx.listener(|this, a: &ReplaceAll, w, cx| {
                 this.kyde.update(cx, |k, kcx| k.replace_all(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &FindSwitchField, w, cx| {
+                this.kyde
+                    .update(cx, |k, kcx| k.find_switch_field(a, w, kcx));
             }))
             .bg(theme::get().panel_bg)
             .text_color(theme::get().text)
@@ -3805,6 +3832,7 @@ impl gpui::AssetSource for Assets {
             "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
             "icons/file-plus.svg" => include_bytes!("../assets/icons/file-plus.svg"),
             "icons/file-clock.svg" => include_bytes!("../assets/icons/file-clock.svg"),
+            "icons/save.svg" => include_bytes!("../assets/icons/save.svg"),
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/scissors.svg" => include_bytes!("../assets/icons/scissors.svg"),
@@ -6187,6 +6215,40 @@ mod gpui_smoke_tests {
                 assert!(k.compare.right.read(cx).find_bg.is_empty());
             })
             .unwrap();
+    }
+
+    /// A real Tab in the find bar hops Find ⇄ Replace — it must beat the editor's Tab
+    /// binding, which in a single-line input falls through to typing a literal tab.
+    #[gpui::test]
+    fn tab_moves_between_find_and_replace(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.open_find(FindHost::Main, true, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(handle.into(), |_, w, cx| {
+                w.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let focused = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, w, cx| {
+                    assert_eq!(k.find.query.read(cx).text(), "", "Tab types nothing");
+                    k.find.replace_query.read(cx).focus_handle.is_focused(w)
+                })
+                .unwrap()
+        };
+        press(cx, "tab");
+        assert!(focused(cx), "Tab: Find → Replace");
+        press(cx, "shift-tab");
+        assert!(!focused(cx), "⇧Tab: Replace → Find");
     }
 
     /// ⌘-click import navigation (issue #26): a link resolved against the
@@ -9388,6 +9450,9 @@ mod gpui_smoke_tests {
                         "—",
                         "Recent Projects ▸",
                         "—",
+                        "Save As…",
+                        views::REVEAL_IN_FILES,
+                        "—",
                         "Settings…",
                         "Plugins…",
                         "What's New…",
@@ -9532,6 +9597,9 @@ mod gpui_smoke_tests {
                         "—",
                         "Recent Projects ▸",
                         "—",
+                        "Save As…",
+                        views::REVEAL_IN_FILES,
+                        "—",
                         "Settings…",
                         "Plugins…",
                         "—",
@@ -9627,6 +9695,50 @@ mod gpui_smoke_tests {
                 assert!(!ran(key, &ctx[..1]).is_empty(), "{key} is bound outside it");
             }
         });
+    }
+
+    /// File ▸ Save As… on a scratch: the save panel opens in the project, the file lands
+    /// where it's pointed, its tab now edits that project file, and the scratch is kept.
+    #[gpui::test]
+    fn save_as_keeps_a_scratch_as_a_project_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let scratch = dir.with_extension("scratch.json"); // outside the project, as scratches are
+        std::fs::write(&scratch, "{\"a\": 1}\n").unwrap();
+        let root = handle
+            .update(cx, |k, w, cx| {
+                k.mode = Mode::Browse;
+                k.open_file(scratch.clone(), cx);
+                w.focus(&k.focus_handle);
+                k.repo_root.clone().unwrap()
+            })
+            .unwrap();
+        cx.refresh().unwrap(); // the open file's menu actions are listened for from render
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, w, cx| {
+            w.dispatch_action(Box::new(SaveFileAs), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.simulate_new_path_selection(|start| {
+            assert_eq!(start, root, "the panel opens in the project");
+            Some(root.join("kept.json"))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(root.join("kept.json")).unwrap(),
+            "{\"a\": 1}\n"
+        );
+        assert!(scratch.exists(), "the scratch is kept");
+        handle
+            .update(cx, |k, _w, _cx| {
+                let kept = PathBuf::from("kept.json");
+                assert_eq!(k.browse.open_path.as_ref(), Some(&kept));
+                assert!(
+                    k.browse.open_tabs.contains(&kept) && !k.browse.open_tabs.contains(&scratch)
+                );
+            })
+            .unwrap();
+        std::fs::remove_file(&scratch).ok();
     }
 
     /// Keyboard navigation end to end (issue #81), through the real bindings + key contexts:
