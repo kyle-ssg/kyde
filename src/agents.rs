@@ -701,6 +701,109 @@ pub(crate) fn close_asks(state: AgentState, hook: Option<&Hook>) -> bool {
         || matches!(hook, Some(Hook::Working | Hook::Blocked(_)))
 }
 
+/// How long an agent nobody is watching (Kyde has quit) may have nothing to finish before its
+/// host ends it: long enough for Kyde to come back (a restart, an update) and reattach, and
+/// for one the CLI just started to be adopted or get its prompt.
+pub(crate) const UNWATCHED_GRACE: Duration = Duration::from_secs(15);
+/// A just-started agent gets this long to make its first report.
+pub(crate) const STARTUP_WAIT: Duration = Duration::from_secs(30);
+/// With nobody watching, a "working" report this long without news or output is a turn that
+/// was interrupted. Far longer than [`WORKING_STALE`]: a wrong guess here ends the agent.
+pub(crate) const UNWATCHED_STALE: Duration = Duration::from_mins(2);
+/// How long a finished turn is kept for what it left running in the background (a CI watch
+/// wakes it to carry on; a dev server never does) since the last news of either.
+pub(crate) const BACKGROUND_WAIT: Duration = Duration::from_hours(1);
+
+/// What an agent's host knows of it while nobody is watching.
+#[derive(Clone, Debug)]
+pub(crate) struct Unwatched {
+    /// It runs the start command (vs a plain shell tab).
+    pub agent: bool,
+    /// Something runs in its shell: the agent, or a command.
+    pub running: bool,
+    /// Its latest report, and how long since it (or its background agents) last reported.
+    pub hook: Option<(Hook, Duration)>,
+    /// Its last finished turn left background tasks running.
+    pub background: bool,
+    /// Since its last output.
+    pub quiet: Duration,
+    /// Since its host started.
+    pub age: Duration,
+}
+
+/// Whether an agent nobody is watching still has something to finish — the only reason to
+/// keep it running once Kyde has quit (the next launch resumes its session either way). Not
+/// one waiting on you: nobody is there to answer.
+pub(crate) fn has_work(u: &Unwatched) -> bool {
+    if !u.running {
+        return false;
+    }
+    if !u.agent {
+        return true;
+    }
+    match &u.hook {
+        // No hook (or not yet): the output clock, as for its dot.
+        None => u.age < STARTUP_WAIT || u.quiet < BUSY_WINDOW,
+        Some((Hook::Working, since)) => (*since).min(u.quiet) < UNWATCHED_STALE,
+        Some((Hook::Done | Hook::Ready, since)) => u.background && *since < BACKGROUND_WAIT,
+        Some((Hook::Blocked(_), _)) => false,
+        // Its agent quit: what runs now is a command of yours.
+        Some((Hook::Ended, _)) => true,
+    }
+}
+
+/// Whether the turn report `r` ends left background tasks running — `was` (what the report
+/// before it said) when `r` doesn't say: the idle notification after a `Stop` that listed them.
+pub(crate) fn left_background(was: bool, r: &HookReport) -> bool {
+    match (&r.hook, &r.background) {
+        (_, Some(ids)) => !ids.is_empty(),
+        (Hook::Done, None) => was,
+        _ => false,
+    }
+}
+
+/// The tabs to reopen at launch, of those `saved` at the last quit: every one whose agent
+/// isn't still running (`live`: the hosts that are — those are reattached), but for agent tabs
+/// with no conversation to resume. One that never got a prompt has no transcript, and
+/// `--resume` on it fails. An agent tab resumes the session its hook last reported (else the
+/// saved one); a shell tab starts afresh. The gone tabs' state files are deleted. File IO:
+/// call it off the UI thread.
+pub(crate) fn tabs_to_reopen(
+    saved: Vec<kyde_config::agents::SavedTab>,
+    live: &std::collections::HashSet<String>,
+) -> Vec<kyde_config::agents::SavedTab> {
+    saved
+        .into_iter()
+        .filter(|t| t.id.as_ref().is_none_or(|id| !live.contains(id)))
+        .filter_map(|mut t| {
+            let last = t.id.take().and_then(|id| {
+                let last = std::fs::read_to_string(state_path(&id))
+                    .ok()
+                    .and_then(|s| last_session(&s));
+                for f in [state_path(&id), brief_path(&id), write_path(&id)] {
+                    let _ = std::fs::remove_file(f);
+                }
+                let _ = std::fs::remove_dir_all(sub_dir(&id));
+                last
+            });
+            if !t.agent {
+                return Some(t);
+            }
+            if let Some((session, transcript)) = last {
+                t.session = transcript.exists().then_some(session);
+            }
+            t.session.is_some().then_some(t)
+        })
+        .collect()
+}
+
+/// The session a tab's last hook event (any kind) came from, and its transcript.
+fn last_session(json: &str) -> Option<(String, std::path::PathBuf)> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let s = |k: &str| Some(v.get(k)?.as_str()?).filter(|x| !x.is_empty());
+    Some((s("session_id")?.to_string(), s("transcript_path")?.into()))
+}
+
 /// What the cleanup knows about one tab when it decides.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TabFacts {
@@ -1414,7 +1517,7 @@ pub(crate) fn worktree_name(seed: u64) -> String {
 
 /// A fresh seed for [`worktree_name`] — std's per-process random hasher keys mixed with the
 /// clock, so two worktrees made in the same second still differ.
-/// Agent tabs run in agent hosts (they outlive Kyde) — except under test, while taking
+/// Agent tabs run in agent hosts (they can outlive Kyde) — except under test, while taking
 /// screenshots, or with `KYDE_LOCAL_AGENTS` set (each tab then owns its terminal, as before).
 pub(crate) fn hosted() -> bool {
     !cfg!(test)
@@ -1735,6 +1838,108 @@ mod tests {
         assert!(!close_asks(AgentState::Unseen, Some(&Hook::Done)));
         assert!(!close_asks(AgentState::Idle, Some(&Hook::Ready)));
         assert!(!close_asks(AgentState::Idle, None));
+    }
+
+    #[test]
+    fn an_unwatched_agent_is_kept_only_while_it_has_something_to_finish() {
+        let secs = Duration::from_secs;
+        let agent = |hook: Option<(Hook, u64)>, background: bool, quiet: u64| Unwatched {
+            agent: true,
+            running: true,
+            hook: hook.map(|(h, since)| (h, secs(since))),
+            background,
+            quiet: secs(quiet),
+            age: secs(3600),
+        };
+        // A turn under way — even one deep in a long, quiet command.
+        assert!(has_work(&agent(Some((Hook::Working, 5)), false, 0)));
+        assert!(has_work(&agent(Some((Hook::Working, 900)), false, 1)));
+        // Interrupted before you left: "working", but nothing since.
+        assert!(!has_work(&agent(Some((Hook::Working, 900)), false, 900)));
+        // Finished, waiting for a first prompt, or waiting on you: nothing to finish.
+        assert!(!has_work(&agent(Some((Hook::Done, 5)), false, 0)));
+        assert!(!has_work(&agent(Some((Hook::Ready, 5)), false, 0)));
+        assert!(!has_work(&agent(
+            Some((Hook::Blocked("a question".into()), 5)),
+            false,
+            0
+        )));
+        // A finished turn waits for what it left running — but not for ever (a dev server).
+        assert!(has_work(&agent(Some((Hook::Done, 600)), true, 600)));
+        assert!(!has_work(&agent(Some((Hook::Done, 2 * 3600)), true, 600)));
+        // Without the hook, its output says.
+        assert!(has_work(&agent(None, false, 0)));
+        assert!(!has_work(&agent(None, false, 30)));
+        // The agent has quit, or a shell sits at its prompt.
+        let at_prompt = Unwatched {
+            running: false,
+            ..agent(Some((Hook::Working, 1)), true, 0)
+        };
+        assert!(!has_work(&at_prompt));
+        // A command running in a plain shell is left to finish.
+        let shell = Unwatched {
+            agent: false,
+            ..agent(None, false, 3600)
+        };
+        assert!(has_work(&shell));
+
+        // The idle notification after a `Stop` doesn't forget what that turn left running.
+        let report = |json: &str| parse_hook(json).unwrap();
+        let stop =
+            report(r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell"}]}"#);
+        let idle =
+            report(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
+        let prompt = report(r#"{"hook_event_name":"UserPromptSubmit","prompt":"next"}"#);
+        assert!(left_background(false, &stop));
+        assert!(left_background(true, &idle));
+        assert!(!left_background(true, &prompt));
+    }
+
+    #[test]
+    fn launch_reopens_the_tabs_whose_agents_ended_except_ones_never_prompted() {
+        use kyde_config::agents::SavedTab;
+        crate::gpui_smoke_tests::isolate_history();
+        let dir = kyde_config::agents::agents_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("reopen-test.jsonl");
+        std::fs::write(&transcript, "{}").unwrap();
+        let report = |id: &str, session: &str, transcript: &std::path::Path| {
+            let event = serde_json::json!({
+                "hook_event_name": "Stop",
+                "session_id": session,
+                "transcript_path": transcript,
+            });
+            std::fs::write(state_path(id), event.to_string()).unwrap();
+        };
+        report("reopen-done", "its-latest", &transcript);
+        report("reopen-blank", "blank", &dir.join("never-written.jsonl"));
+        let tab = |id: &str, agent, session: Option<&str>, name: Option<&str>| SavedTab {
+            agent,
+            session: session.map(Into::into),
+            id: Some(id.into()),
+            name: name.map(Into::into),
+        };
+        let saved = vec![
+            tab("reopen-live", true, Some("live"), None),
+            tab("reopen-done", true, Some("first"), Some("Fix login")),
+            tab("reopen-blank", true, Some("blank"), None),
+            tab("reopen-shell", false, None, None),
+        ];
+        let live = std::collections::HashSet::from(["reopen-live".to_string()]);
+        assert_eq!(
+            tabs_to_reopen(saved, &live),
+            vec![
+                // Its name, and the session it last reported.
+                SavedTab {
+                    agent: true,
+                    session: Some("its-latest".into()),
+                    id: None,
+                    name: Some("Fix login".into()),
+                },
+                SavedTab::default(),
+            ]
+        );
+        assert!(!state_path("reopen-done").exists(), "a gone tab's state");
     }
 
     #[test]

@@ -91,6 +91,8 @@ const AGENT_TAB_BRIEF: f32 = 80.0;
 const WT_LINE_X: f32 = ROW_PAD_X + CHEVRON_W + GAP + DOT / 2.0;
 /// …and its own dot starts a stub's length to the right.
 const WT_DOT_X: f32 = WT_LINE_X + 16.0;
+/// How strongly a worktree row with no session open in it shows.
+const IDLE_ROW_OPACITY: f32 = 0.75;
 /// How far a group's projects sit in from its header.
 const GROUP_INDENT: f32 = 12.0;
 
@@ -159,32 +161,60 @@ impl Kyde {
         .detach();
     }
 
-    /// On launch, resume every worktree's Claude sessions in the background — the tabs open
-    /// at the last quit, then each other worktree's latest session. The selection and focus
-    /// stay where they are.
+    /// On launch, bring every worktree's tabs back in the background — the tabs open at the
+    /// last quit (Claude sessions resumed), then each other worktree's latest session. The
+    /// selection and focus stay where they are.
     fn agents_restore_saved(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
-        self.agents_load_done(cx);
-        // Agents still running in their hosts come back first (exactly as they are); only
-        // worktrees left without one resume a session.
-        #[cfg(all(feature = "terminal", unix))]
-        if crate::agents::hosted() {
+        {
+            self.agents_load_done(cx);
+            // Read now: reattaching saves each worktree's tabs anew.
+            let saved: Vec<(PathBuf, Vec<kyde_config::agents::SavedTab>)> = self
+                .agents
+                .cfg
+                .tabs
+                .iter()
+                .filter(|(wt, _)| self.agents.cfg.space_of(wt).is_some())
+                .map(|(wt, tabs)| (wt.clone(), tabs.clone()))
+                .collect();
             self.agents.hosts_scanning = true;
             cx.spawn(async move |this, cx| {
-                let live = cx
+                // Agents still at work in their hosts come back first (exactly as they are);
+                // a host ends the others once Kyde quits, so those tabs are reopened.
+                let (live, saved) = cx
                     .background_executor()
-                    .spawn(async { crate::agent_host::live_hosts() })
+                    .spawn(async move {
+                        #[cfg(unix)]
+                        let live = if crate::agents::hosted() {
+                            crate::agent_host::live_hosts()
+                        } else {
+                            Vec::new()
+                        };
+                        #[cfg(unix)]
+                        let ids: std::collections::HashSet<String> =
+                            live.iter().map(|h| h.id.clone()).collect();
+                        #[cfg(not(unix))]
+                        let (live, ids) = ((), std::collections::HashSet::<String>::new());
+                        let saved: Vec<_> = saved
+                            .into_iter()
+                            .map(|(wt, tabs)| (wt, crate::agents::tabs_to_reopen(tabs, &ids)))
+                            .collect();
+                        (live, saved)
+                    })
                     .await;
                 this.update(cx, |this, cx| {
                     this.agents.hosts_scanning = false;
+                    #[cfg(unix)]
                     this.agents_reattach(live, true, cx);
-                    this.agents_resume_rest(cx);
+                    #[cfg(not(unix))]
+                    let () = live;
+                    this.agents_resume_rest(saved, cx);
                 })
                 .ok();
             })
             .detach();
-            return;
         }
+        #[cfg(not(feature = "terminal"))]
         self.agents_resume_rest(cx);
     }
 
@@ -279,39 +309,33 @@ impl Kyde {
         .detach();
     }
 
-    /// Launch, after reattaching: resume the Claude sessions of worktrees that have no agent
-    /// running, then the autostart.
-    fn agents_resume_rest(&mut self, cx: &mut Context<Self>) {
+    /// Launch, after reattaching: reopen the tabs whose agents aren't running any more
+    /// (`saved`, per worktree: `agents::tabs_to_reopen`), resume the latest Claude session of
+    /// worktrees left without a tab, then the autostart.
+    fn agents_resume_rest(
+        &mut self,
+        #[cfg(feature = "terminal")] saved: Vec<(PathBuf, Vec<kyde_config::agents::SavedTab>)>,
+        cx: &mut Context<Self>,
+    ) {
         #[cfg(feature = "terminal")]
         {
-            // Only real conversations come back (a known Claude session, resumed); saved tabs
-            // without one were never matched to any work — reopening them would just start
-            // fresh, pointless agents — so they're dropped.
-            let saved: Vec<(PathBuf, Vec<String>)> = self
-                .agents
-                .cfg
-                .tabs
-                .iter()
-                .filter(|(wt, _)| {
-                    self.agents.cfg.space_of(wt).is_some() && !self.agents.restored.contains(*wt)
-                })
-                .map(|(wt, tabs)| {
-                    let sessions = tabs
-                        .iter()
-                        .filter(|t| t.agent)
-                        .filter_map(|t| t.session.clone())
-                        .collect();
-                    (wt.clone(), sessions)
-                })
-                .collect();
             let mut resuming: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-            for (wt, sessions) in saved {
-                if sessions.is_empty() {
-                    self.agents.cfg.tabs.remove(&wt);
+            for (wt, tabs) in saved {
+                // Only real conversations come back: a saved agent tab without one would just
+                // start a fresh, pointless agent — `saved` has dropped those. Until its tabs
+                // open, what's left is what the worktree reopens with.
+                if !self.agents.restored.contains(&wt) {
+                    if tabs.is_empty() {
+                        self.agents.cfg.tabs.remove(&wt);
+                    } else {
+                        self.agents.cfg.tabs.insert(wt.clone(), tabs.clone());
+                    }
+                }
+                if tabs.is_empty() {
                     continue;
                 }
                 resuming.insert(wt.clone());
-                self.agents_resume_when_idle(wt, sessions, cx);
+                self.agents_reopen_when_idle(wt, tabs, cx);
             }
             // Every other worktree with a Claude session resumes its latest one too — all in
             // the background, so clicking a row just shows it.
@@ -328,7 +352,12 @@ impl Kyde {
                 })
                 .collect();
             for (wt, id) in latest {
-                self.agents_resume_when_idle(wt, vec![id], cx);
+                let tab = kyde_config::agents::SavedTab {
+                    agent: true,
+                    session: Some(id),
+                    ..Default::default()
+                };
+                self.agents_reopen_when_idle(wt, vec![tab], cx);
             }
             self.agents_sync_hooks(cx);
             self.agents_save(cx);
@@ -339,29 +368,68 @@ impl Kyde {
         }
     }
 
-    /// Resume `sessions` in worktree `wt` (a project's own checkout catches up with main
-    /// first) — unless something opened tabs there meanwhile (e.g. the selected one's
-    /// autostart), so a session never runs twice.
+    /// Reopen `tabs` in worktree `wt` (a project's own checkout catches up with main first),
+    /// beside any reattached there — unless something opened tabs in it meanwhile (e.g. the
+    /// selected one's autostart), so a session never runs twice.
     #[cfg(feature = "terminal")]
-    fn agents_resume_when_idle(
+    fn agents_reopen_when_idle(
         &mut self,
         wt: PathBuf,
-        sessions: Vec<String>,
+        tabs: Vec<kyde_config::agents::SavedTab>,
         cx: &mut Context<Self>,
     ) {
+        let has_tabs =
+            |this: &Self, wt: &Path| this.agents.tabs.get(wt).is_some_and(|g| !g.tabs.is_empty());
+        let reattached = has_tabs(self, &wt);
         self.agents_after_main_sync(wt.clone(), cx, move |this, cx| {
-            if this
-                .agents
-                .tabs
-                .get(&wt)
-                .is_some_and(|g| !g.tabs.is_empty())
-            {
+            if !reattached && has_tabs(this, &wt) {
                 return;
             }
-            for id in sessions {
-                this.agents_resume_tab(wt.clone(), id, cx);
+            // Reopening doesn't move you: the selection, and its tab, stay put.
+            let active = this.agents.tabs.get(&wt).map(|g| g.active);
+            for t in tabs {
+                this.agents_reopen_tab(&wt, t, cx);
+            }
+            if let (Some(a), Some(g)) = (active, this.agents.tabs.get_mut(&wt)) {
+                g.active = a;
             }
         });
+    }
+
+    /// Reopen a tab saved at the last quit, under the name you gave it: an agent tab on its
+    /// Claude Code session (once: not if a tab here already has it), else a fresh one.
+    #[cfg(feature = "terminal")]
+    fn agents_reopen_tab(
+        &mut self,
+        wt: &Path,
+        t: kyde_config::agents::SavedTab,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.agents.tabs.get(wt).map_or(0, |g| g.tabs.len());
+        match (t.agent, t.session) {
+            (true, Some(id)) => {
+                let open = self
+                    .agents
+                    .tabs
+                    .get(wt)
+                    .is_some_and(|g| g.tabs.iter().any(|t| t.session.as_deref() == Some(&*id)));
+                if open {
+                    return;
+                }
+                self.agents_resume_tab(wt.to_path_buf(), id, cx);
+            }
+            (agent, _) => self.agents_new_tab(wt.to_path_buf(), agent, None, cx),
+        }
+        if let Some(new) = self
+            .agents
+            .tabs
+            .get_mut(wt)
+            .and_then(|g| g.tabs.get_mut(before))
+            .filter(|_| t.name.is_some())
+        {
+            new.name = t.name;
+            self.agents_save(cx);
+        }
     }
 
     /// Once per launch, start the selected worktree's agent if it has no tab — so opening the
@@ -2230,10 +2298,7 @@ impl Kyde {
         match saved {
             Some(saved) => {
                 for t in saved {
-                    match (t.agent, t.session) {
-                        (true, Some(id)) => self.agents_resume_tab(wt.clone(), id, cx),
-                        (agent, _) => self.agents_new_tab(wt.clone(), agent, None, cx),
-                    }
+                    self.agents_reopen_tab(&wt, t, cx);
                 }
             }
             // A background agent is at work here: no agent of its own beside it (two on the
@@ -2385,7 +2450,7 @@ impl Kyde {
                 .detach();
         }
         let env = crate::agents::tab_env(&id);
-        // In an agent host, so it keeps running when Kyde quits — else (no host: Windows, a
+        // In an agent host, so it can finish its work when Kyde quits — else (no host: Windows, a
         // failed start, tests) in a terminal of its own.
         let view = if let Some(v) =
             self.agents_spawn_host(&wt, &id, agent, line.clone(), env.clone(), cx)
@@ -2590,8 +2655,8 @@ impl Kyde {
             return;
         }
         let gone = g.tabs.remove(idx);
-        // Closing the tab ends its agent (quitting Kyde doesn't) — and its background agents,
-        // whose work stays where they worked until dismissed.
+        // Closing the tab ends its agent (quitting Kyde lets it finish first) — and its
+        // background agents, whose work stays where they worked until dismissed.
         gone.view.read(cx).kill_host(&gone.id);
         let from = gone
             .name
@@ -7665,11 +7730,14 @@ impl Kyde {
                 .child(title)
                 .into_any_element()
         };
+        // No session open in it: the row steps back, so the ones with agents stand out.
+        let idle = cfg!(feature = "terminal") && !renaming && !self.agents_has_tabs(wt);
         let lines = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
+            .when(idle, |d| d.opacity(IDLE_ROW_OPACITY))
             .child(self.agents_wt_line("agents-wt-git", space, wt, id, title_el, Some(cx)));
         // Any row drags to a new place in its project (the checkout too).
         let drag_item = (!self.agents.cfg.sort_attention).then(|| DragItem::Worktree {
