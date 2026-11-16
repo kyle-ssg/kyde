@@ -132,12 +132,12 @@ pub(crate) fn alert_for(
     now: &Hook,
     woken: bool,
     background: bool,
-) -> Option<crate::alert::Sound> {
+) -> Option<crate::platform::alert::Sound> {
     match (was, now) {
         (Some(Hook::Blocked(_)), Hook::Blocked(_)) => None,
-        (_, Hook::Blocked(_)) => Some(crate::alert::Sound::NeedsInput),
+        (_, Hook::Blocked(_)) => Some(crate::platform::alert::Sound::NeedsInput),
         (Some(Hook::Working | Hook::Blocked(_)), Hook::Done) if !woken && !background => {
-            Some(crate::alert::Sound::Done)
+            Some(crate::platform::alert::Sound::Done)
         }
         _ => None,
     }
@@ -1862,13 +1862,13 @@ mod tests {
         let woken = prompt("<task-notification>\n<task-id>b1</task-id>\n<status>completed");
         let typed = prompt("run the tests");
         let finished = |woken| alert_for(Some(&Hook::Working), &Hook::Done, woken, false);
-        assert_eq!(finished(typed), Some(crate::alert::Sound::Done));
+        assert_eq!(finished(typed), Some(crate::platform::alert::Sound::Done));
         assert_eq!(finished(woken), None);
         // It still asks you when a woken turn needs your permission.
         let ask = Hook::Blocked("Bash permission".into());
         assert_eq!(
             alert_for(Some(&Hook::Working), &ask, woken, false),
-            Some(crate::alert::Sound::NeedsInput)
+            Some(crate::platform::alert::Sound::NeedsInput)
         );
     }
 
