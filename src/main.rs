@@ -162,7 +162,8 @@ actions!(
         FindPrev,
         CloseFind,
         ReplaceOne,
-        ReplaceAll
+        ReplaceAll,
+        FindSwitchField
     ]
 );
 // The Agents view's shortcuts (configurable; bound in its "Agents" key context).
@@ -534,6 +535,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("escape", CloseFind, Some("FindBar")),
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
+        // After the editor's Tab = Indent, which ties on depth (later wins). Single-line
+        // inputs don't handle Indent, so without this Tab typed a literal tab into the query.
+        KeyBinding::new("tab", FindSwitchField, Some("FindBar")),
+        KeyBinding::new("shift-tab", FindSwitchField, Some("FindBar")),
     ]);
     // ⌘F (Ctrl+Shift+F elsewhere — Ctrl+F is the shell's) in a terminal searches its own
     // scrollback. After the context-less ⌘F above, which ties with it on depth (later wins).
@@ -3211,6 +3216,10 @@ impl Render for ModalWindow {
             }))
             .on_action(cx.listener(|this, a: &ReplaceAll, w, cx| {
                 this.kyde.update(cx, |k, kcx| k.replace_all(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &FindSwitchField, w, cx| {
+                this.kyde
+                    .update(cx, |k, kcx| k.find_switch_field(a, w, kcx));
             }))
             .bg(theme::get().panel_bg)
             .text_color(theme::get().text)
@@ -6150,6 +6159,40 @@ mod gpui_smoke_tests {
                 assert!(k.compare.right.read(cx).find_bg.is_empty());
             })
             .unwrap();
+    }
+
+    /// A real Tab in the find bar hops Find ⇄ Replace — it must beat the editor's Tab
+    /// binding, which in a single-line input falls through to typing a literal tab.
+    #[gpui::test]
+    fn tab_moves_between_find_and_replace(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.open_find(FindHost::Main, true, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(handle.into(), |_, w, cx| {
+                w.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let focused = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, w, cx| {
+                    assert_eq!(k.find.query.read(cx).text(), "", "Tab types nothing");
+                    k.find.replace_query.read(cx).focus_handle.is_focused(w)
+                })
+                .unwrap()
+        };
+        press(cx, "tab");
+        assert!(focused(cx), "Tab: Find → Replace");
+        press(cx, "shift-tab");
+        assert!(!focused(cx), "⇧Tab: Replace → Find");
     }
 
     /// ⌘-click import navigation (issue #26): a link resolved against the
