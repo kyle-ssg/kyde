@@ -394,7 +394,8 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::replace_one))
-            .on_action(cx.listener(Self::replace_all));
+            .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::find_switch_field));
         #[cfg(target_os = "linux")]
         {
             root = self.with_menu_bar_keys(root, cx);

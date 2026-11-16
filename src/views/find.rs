@@ -167,6 +167,30 @@ impl Kyde {
         }
     }
 
+    /// Tab / ⇧Tab: hop between the Find and Replace boxes, selecting the text landed on like a
+    /// native field. With no replace row it's swallowed, so it can't type a tab into the query.
+    pub(crate) fn find_switch_field(
+        &mut self,
+        _: &FindSwitchField,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.find.replace {
+            return;
+        }
+        let to = if self.find.query.read(cx).focus_handle.is_focused(window) {
+            self.find.replace_query.clone()
+        } else {
+            self.find.query.clone()
+        };
+        to.update(cx, |e, cx| {
+            let len = e.text().len();
+            e.select_range(0..len, cx);
+        });
+        let handle = to.read(cx).focus_handle.clone();
+        window.focus(&handle);
+    }
+
     /// The window hosting the bar closed — drop the bar with it.
     pub(crate) fn find_host_closed(&mut self, host: FindHost, cx: &mut Context<Self>) {
         if self.find.open && self.find.host == host {
