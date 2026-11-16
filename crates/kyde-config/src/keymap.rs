@@ -35,6 +35,12 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Save File",
     },
     ActionDef {
+        name: "save_as",
+        webstorm: "cmd-shift-s",
+        vscode: "cmd-shift-s",
+        label: "Save File As…",
+    },
+    ActionDef {
         name: "commit",
         webstorm: "cmd-k",
         vscode: "cmd-enter",
@@ -81,6 +87,14 @@ pub const ACTIONS: &[ActionDef] = &[
         webstorm: "cmd-alt-s",
         vscode: "cmd-alt-s",
         label: "Sort Object Keys",
+    },
+    // `IntelliJ`'s Reformat Code is ⌘⌥L, but Sort Lines already has that here; ⌘⌥⇧L is its
+    // Reformat File. `VSCode`'s Format Document is ⇧⌥F.
+    ActionDef {
+        name: "reformat",
+        webstorm: "cmd-alt-shift-l",
+        vscode: "alt-shift-f",
+        label: "Reformat Code",
     },
     ActionDef {
         name: "nav_back",

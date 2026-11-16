@@ -367,11 +367,18 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_delete_file))
             .on_action(cx.listener(Self::act_close_tab))
             .on_action(cx.listener(Self::act_save))
+            // The File menu's Save As… / Reveal in Finder act on the open file: listened for
+            // only while there is one, so the native menu bar greys them out otherwise.
+            .when(self.file_menu_target().is_some(), |d| {
+                d.on_action(cx.listener(Self::act_save_as))
+                    .on_action(cx.listener(Self::act_reveal_file))
+            })
             .on_action(cx.listener(Self::act_commit))
             .on_action(cx.listener(Self::act_mode_commit))
             .on_action(cx.listener(Self::act_mode_browse))
             .on_action(cx.listener(Self::act_sort_lines))
             .on_action(cx.listener(Self::act_sort_keys))
+            .on_action(cx.listener(Self::act_reformat))
             .on_action(cx.listener(Self::act_nav_back))
             .on_action(cx.listener(Self::act_nav_forward))
             .on_action(cx.listener(Self::act_copy_files))
@@ -394,7 +401,8 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::find_prev))
             .on_action(cx.listener(Self::close_find))
             .on_action(cx.listener(Self::replace_one))
-            .on_action(cx.listener(Self::replace_all));
+            .on_action(cx.listener(Self::replace_all))
+            .on_action(cx.listener(Self::find_switch_field));
         #[cfg(target_os = "linux")]
         {
             root = self.with_menu_bar_keys(root, cx);

@@ -383,8 +383,8 @@ impl Kyde {
         let ahead = self.sync.ahead.unwrap_or(0) > 0;
         let mut out = Vec::new();
         match target {
-            MenuTarget::EditorGit(p, can_sort_lines, can_sort_keys) => {
-                // Buffer sort ops first (they act on the click point / selection), then the
+            MenuTarget::EditorGit(p, can_sort_lines, can_sort_keys, can_reformat) => {
+                // Buffer ops first (they act on the click point / selection), then the
                 // git commands.
                 if *can_sort_lines {
                     out.push(MenuEntry::item("Sort Lines", |this, _w, cx| {
@@ -394,6 +394,11 @@ impl Kyde {
                 if *can_sort_keys {
                     out.push(MenuEntry::item("Sort Object Keys", |this, _w, cx| {
                         this.sort_object_keys_at_caret(cx);
+                    }));
+                }
+                if *can_reformat {
+                    out.push(MenuEntry::item("Reformat Code", |this, _w, cx| {
+                        this.reformat_code(cx);
                     }));
                 }
                 // Git commands only when the project is a git repo (issue #66).
@@ -489,6 +494,13 @@ impl Kyde {
                 }
                 out.push(MenuEntry::Divider);
 
+                // A scratch file (absolute path) can be kept: saved as a file of the project.
+                if p.is_absolute() && !is_dir {
+                    let ps = p.clone();
+                    out.push(MenuEntry::item("Save As…", move |this, _w, cx| {
+                        this.save_as(ps.clone(), cx);
+                    }));
+                }
                 // Rename / Delete — a folder rename carries its whole subtree.
                 let (pn, pd) = (p.clone(), p.clone());
                 out.push(MenuEntry::item("Rename…", move |this, window, cx| {

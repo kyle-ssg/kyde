@@ -9,6 +9,9 @@ use kyde_theme as theme;
 use std::path::Path;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
+mod format;
+pub use format::{reformat, FormatError, Reformatted};
+
 /// The capture names we recognize. Order matters: indices are referenced by the
 /// `HighlightConfiguration`. Anything a grammar emits outside this set falls back
 /// to the default foreground.

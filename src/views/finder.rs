@@ -375,6 +375,10 @@ impl Kyde {
                                     | PaletteAction::LocalHistory
                             )
                     })
+                    // "Save File As…" saves the open file, so it needs one on screen.
+                    .filter(|(_, (_, a, _))| {
+                        !matches!(a, PaletteAction::SaveAs) || self.file_menu_target().is_some()
+                    })
                     // Local History actions additionally need its store (enabled +
                     // project open); Clear works project-wide, no file required.
                     .filter(|(_, (_, a, _))| {
@@ -546,6 +550,10 @@ impl Kyde {
                 window.focus(&self.focus_handle);
                 cx.notify();
             }
+            PaletteAction::SaveAs => {
+                window.focus(&self.focus_handle);
+                self.act_save_as(&SaveFileAs, window, cx);
+            }
             PaletteAction::RevealInFinder => {
                 window.focus(&self.focus_handle);
                 if let Some(p) = self
@@ -584,6 +592,10 @@ impl Kyde {
             PaletteAction::SortKeys => {
                 window.focus(&self.focus_handle);
                 self.sort_object_keys_at_caret(cx);
+            }
+            PaletteAction::Reformat => {
+                window.focus(&self.focus_handle);
+                self.reformat_code(cx);
             }
             PaletteAction::NavBack => {
                 window.focus(&self.focus_handle);

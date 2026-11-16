@@ -3085,6 +3085,7 @@ dependencies = [
  "codebook-tree-sitter-latex",
  "kyde-color",
  "kyde-theme",
+ "thiserror 2.0.21",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-css",

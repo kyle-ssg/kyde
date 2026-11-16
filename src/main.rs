@@ -100,6 +100,7 @@ actions!(
         GoToFile,
         FindInFiles,
         SaveFile,
+        SaveFileAs,
         DoCommit,
         OpenKeymap,
         ModeCommit,
@@ -108,6 +109,7 @@ actions!(
         NewScratch,
         SortLines,
         SortKeys,
+        Reformat,
         NavBack,
         NavForward,
         EscapeKey,
@@ -162,7 +164,8 @@ actions!(
         FindPrev,
         CloseFind,
         ReplaceOne,
-        ReplaceAll
+        ReplaceAll,
+        FindSwitchField
     ]
 );
 // The Agents view's shortcuts (configurable; bound in its "Agents" key context).
@@ -197,7 +200,8 @@ actions!(
         ClearData,
         OpenPlugins,
         OpenProject,
-        OpenChangelog
+        OpenChangelog,
+        RevealFile
     ]
 );
 
@@ -236,6 +240,7 @@ fn app_menus(recents: &Recents) -> Vec<Menu> {
             items: recent_items,
         }));
     }
+    file_items.extend(open_file_items());
     vec![
         Menu {
             name: "Kyde".into(),
@@ -254,6 +259,16 @@ fn app_menus(recents: &Recents) -> Vec<Menu> {
             name: "File".into(),
             items: file_items,
         },
+    ]
+}
+
+/// The File menu's items for the open file. Greyed out while no file is open: their actions
+/// are only listened for while there is one (`render`).
+fn open_file_items() -> [MenuItem; 3] {
+    [
+        MenuItem::separator(),
+        MenuItem::action("Save As…", SaveFileAs),
+        MenuItem::action(views::REVEAL_IN_FILES, RevealFile),
     ]
 }
 
@@ -315,6 +330,7 @@ fn menu_bar_menus(recents: &Recents) -> Vec<Menu> {
         file_items.push(MenuItem::separator());
         file_items.extend(recent);
     }
+    file_items.extend(open_file_items());
     file_items.extend([
         MenuItem::separator(),
         MenuItem::action("Settings…", OpenKeymap),
@@ -391,6 +407,7 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "go_to_file", GoToFile);
     bind_app(cx, km, "find_in_files", FindInFiles);
     bind_app(cx, km, "save", SaveFile);
+    bind_app(cx, km, "save_as", SaveFileAs);
     bind_app(cx, km, "commit", DoCommit);
     bind_app(cx, km, "mode_commit", ModeCommit);
     bind_app(cx, km, "mode_browse", ModeBrowse);
@@ -399,6 +416,7 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
     bind_app(cx, km, "new_scratch", NewScratch);
     bind_app(cx, km, "sort_lines", SortLines);
     bind_app(cx, km, "sort_keys", SortKeys);
+    bind_app(cx, km, "reformat", Reformat);
     bind_app(cx, km, "nav_back", NavBack);
     bind_app(cx, km, "nav_forward", NavForward);
     bind_app(cx, km, "push", GitPush);
@@ -534,6 +552,10 @@ fn apply_keymap(cx: &mut App, km: &Keymap) {
         KeyBinding::new("escape", CloseFind, Some("FindBar")),
         KeyBinding::new("enter", FindNext, Some("FindBar")),
         KeyBinding::new("shift-enter", FindPrev, Some("FindBar")),
+        // After the editor's Tab = Indent, which ties on depth (later wins). Single-line
+        // inputs don't handle Indent, so without this Tab typed a literal tab into the query.
+        KeyBinding::new("tab", FindSwitchField, Some("FindBar")),
+        KeyBinding::new("shift-tab", FindSwitchField, Some("FindBar")),
     ]);
     // ⌘F (Ctrl+Shift+F elsewhere — Ctrl+F is the shell's) in a terminal searches its own
     // scrollback. After the context-less ⌘F above, which ties with it on depth (later wins).
@@ -714,12 +736,14 @@ enum PaletteAction {
     SelectInTree,
     Rollback,
     Settings,
+    SaveAs,
     RevealInFinder,
     RevealInTerminal,
     Plugins,
     Fonts,
     SortLines,
     SortKeys,
+    Reformat,
     NavBack,
     NavForward,
     LocalHistory,
@@ -734,6 +758,7 @@ enum PaletteAction {
 /// chip — `""` when the action has no bindable key and so shows none).
 const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ("Select in File View", PaletteAction::SelectInTree, ""),
+    ("Save File As…", PaletteAction::SaveAs, "save_as"),
     (views::REVEAL_IN_FILES, PaletteAction::RevealInFinder, ""),
     (
         views::REVEAL_IN_TERMINAL,
@@ -742,6 +767,7 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
     ),
     ("Sort Lines", PaletteAction::SortLines, "sort_lines"),
     ("Sort Object Keys", PaletteAction::SortKeys, "sort_keys"),
+    ("Reformat Code", PaletteAction::Reformat, "reformat"),
     ("Back (previous file)", PaletteAction::NavBack, "nav_back"),
     (
         "Forward (next file)",
@@ -779,11 +805,12 @@ const PALETTE: &[(&str, PaletteAction, &str)] = &[
 enum MenuTarget {
     /// A path in the Browse tree (`bool` = `is_dir`), or the open editor file.
     BrowseFile(PathBuf, bool),
-    /// Right-click inside the editor pane — git commands plus the buffer sort
-    /// ops. The bools (computed at menu-open, so the menu never parses per
-    /// frame) gate the items: `.0` = selection spans ≥2 lines (Sort Lines),
-    /// `.1` = caret inside a JSON/JS/TS object (Sort Object Keys).
-    EditorGit(PathBuf, bool, bool),
+    /// Right-click inside the editor pane — git commands plus the buffer ops.
+    /// The bools (computed at menu-open, so the menu never parses per frame)
+    /// gate the items: `.0` = selection spans ≥2 lines (Sort Lines), `.1` =
+    /// caret inside a JSON/JS/TS object (Sort Object Keys), `.2` = a language
+    /// Reformat Code supports.
+    EditorGit(PathBuf, bool, bool, bool),
     /// A path (file or folder) in the Commit tree — `bool` = `is_dir`.
     CommitPath(PathBuf, bool),
     /// A changed file in the Rollback modal, by index into `files` (→ View Diff).
@@ -2772,8 +2799,9 @@ struct Kyde {
     welcome_frame: u32,
     /// Contents of `crash.log` if the previous run crashed — drives the report banner.
     pending_crash: Option<String>,
-    /// A native folder picker is open (Open / New Project / Add space): another press waits
-    /// for it, since off macOS the picker doesn't block Kyde (`Kyde::prompt_folder`).
+    /// A native folder picker (Open / New Project / Add space) or Save As panel is open:
+    /// another press waits for it, since off macOS it doesn't block Kyde
+    /// (`Kyde::prompt_folder`, `Kyde::save_as`).
     folder_picker_open: bool,
     /// Last failed git operation (commit/push/rollback/branch/checkout/status), surfaced
     /// in a dismissible banner so a silent failure never looks like success. Cleared on
@@ -3211,6 +3239,10 @@ impl Render for ModalWindow {
             }))
             .on_action(cx.listener(|this, a: &ReplaceAll, w, cx| {
                 this.kyde.update(cx, |k, kcx| k.replace_all(a, w, kcx));
+            }))
+            .on_action(cx.listener(|this, a: &FindSwitchField, w, cx| {
+                this.kyde
+                    .update(cx, |k, kcx| k.find_switch_field(a, w, kcx));
             }))
             .bg(theme::get().panel_bg)
             .text_color(theme::get().text)
@@ -3800,6 +3832,7 @@ impl gpui::AssetSource for Assets {
             "icons/arrow-up.svg" => include_bytes!("../assets/icons/arrow-up.svg"),
             "icons/file-plus.svg" => include_bytes!("../assets/icons/file-plus.svg"),
             "icons/file-clock.svg" => include_bytes!("../assets/icons/file-clock.svg"),
+            "icons/save.svg" => include_bytes!("../assets/icons/save.svg"),
             "icons/pencil.svg" => include_bytes!("../assets/icons/pencil.svg"),
             "icons/trash.svg" => include_bytes!("../assets/icons/trash.svg"),
             "icons/scissors.svg" => include_bytes!("../assets/icons/scissors.svg"),
@@ -4180,7 +4213,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             if let Some(p) = view.browse.open_path.clone() {
                 view.open_menu(
                     gpui::point(px(560.0), px(200.0)),
-                    MenuTarget::EditorGit(p, true, true),
+                    MenuTarget::EditorGit(p, true, true, true),
                     cx,
                 );
             }
@@ -6035,6 +6068,38 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Reformat Code from the actions palette pretty-prints the open JSON file — even as
+    /// `PlainText` (no JSON pack) — and JSON that doesn't parse stays untouched while the
+    /// banner says where it broke.
+    #[gpui::test]
+    fn reformat_pretty_prints_json_from_the_palette(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        std::fs::write(dir.join("data.json"), "{}").unwrap();
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(PathBuf::from("data.json"), cx);
+                let set = |k: &mut Kyde, text: &str, cx: &mut Context<Kyde>| {
+                    k.browse.editor.update(cx, |e, cx| {
+                        e.set_content(text.into(), Lang::PlainText, cx);
+                    });
+                };
+                set(k, r#"{"a":1,"b":[true]}"#, cx);
+                k.run_palette(PaletteAction::Reformat, w, cx);
+                assert_eq!(
+                    k.browse.editor.read(cx).text(),
+                    "{\n  \"a\": 1,\n  \"b\": [\n    true\n  ]\n}"
+                );
+                set(k, "{\"a\" 1}", cx);
+                k.run_palette(PaletteAction::Reformat, w, cx);
+                assert_eq!(k.browse.editor.read(cx).text(), "{\"a\" 1}");
+                assert_eq!(
+                    k.op_error.as_deref(),
+                    Some("Can't reformat: invalid JSON at line 1, column 6: expected ':'")
+                );
+            })
+            .unwrap();
+    }
+
     /// Compare two files (issue #42): `open_compare` diffs them, the gutter's
     /// apply copies a hunk either direction (writing the TARGET file to disk and
     /// re-diffing in place), and the pair converges to zero differences.
@@ -6150,6 +6215,40 @@ mod gpui_smoke_tests {
                 assert!(k.compare.right.read(cx).find_bg.is_empty());
             })
             .unwrap();
+    }
+
+    /// A real Tab in the find bar hops Find ⇄ Replace — it must beat the editor's Tab
+    /// binding, which in a single-line input falls through to typing a literal tab.
+    #[gpui::test]
+    fn tab_moves_between_find_and_replace(cx: &mut TestAppContext) {
+        cx.update(|cx| apply_keymap(cx, &Keymap::default()));
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(PathBuf::from("app.tsx"), cx);
+                k.open_find(FindHost::Main, true, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let press = |cx: &mut TestAppContext, key: &str| {
+            cx.update_window(handle.into(), |_, w, cx| {
+                w.dispatch_keystroke(gpui::Keystroke::parse(key).unwrap(), cx);
+            })
+            .unwrap();
+            cx.run_until_parked();
+        };
+        let focused = |cx: &mut TestAppContext| {
+            handle
+                .update(cx, |k, w, cx| {
+                    assert_eq!(k.find.query.read(cx).text(), "", "Tab types nothing");
+                    k.find.replace_query.read(cx).focus_handle.is_focused(w)
+                })
+                .unwrap()
+        };
+        press(cx, "tab");
+        assert!(focused(cx), "Tab: Find → Replace");
+        press(cx, "shift-tab");
+        assert!(!focused(cx), "⇧Tab: Replace → Find");
     }
 
     /// ⌘-click import navigation (issue #26): a link resolved against the
@@ -9351,6 +9450,9 @@ mod gpui_smoke_tests {
                         "—",
                         "Recent Projects ▸",
                         "—",
+                        "Save As…",
+                        views::REVEAL_IN_FILES,
+                        "—",
                         "Settings…",
                         "Plugins…",
                         "What's New…",
@@ -9495,6 +9597,9 @@ mod gpui_smoke_tests {
                         "—",
                         "Recent Projects ▸",
                         "—",
+                        "Save As…",
+                        views::REVEAL_IN_FILES,
+                        "—",
                         "Settings…",
                         "Plugins…",
                         "—",
@@ -9590,6 +9695,50 @@ mod gpui_smoke_tests {
                 assert!(!ran(key, &ctx[..1]).is_empty(), "{key} is bound outside it");
             }
         });
+    }
+
+    /// File ▸ Save As… on a scratch: the save panel opens in the project, the file lands
+    /// where it's pointed, its tab now edits that project file, and the scratch is kept.
+    #[gpui::test]
+    fn save_as_keeps_a_scratch_as_a_project_file(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let scratch = dir.with_extension("scratch.json"); // outside the project, as scratches are
+        std::fs::write(&scratch, "{\"a\": 1}\n").unwrap();
+        let root = handle
+            .update(cx, |k, w, cx| {
+                k.mode = Mode::Browse;
+                k.open_file(scratch.clone(), cx);
+                w.focus(&k.focus_handle);
+                k.repo_root.clone().unwrap()
+            })
+            .unwrap();
+        cx.refresh().unwrap(); // the open file's menu actions are listened for from render
+        cx.run_until_parked();
+        cx.update_window(handle.into(), |_, w, cx| {
+            w.dispatch_action(Box::new(SaveFileAs), cx);
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.simulate_new_path_selection(|start| {
+            assert_eq!(start, root, "the panel opens in the project");
+            Some(root.join("kept.json"))
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(root.join("kept.json")).unwrap(),
+            "{\"a\": 1}\n"
+        );
+        assert!(scratch.exists(), "the scratch is kept");
+        handle
+            .update(cx, |k, _w, _cx| {
+                let kept = PathBuf::from("kept.json");
+                assert_eq!(k.browse.open_path.as_ref(), Some(&kept));
+                assert!(
+                    k.browse.open_tabs.contains(&kept) && !k.browse.open_tabs.contains(&scratch)
+                );
+            })
+            .unwrap();
+        std::fs::remove_file(&scratch).ok();
     }
 
     /// Keyboard navigation end to end (issue #81), through the real bindings + key contexts:
