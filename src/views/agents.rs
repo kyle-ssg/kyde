@@ -91,6 +91,8 @@ const AGENT_TAB_BRIEF: f32 = 80.0;
 const WT_LINE_X: f32 = ROW_PAD_X + CHEVRON_W + GAP + DOT / 2.0;
 /// …and its own dot starts a stub's length to the right.
 const WT_DOT_X: f32 = WT_LINE_X + 16.0;
+/// How strongly a worktree row with no session open in it shows.
+const IDLE_ROW_OPACITY: f32 = 0.75;
 /// How far a group's projects sit in from its header.
 const GROUP_INDENT: f32 = 12.0;
 
@@ -7728,11 +7730,14 @@ impl Kyde {
                 .child(title)
                 .into_any_element()
         };
+        // No session open in it: the row steps back, so the ones with agents stand out.
+        let idle = cfg!(feature = "terminal") && !renaming && !self.agents_has_tabs(wt);
         let lines = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_w_0()
+            .when(idle, |d| d.opacity(IDLE_ROW_OPACITY))
             .child(self.agents_wt_line("agents-wt-git", space, wt, id, title_el, Some(cx)));
         // Any row drags to a new place in its project (the checkout too).
         let drag_item = (!self.agents.cfg.sort_attention).then(|| DragItem::Worktree {
