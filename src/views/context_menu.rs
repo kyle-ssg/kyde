@@ -489,6 +489,13 @@ impl Kyde {
                 }
                 out.push(MenuEntry::Divider);
 
+                // A scratch file (absolute path) can be kept: saved as a file of the project.
+                if p.is_absolute() && !is_dir {
+                    let ps = p.clone();
+                    out.push(MenuEntry::item("Save As…", move |this, _w, cx| {
+                        this.save_as(ps.clone(), cx);
+                    }));
+                }
                 // Rename / Delete — a folder rename carries its whole subtree.
                 let (pn, pd) = (p.clone(), p.clone());
                 out.push(MenuEntry::item("Rename…", move |this, window, cx| {

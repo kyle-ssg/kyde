@@ -1835,7 +1835,7 @@ fn keymap_groups() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         (
             "Editing",
-            vec!["save", "new_scratch", "sort_lines", "sort_keys"],
+            vec!["save", "save_as", "new_scratch", "sort_lines", "sort_keys"],
         ),
         ("Git", vec!["mode_commit", "commit", "push", "pull"]),
         (

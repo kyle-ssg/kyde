@@ -35,6 +35,12 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Save File",
     },
     ActionDef {
+        name: "save_as",
+        webstorm: "cmd-shift-s",
+        vscode: "cmd-shift-s",
+        label: "Save File As…",
+    },
+    ActionDef {
         name: "commit",
         webstorm: "cmd-k",
         vscode: "cmd-enter",
