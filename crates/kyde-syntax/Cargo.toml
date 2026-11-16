@@ -11,6 +11,7 @@ description = "Tree-sitter syntax highlighting + fold regions for Kyde. Grammars
 # Colours are `kyde_color::Color` (a POD) — this highlighter carries no GUI dependency.
 kyde-color = { path = "../kyde-color" }
 kyde-theme = { path = "../kyde-theme" }
+thiserror.workspace = true
 tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
 tree-sitter-typescript = { version = "0.23", optional = true }

@@ -378,6 +378,7 @@ impl Render for Kyde {
             .on_action(cx.listener(Self::act_mode_browse))
             .on_action(cx.listener(Self::act_sort_lines))
             .on_action(cx.listener(Self::act_sort_keys))
+            .on_action(cx.listener(Self::act_reformat))
             .on_action(cx.listener(Self::act_nav_back))
             .on_action(cx.listener(Self::act_nav_forward))
             .on_action(cx.listener(Self::act_copy_files))
