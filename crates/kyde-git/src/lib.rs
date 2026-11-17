@@ -557,8 +557,13 @@ impl Repo {
     /// `--set-upstream` is harmless when an upstream already exists, so one path
     /// covers both first push and subsequent pushes. Returns git's stdout.
     pub fn push(&self) -> Result<String> {
+        // A branch a remote made can be named `--mirror` or `--force` (a ref may start with
+        // `-`; only `git branch` refuses one), and git would take it as that option.
         match self.current_branch() {
-            Some(b) => git(&self.root, &["push", "--set-upstream", "origin", &b]),
+            Some(b) => git(
+                &self.root,
+                &["push", "--set-upstream", "origin", valid_ref(&b)?],
+            ),
             None => git(&self.root, &["push"]),
         }
     }
@@ -607,10 +612,12 @@ impl Repo {
     /// Public so it doubles as the explicit "Pull" action (a pull fetches, then rebases).
     pub fn pull_rebase(&self) -> Result<String> {
         let res = match self.current_branch() {
-            Some(b) => git(
-                &self.root,
-                &["pull", "--rebase", "--autostash", "origin", &b],
-            ),
+            Some(b) => valid_ref(&b).and_then(|b| {
+                git(
+                    &self.root,
+                    &["pull", "--rebase", "--autostash", "origin", b],
+                )
+            }),
             None => git(&self.root, &["pull", "--rebase", "--autostash"]),
         };
         if res.is_err() {
@@ -1578,6 +1585,26 @@ mod tests {
         assert!(!locked.exists());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A branch named like an option (a clone of a remote whose default branch is
+    /// `--mirror` checks one out) is refused before git can read it as `push --mirror`,
+    /// which deletes every remote branch you don't have.
+    #[test]
+    fn push_and_pull_refuse_a_branch_named_like_an_option() {
+        let work = std::env::temp_dir().join(format!("kyde-dashref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q"]).unwrap();
+        git(&work, &["symbolic-ref", "HEAD", "refs/heads/--mirror"]).unwrap();
+        let repo = Repo::discover(&work).unwrap();
+        assert_eq!(repo.current_branch().as_deref(), Some("--mirror"));
+        assert!(matches!(repo.push(), Err(GitError::InvalidBranchName(_))));
+        assert!(matches!(
+            repo.pull_rebase(),
+            Err(GitError::InvalidBranchName(_))
+        ));
+        let _ = std::fs::remove_dir_all(&work);
     }
 
     #[test]
