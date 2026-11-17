@@ -39,8 +39,8 @@ feel. No web, no Electron, no React.
 - **Agent tabs live in agent hosts** (`src/agent_host.rs`): each runs in a detached
   `kyde --agent-host` process that owns its PTY, so an agent at work survives quitting Kyde.
   A host nobody is attached to ends its agent once it has nothing to finish
-  (`agents::has_work`); relaunch reattaches the ones still working and resumes the rest's
-  sessions; closing a tab kills its host. `ky agent …` (`src/agent_cli.rs`) drives them
+  (`agents::has_work`); relaunch reattaches the ones still working, and a worktree resumes
+  its sessions when it's opened (never all at launch); closing a tab kills its host. `ky agent …` (`src/agent_cli.rs`) drives them
   over the same sockets. Their live state comes from a Claude Code hook Kyde installs in
   `~/.claude/settings.json` (`kyde-config::claude_hooks`). Tests run tabs locally
   (`agents::hosted`). Build the slim binary LAST before launching — the zero-feature build
