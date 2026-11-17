@@ -161,9 +161,9 @@ impl Kyde {
         .detach();
     }
 
-    /// On launch, bring every worktree's tabs back in the background — the tabs open at the
-    /// last quit (Claude sessions resumed), then each other worktree's latest session. The
-    /// selection and focus stay where they are.
+    /// On launch, reattach the agents still at work and note what every other worktree had
+    /// open at the last quit: those tabs come back (Claude sessions resumed) when their
+    /// worktree is opened. The selection and focus stay where they are.
     fn agents_restore_saved(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
         {
@@ -309,9 +309,10 @@ impl Kyde {
         .detach();
     }
 
-    /// Launch, after reattaching: reopen the tabs whose agents aren't running any more
-    /// (`saved`, per worktree: `agents::tabs_to_reopen`), resume the latest Claude session of
-    /// worktrees left without a tab, then the autostart.
+    /// Launch, after reattaching: the tabs whose agents aren't running any more (`saved`, per
+    /// worktree: `agents::tabs_to_reopen`) wait until their worktree is opened — an agent
+    /// nobody is looking at would only hold memory — then the autostart opens the selected
+    /// one's.
     fn agents_resume_rest(
         &mut self,
         #[cfg(feature = "terminal")] saved: Vec<(PathBuf, Vec<kyde_config::agents::SavedTab>)>,
@@ -319,11 +320,10 @@ impl Kyde {
     ) {
         #[cfg(feature = "terminal")]
         {
-            let mut resuming: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
             for (wt, tabs) in saved {
                 // Only real conversations come back: a saved agent tab without one would just
                 // start a fresh, pointless agent — `saved` has dropped those. Until its tabs
-                // open, what's left is what the worktree reopens with.
+                // open, what's left is what the worktree reopens with (`agents_open_tabs`).
                 if !self.agents.restored.contains(&wt) {
                     if tabs.is_empty() {
                         self.agents.cfg.tabs.remove(&wt);
@@ -331,33 +331,11 @@ impl Kyde {
                         self.agents.cfg.tabs.insert(wt.clone(), tabs.clone());
                     }
                 }
-                if tabs.is_empty() {
-                    continue;
+                // Beside an agent still at work, its other tabs come back now: the worktree
+                // is open already, so nothing would reopen them later.
+                if !tabs.is_empty() && self.agents_has_tabs(&wt) {
+                    self.agents_reopen_when_idle(wt, tabs, cx);
                 }
-                resuming.insert(wt.clone());
-                self.agents_reopen_when_idle(wt, tabs, cx);
-            }
-            // Every other worktree with a Claude session resumes its latest one too — all in
-            // the background, so clicking a row just shows it.
-            let latest: Vec<(PathBuf, String)> = self
-                .agents
-                .cfg
-                .spaces
-                .iter()
-                .flat_map(|s| std::iter::once(&s.path).chain(&s.worktrees))
-                .filter(|wt| !resuming.contains(*wt) && !self.agents.restored.contains(*wt))
-                .filter_map(|wt| {
-                    let id = self.agents.contexts.get(wt)?.session.clone()?;
-                    Some((wt.clone(), id))
-                })
-                .collect();
-            for (wt, id) in latest {
-                let tab = kyde_config::agents::SavedTab {
-                    agent: true,
-                    session: Some(id),
-                    ..Default::default()
-                };
-                self.agents_reopen_when_idle(wt, vec![tab], cx);
             }
             self.agents_sync_hooks(cx);
             self.agents_save(cx);
@@ -369,8 +347,7 @@ impl Kyde {
     }
 
     /// Reopen `tabs` in worktree `wt` (a project's own checkout catches up with main first),
-    /// beside any reattached there — unless something opened tabs in it meanwhile (e.g. the
-    /// selected one's autostart), so a session never runs twice.
+    /// beside the ones reattached there.
     #[cfg(feature = "terminal")]
     fn agents_reopen_when_idle(
         &mut self,
@@ -378,13 +355,7 @@ impl Kyde {
         tabs: Vec<kyde_config::agents::SavedTab>,
         cx: &mut Context<Self>,
     ) {
-        let has_tabs =
-            |this: &Self, wt: &Path| this.agents.tabs.get(wt).is_some_and(|g| !g.tabs.is_empty());
-        let reattached = has_tabs(self, &wt);
         self.agents_after_main_sync(wt.clone(), cx, move |this, cx| {
-            if !reattached && has_tabs(this, &wt) {
-                return;
-            }
             // Reopening doesn't move you: the selection, and its tab, stay put.
             let active = this.agents.tabs.get(&wt).map(|g| g.active);
             for t in tabs {

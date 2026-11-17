@@ -39,7 +39,7 @@ Run these as \"$KYDE_BIN\" agent … (or `ky agent …` if Kyde's shell command 
   ky agent kill <id>                     end it (its tab closes)
 
 With Kyde closed, an agent runs only while it has work to finish: once it's done (or if it
-never gets a prompt) it ends, and Kyde resumes its session when it next opens.
+never gets a prompt) it ends, and Kyde resumes its session when you next open its worktree.
 
 Ids can be shortened to any unique prefix. States come from Claude Code's hook: ready
 (waiting for a first prompt), working, needs-input (a permission prompt or a question),
