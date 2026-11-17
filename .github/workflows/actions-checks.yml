@@ -1,0 +1,42 @@
+name: actions-checks
+
+# Checks the workflows themselves: the actions lockfile is complete and still trustworthy,
+# and zizmor finds no security problems. Runs on every push/PR, not only when a workflow
+# changes, because both can start failing on their own (a locked tag moved upstream, a newly
+# published advisory for an action we use). The pinned gh-actions-lock and zizmor versions
+# are updated by hand.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actions-checks:
+    name: gh actions-lock + zizmor
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install gh-actions-lock
+        run: gh extension install github/gh-actions-lock --pin v0.4.1
+
+      # Fails when .github/workflows/actions.lock does not match the workflows, or a locked
+      # commit is no longer in its tag's upstream history. Run `gh actions-lock` locally
+      # after changing any `uses:` line.
+      - name: Verify the actions lockfile
+        run: gh actions-lock --verify
+
+      # Runs even when the lockfile check fails, so one push shows both. GH_TOKEN puts zizmor
+      # in online mode, which adds the audits that look actions up on GitHub (e.g. known
+      # vulnerable versions). Findings show as annotations on the PR.
+      - name: Run zizmor
+        if: ${{ !cancelled() }}
+        run: pipx run zizmor==1.32.0 --format=github .
