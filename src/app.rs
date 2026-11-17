@@ -755,7 +755,7 @@ impl Kyde {
         if let Some(repo) = self.repo() {
             repo.save_file(rel, text)?;
         } else if let Some(root) = self.repo_root.as_ref() {
-            let full = root.join(rel);
+            let full = git::write_target(root, rel)?;
             if let Some(parent) = full.parent() {
                 std::fs::create_dir_all(parent)?;
             }
