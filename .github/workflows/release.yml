@@ -17,9 +17,9 @@ on:
   push:
     branches: [main]
 
-permissions:
-  contents: write
-  pull-requests: write
+# Each job asks for only what it needs: release-please opens the release PR and cuts the
+# tag, the build job only uploads assets to the release.
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,11 +30,14 @@ env:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@v5.0.0
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -44,6 +47,9 @@ jobs:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ${{ matrix.os }}
+    # `gh release upload` needs write.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       # Serialize so the arm64 asset is uploaded FIRST. The updater shipped before per-arch
@@ -84,7 +90,9 @@ jobs:
           #   os: windows-latest
           #   bin: kyde.exe
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -92,7 +100,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.9.3
         with:
           key: ${{ matrix.target }}
 
@@ -200,6 +208,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" \
+          gh release upload "$TAG_NAME" \
             "${{ matrix.asset }}" "${{ matrix.asset }}.sha256" --clobber
