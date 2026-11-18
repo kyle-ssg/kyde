@@ -29,10 +29,16 @@ pub(super) fn filter_at(i: usize) -> Option<RunState> {
     CI_FILTERS.get(i).copied().flatten()
 }
 
+/// Whether the dropdown's `filter` lets a run in `state` through. "In progress" also takes
+/// a run held for approval: it hasn't run yet either.
+fn filter_passes(filter: RunState, state: RunState) -> bool {
+    filter == state || (filter == RunState::Running && state == RunState::AwaitingApproval)
+}
+
 /// A run's (or job's) status glyph and colour — the PR Checks tab's.
 fn state_glyph(state: RunState) -> (&'static str, kyde_color::Color) {
     match state {
-        RunState::Running => CheckOutcome::Pending,
+        RunState::Running | RunState::AwaitingApproval => CheckOutcome::Pending,
         RunState::Failed => CheckOutcome::Fail,
         RunState::Passed => CheckOutcome::Pass,
     }
@@ -47,14 +53,14 @@ fn run_label(status: &str, conclusion: &str) -> &'static str {
             "waiting" => "Waiting",
             _ => "In progress",
         },
-        _ => match conclusion {
+        RunState::AwaitingApproval => "Awaiting approval",
+        RunState::Failed | RunState::Passed => match conclusion {
             "success" => "Succeeded",
             "skipped" => "Skipped",
             "neutral" => "Neutral",
             "cancelled" => "Cancelled",
             "timed_out" => "Timed out",
             "startup_failure" => "Startup failure",
-            "action_required" => "Action required",
             _ => "Failed",
         },
     }
@@ -190,7 +196,7 @@ impl Kyde {
         let icon = match state {
             RunState::Passed => "icons/circle-check.svg",
             RunState::Failed => "icons/circle-x.svg",
-            RunState::Running => "icons/circle-dot.svg",
+            RunState::Running | RunState::AwaitingApproval => "icons/circle-dot.svg",
         };
         let mut tip = format!(
             "CI: {} #{} {}",
@@ -229,7 +235,10 @@ impl Kyde {
     /// Whether the list shows `run`: it passes the filter and matches the search (`query`,
     /// lowercased) on its title, workflow or branch.
     fn ci_shows(&self, run: &WorkflowRun, query: &str) -> bool {
-        self.agents.ci.filter.is_none_or(|f| run.state() == f)
+        self.agents
+            .ci
+            .filter
+            .is_none_or(|f| filter_passes(f, run.state()))
             && (query.is_empty()
                 || [&run.title, &run.workflow, &run.branch]
                     .iter()
@@ -308,10 +317,11 @@ impl Kyde {
                     .child(glyph)
                     .into_any_element();
                 let mut sub = format!("{} #{} · {}", run.workflow, run.number, run.branch);
-                if state == RunState::Running {
+                if matches!(state, RunState::Running | RunState::AwaitingApproval) {
                     sub.push_str(" · ");
                     sub.push_str(&run_label(&run.status, &run.conclusion).to_lowercase());
-                } else {
+                }
+                if state != RunState::Running {
                     let ago = crate::agents::iso_ago(&run.created_at);
                     if !ago.is_empty() {
                         sub.push_str(" · ");
@@ -370,11 +380,12 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Reload the selected run — when `force`d (the Refresh button), or while it's under way.
+    /// Reload the selected run — when `force`d (the Refresh button), or while it's under way
+    /// or held for approval (approving it on GitHub starts it).
     pub(super) fn agents_reload_run(&mut self, force: bool, cx: &mut Context<Self>) {
         let running = matches!(
             &self.agents.ci.detail,
-            Some(Ok(d)) if d.run.state() == RunState::Running
+            Some(Ok(d)) if matches!(d.run.state(), RunState::Running | RunState::AwaitingApproval)
         );
         if force || running {
             self.agents_fetch_run(true, cx);
@@ -570,7 +581,7 @@ impl Kyde {
             };
         let superseded = !superseding.is_empty();
         let pill_color = match state {
-            RunState::Running => t.status_pending,
+            RunState::Running | RunState::AwaitingApproval => t.status_pending,
             RunState::Failed => t.status_conflict,
             RunState::Passed => t.status_added,
         };
@@ -611,7 +622,8 @@ impl Kyde {
                     .into_any_element()
             });
         }
-        if state != RunState::Running && !superseded {
+        // A run held for approval has nothing to re-run: it's approved on GitHub.
+        if matches!(state, RunState::Failed | RunState::Passed) && !superseded {
             let sp = space.clone();
             actions.push(
                 btn_secondary_state("agents-ci-rerun-all", "Re-run all jobs", retrying)
@@ -627,13 +639,18 @@ impl Kyde {
             );
         }
         let url = run.url.clone();
-        actions.push(
+        // Approving happens on GitHub, so that's the next step for a held run.
+        let open = if state == RunState::AwaitingApproval && !superseded {
+            btn_primary("agents-ci-web", "Open on GitHub")
+        } else {
             btn_secondary("agents-ci-web", "Open on GitHub")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |_this, _e, _w, cx| cx.open_url(&url)),
-                )
-                .into_any_element(),
+        };
+        actions.push(
+            open.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |_this, _e, _w, cx| cx.open_url(&url)),
+            )
+            .into_any_element(),
         );
         let header = div()
             .flex()
@@ -782,6 +799,9 @@ impl Kyde {
                     "No job ran — this run likely failed because of a problem in its workflow file."
                 }
                 RunState::Running => "Waiting for its jobs to start…",
+                RunState::AwaitingApproval => {
+                    "Nothing has run yet — GitHub holds this run until a maintainer approves it."
+                }
                 RunState::Passed => "No jobs ran.",
             })];
         }

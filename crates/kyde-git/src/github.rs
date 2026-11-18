@@ -1078,10 +1078,21 @@ pub enum RunState {
     Failed,
     /// Finished fine (or was skipped).
     Passed,
+    /// Held until a maintainer approves it (GitHub's `action_required`: a PR from a
+    /// first-time contributor or a bot) — nothing has run, and nothing failed.
+    AwaitingApproval,
 }
 
 impl RunState {
     /// The state GitHub's `status` + `conclusion` pair means.
+    ///
+    /// ```
+    /// use kyde_git::github::RunState;
+    /// // GitHub marks a run it's holding for approval as completed, but it hasn't failed.
+    /// let held = RunState::of("completed", "action_required");
+    /// assert_eq!(held, RunState::AwaitingApproval);
+    /// assert_eq!(RunState::of("completed", "failure"), RunState::Failed);
+    /// ```
     #[must_use]
     pub fn of(status: &str, conclusion: &str) -> Self {
         if !status.eq_ignore_ascii_case("completed") {
@@ -1089,6 +1100,7 @@ impl RunState {
         }
         match conclusion.to_ascii_lowercase().as_str() {
             "success" | "neutral" | "skipped" => Self::Passed,
+            "action_required" => Self::AwaitingApproval,
             _ => Self::Failed,
         }
     }
