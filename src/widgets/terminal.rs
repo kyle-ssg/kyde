@@ -302,17 +302,21 @@ impl Target {
         Self::File { path, line }
     }
 
-    /// An OSC-8 hyperlink's target: a `file://` URI is a file, anything else a URL.
-    fn from_uri(uri: &str) -> Self {
-        let Some(rest) = uri.strip_prefix("file://") else {
-            return Self::Url(uri.to_string());
-        };
+    /// An OSC-8 hyperlink's target: a `file://` URI is a file, an http(s) one a URL, and
+    /// anything else no link at all. The program printing it picks the target and the text
+    /// shown over it, so a "GitHub" link could be a `.command` file in the repo, an `smb://`
+    /// share or another app's URL scheme. `open` would launch any of them.
+    fn from_uri(uri: &str) -> Option<Self> {
+        if uri.starts_with("http://") || uri.starts_with("https://") {
+            return Some(Self::Url(uri.to_string()));
+        }
+        let rest = uri.strip_prefix("file://")?;
         // `file://host/path` — the path starts at the first `/` after the host.
         let path = rest.find('/').map_or("", |i| &rest[i..]);
-        Self::File {
+        Some(Self::File {
             path: PathBuf::from(percent_decode(path)),
             line: None,
-        }
+        })
     }
 }
 
@@ -1021,6 +1025,7 @@ impl TerminalView {
     fn paste_text(&mut self, text: String, cx: &mut Context<Self>) {
         self.last_input = Some(std::time::Instant::now());
         self.accept_suggestion(cx);
+        let text = pasteable(&text);
         let bracketed = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
         if bracketed {
             self.write(b"\x1b[200~".to_vec());
@@ -1620,7 +1625,7 @@ impl TerminalView {
                         std::cmp::Ordering::Greater => run(Line(l), 0),
                     })
                     .collect(),
-                target: Target::from_uri(h.uri()),
+                target: Target::from_uri(h.uri())?,
             });
         }
         let rows: Vec<(Vec<char>, bool)> = (top.0..=bottom.0)
@@ -1986,6 +1991,17 @@ fn shell_quoted(paths: &[PathBuf]) -> String {
         }
     }
     out
+}
+
+/// `text` safe to paste: control characters dropped but for tabs and line breaks. The
+/// clipboard can hold anything (a web page's copy handler, or a program in this terminal
+/// setting it with OSC 52), and a shell acts on a control character before it sees the paste:
+/// an ESC can end the bracketed paste early (`ESC[201~`) and a Ctrl-C drops it. Either way,
+/// the text after it runs as a command.
+fn pasteable(text: &str) -> String {
+    text.chars()
+        .filter(|&c| matches!(c, '\t' | '\n' | '\r') || !c.is_control())
+        .collect()
 }
 
 /// Open a URI in the OS default handler.
@@ -3331,6 +3347,43 @@ const ANSI_PALETTE: [Rgb; 16] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clipboard text that would end a bracketed paste early (ESC) or drop it (Ctrl-C), then
+    /// press Enter on a command of its own, pastes as plain text; tabs and line breaks stay.
+    #[test]
+    fn a_paste_cannot_break_out_and_run_a_command() {
+        assert_eq!(
+            pasteable("ls\x1b[201~;touch /tmp/x\r"),
+            "ls[201~;touch /tmp/x\r"
+        );
+        assert_eq!(pasteable("ls\x03touch /tmp/x\r"), "lstouch /tmp/x\r");
+        assert_eq!(pasteable("a\tb\nc\r\n"), "a\tb\nc\r\n");
+    }
+
+    /// A program's OSC-8 link opens only a web page or a file in the editor — never a script,
+    /// a share or another app's URL scheme hiding behind its text.
+    #[test]
+    fn osc8_links_open_only_web_pages_and_files() {
+        assert_eq!(
+            Target::from_uri("https://github.com/o/r"),
+            Some(Target::Url("https://github.com/o/r".into()))
+        );
+        assert_eq!(
+            Target::from_uri("file://host/tmp/a%20b.rs"),
+            Some(Target::File {
+                path: PathBuf::from("/tmp/a b.rs"),
+                line: None
+            })
+        );
+        for uri in [
+            "/Users/me/repo/setup.command",
+            "smb://evil/share",
+            "x-apple.systempreferences:",
+            "-a Calculator",
+        ] {
+            assert_eq!(Target::from_uri(uri), None, "{uri}");
+        }
+    }
 
     #[cfg(target_os = "windows")]
     #[test]
