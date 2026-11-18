@@ -37,6 +37,13 @@ pub enum UpdateError {
         /// The digest of what was actually downloaded.
         actual: String,
     },
+    /// The downloaded app isn't signed by whoever signed the running one, so it isn't a
+    /// Kyde release even if its checksum matches.
+    #[error("the download isn't signed by Kyde's developer — refusing to install it: {detail}")]
+    SignatureMismatch {
+        /// What `codesign` said about it.
+        detail: String,
+    },
     /// An external command (`curl` / `ditto`) ran but failed. `action` names the step.
     #[error("{action} failed: {stderr}")]
     Command {
@@ -460,6 +467,13 @@ pub fn download_and_swap(zip_url: &str, sha256_url: &str, bundle: &Path) -> Resu
     }
 
     let new_app = find_app(&extract).ok_or(UpdateError::NoAppInDownload)?;
+    // The checksum sits on the same release as the zip, so it only proves we got what was
+    // published. Whoever can publish to the release (a leaked token, a hijacked workflow) can
+    // publish a matching checksum too — so the new app must also be signed by the developer
+    // who signed this one. Gatekeeper won't check it for us: the quarantine comes off below.
+    if let Some(requirement) = designated_requirement(bundle)? {
+        verify_signature(&new_app, &requirement)?;
+    }
     // Strip the download quarantine so the relaunched copy isn't Gatekeeper-gated (a notarized
     // + stapled app still picks up `com.apple.quarantine` from the zip).
     let _ = Command::new("xattr")
@@ -536,6 +550,54 @@ fn install(new_app: &Path, bundle: &Path) -> Result<()> {
     std::fs::rename(&staged, bundle).map_err(|e| {
         let _ = std::fs::remove_dir_all(&staged);
         io_err(format!("installing {bundle:?}"))(e)
+    })
+}
+
+/// What a replacement for `bundle` must be signed as: its designated requirement, which for a
+/// Developer ID release names the bundle id and the developer's Team ID. `None` when `bundle`
+/// has no identity to pin — unsigned, or ad-hoc signed (a dev build, or a release from before
+/// Developer ID signing), whose requirement is the hash of that one build, which no other
+/// build can meet. Those keep updating on the checksum alone.
+fn designated_requirement(bundle: &Path) -> Result<Option<String>> {
+    let out = Command::new("codesign")
+        .args(["--display", "-r-"])
+        .arg(bundle)
+        .output()
+        .map_err(io_err("spawning codesign"))?;
+    // A failure here means `bundle` isn't signed at all.
+    Ok(out
+        .status
+        .success()
+        .then(|| pinned_requirement(&String::from_utf8_lossy(&out.stdout)))
+        .flatten())
+}
+
+/// The requirement in `codesign --display -r-` output, unless it only pins one build's hash.
+/// An ad-hoc signature has no real requirement: codesign prints a synthesized one, commented
+/// out (`# designated => cdhash H"…"`).
+fn pinned_requirement(codesign_out: &str) -> Option<String> {
+    codesign_out
+        .lines()
+        .find_map(|l| l.strip_prefix("designated => "))
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && !r.contains("cdhash"))
+        .map(str::to_string)
+}
+
+/// Refuse `app` unless its signature is intact (every nested binary and resource included)
+/// and it meets `requirement`.
+fn verify_signature(app: &Path, requirement: &str) -> Result<()> {
+    let out = Command::new("codesign")
+        .args(["--verify", "--deep", "--strict", "-R"])
+        .arg(format!("={requirement}"))
+        .arg(app)
+        .output()
+        .map_err(io_err("spawning codesign"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(UpdateError::SignatureMismatch {
+        detail: String::from_utf8_lossy(&out.stderr).trim().to_string(),
     })
 }
 
@@ -660,6 +722,61 @@ mod tests {
         for os in ["macos", "linux", "windows"] {
             assert_eq!(parse_feed(&feed(&[]), "1.0.0", os, "aarch64"), None, "{os}");
         }
+    }
+
+    /// A download that claims to be Kyde (same bundle id) but isn't signed by Kyde's developer
+    /// is refused, while one that meets the pinned requirement installs. An ad-hoc signed
+    /// running app (a dev build) pins nothing, so it can still update.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_update_not_signed_by_kydes_developer_is_refused() {
+        let dir = std::env::temp_dir().join(format!("kyde-sig-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app = dir.join("Kyde.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::copy("/usr/bin/true", app.join("Contents/MacOS/kyde")).unwrap();
+        std::fs::write(
+            app.join("Contents/Info.plist"),
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>kyde</string>\
+             <key>CFBundleIdentifier</key><string>dev.kyde.app</string></dict></plist>",
+        )
+        .unwrap();
+        let signed = Command::new("codesign")
+            .args(["--force", "-s", "-"])
+            .arg(&app)
+            .output()
+            .unwrap();
+        assert!(signed.status.success(), "{signed:?}");
+
+        assert_eq!(
+            designated_requirement(&app).unwrap(),
+            None,
+            "ad-hoc pins nothing"
+        );
+
+        let kyde = "identifier \"dev.kyde.app\" and anchor apple generic and \
+                    certificate leaf[subject.OU] = \"9PCL2XRDXS\"";
+        // A Developer ID release (what users run) does pin its identity.
+        assert_eq!(
+            pinned_requirement(&format!("designated => {kyde}\n")).as_deref(),
+            Some(kyde)
+        );
+        let err = verify_signature(&app, kyde).expect_err("an ad-hoc look-alike must be refused");
+        assert!(
+            matches!(err, UpdateError::SignatureMismatch { .. }),
+            "{err}"
+        );
+
+        let out = Command::new("codesign")
+            .args(["--display", "-r-"])
+            .arg(&app)
+            .output()
+            .unwrap();
+        let own = String::from_utf8_lossy(&out.stdout);
+        let own = own.split("designated => ").nth(1).unwrap().trim();
+        verify_signature(&app, own).expect("an app meeting the requirement installs");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An https install without a checksum asset must be refused — never swap in an
