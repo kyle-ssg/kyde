@@ -784,38 +784,76 @@ impl Kyde {
         self.load_history_branches(cx);
     }
 
-    /// Reload the commit list for `history.rev` (scoped to `history.path`), select newest.
+    /// Reload the commit list for `history.rev` (scoped to `history.path`), select newest. A
+    /// file scope follows the file back across its renames. The log runs off the UI thread —
+    /// `--follow` walks the file's whole history — and a newer reload cancels this one.
     pub(crate) fn reload_history(&mut self, cx: &mut Context<Self>) {
-        let path = self.history.path.clone();
-        self.history.commits = self
-            .repo()
-            .and_then(|r| r.log(&self.history.rev, 300, path.as_deref()).ok())
-            .unwrap_or_default();
-        // Lay the graph out once per load — never on the render path.
-        let links: Vec<(&str, Vec<&str>)> = self
-            .history
-            .commits
-            .iter()
-            .map(|c| {
-                (
-                    c.hash.as_str(),
-                    c.parents.iter().map(String::as_str).collect(),
-                )
+        let key = (self.history.rev.clone(), self.history.path.clone());
+        if self.history.loaded.as_ref() != Some(&key) {
+            self.show_history_log(None, Vec::new(), Vec::new(), cx);
+        }
+        let Some(repo) = self.repo() else {
+            self.history.load = None;
+            return;
+        };
+        self.history.load = Some(cx.spawn(async move |this, cx| {
+            let (rev, path) = key.clone();
+            let (commits, graph) = cx
+                .background_executor()
+                .spawn(async move {
+                    let commits = match &path {
+                        Some(p) if repo.root().join(p).is_file() => repo.file_log(&rev, 300, p),
+                        p => repo.log(&rev, 300, p.as_deref()),
+                    }
+                    .unwrap_or_default();
+                    // Lay the graph out once per load — never on the render path.
+                    let links: Vec<(&str, Vec<&str>)> = commits
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.hash.as_str(),
+                                c.parents.iter().map(String::as_str).collect(),
+                            )
+                        })
+                        .collect();
+                    let graph = git::graph::layout(&links);
+                    (commits, graph)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                // Left History meanwhile: the diff panes are another view's now.
+                if this.mode == Mode::History {
+                    this.show_history_log(Some(key), commits, graph, cx);
+                }
             })
-            .collect();
-        self.history.graph = git::graph::layout(&links);
-        self.history.graph_lanes = self
-            .history
-            .graph
+            .ok();
+        }));
+    }
+
+    /// Show a loaded log (`loaded` = the scope it was logged for; `None` = cleared while one
+    /// loads) and select its newest commit.
+    fn show_history_log(
+        &mut self,
+        loaded: Option<(String, Option<PathBuf>)>,
+        commits: Vec<git::Commit>,
+        graph: Vec<git::graph::GraphRow>,
+        cx: &mut Context<Self>,
+    ) {
+        let h = &mut self.history;
+        h.loaded = loaded;
+        h.commits = commits;
+        h.graph_lanes = graph
             .iter()
             .map(git::graph::GraphRow::width)
             .max()
             .unwrap_or(0)
             .min(MAX_LANES);
-        self.history.selected = None;
-        self.history.files.clear();
-        self.history.file_selected = None;
+        h.graph = graph;
+        h.selected = None;
+        h.files.clear();
+        h.file_selected = None;
         if self.history.commits.is_empty() {
+            self.diff.path = None;
             cx.notify();
         } else {
             self.select_history_commit(0, cx);
@@ -1067,8 +1105,15 @@ impl Kyde {
             return;
         };
         let (from, to) = self.history_revs(&commit.hash);
-        let path = self.history.path.clone();
-        self.history.files = repo.diff_files(&from, to.as_deref(), path.as_deref());
+        // A followed file: scoped to its names in this commit plus its current one, so a
+        // rename pairs up whichever side of it the compare lands on.
+        let mut scope: Vec<&std::path::Path> = commit.paths.iter().map(PathBuf::as_path).collect();
+        if let Some(p) = &self.history.path {
+            if !scope.contains(&p.as_path()) {
+                scope.push(p);
+            }
+        }
+        self.history.files = repo.diff_files(&from, to.as_deref(), &scope);
         // Folder tree of the changed files, fully expanded so every change is visible.
         let paths: Vec<PathBuf> = self.history.files.iter().map(|f| f.path.clone()).collect();
         self.history.files_tree = tree::Tree::build(&paths);
@@ -1194,8 +1239,9 @@ impl Kyde {
         // replace the working hunk with the left (committed) version. Comparing two committed
         // revisions has nothing to edit, so it stays read-only.
         let editable = to.is_none();
+        // A renamed file reads its old name on the `from` side.
         let before = repo
-            .committed_content(&from, &file.path)
+            .committed_content(&from, file.old_path.as_ref().unwrap_or(&file.path))
             .unwrap_or_default();
         let after = match to {
             Some(rev) => repo.committed_content(&rev, &file.path).unwrap_or_default(),

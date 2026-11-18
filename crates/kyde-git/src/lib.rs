@@ -109,6 +109,9 @@ pub enum FileStatus {
 pub struct ChangedFile {
     /// Repo-relative path of the file.
     pub path: PathBuf,
+    /// The path it was renamed (or copied) from — set by `diff_files` for a paired rename,
+    /// so the two sides of its diff read their own names. `None` otherwise.
+    pub old_path: Option<PathBuf>,
     /// The file's working-tree status.
     pub status: FileStatus,
 }
@@ -129,8 +132,12 @@ pub struct Commit {
     /// Decoration refs (`%D`): e.g. "HEAD -> main, origin/main, tag: v1". Empty if none.
     pub refs: String,
     /// Parent hashes — rewritten to the logged path's simplified history when the log is
-    /// path-scoped, so the graph connects the commits actually listed.
+    /// path-scoped, so the graph connects the commits actually listed (in a
+    /// [`Repo::file_log`], the next older commit listed).
     pub parents: Vec<String>,
+    /// [`Repo::file_log`] only: the followed file's name(s) in this commit — its name here,
+    /// led by its previous one where this commit renamed it. Empty in any other log.
+    pub paths: Vec<PathBuf>,
 }
 
 /// One working tree of a repository (`git worktree list`): the main checkout or a
@@ -339,6 +346,7 @@ impl Repo {
                 // NUL-terminated (quoting/C-escaping is the non-`-z` behavior).
                 files.push(ChangedFile {
                     path: PathBuf::from(String::from_utf8_lossy(&rec[3..]).into_owned()),
+                    old_path: None,
                     status,
                 });
                 true
@@ -696,33 +704,33 @@ impl Repo {
     /// Files that differ between `push_base()` and HEAD — i.e. what a push would send.
     /// Same `ChangedFile` shape as `status()`, so the push modal renders like commit/rollback.
     pub fn push_files(&self) -> Vec<ChangedFile> {
-        self.diff_files(&self.push_base(), Some("HEAD"), None)
+        self.diff_files(&self.push_base(), Some("HEAD"), &[])
     }
 
     /// Files that differ between two revisions. `to == None` diffs `from` against the working
-    /// tree (so the history view can compare a commit to the local checkout); `path` (a dir
-    /// or file) scopes the diff to that subtree, recursively. Same `ChangedFile` shape as
-    /// `status()`/`push_files()`. Empty on any error (bad rev, etc.).
-    pub fn diff_files(
-        &self,
-        from: &str,
-        to: Option<&str>,
-        path: Option<&Path>,
-    ) -> Vec<ChangedFile> {
+    /// tree (so the history view can compare a commit to the local checkout); `paths` (dirs
+    /// or files) scope the diff to those subtrees, recursively — none = the whole tree. A
+    /// rename is paired (`-M`) when both its names are in scope, its old name in
+    /// [`ChangedFile::old_path`]. Same `ChangedFile` shape as `status()`/`push_files()`.
+    /// Empty on any error (bad rev, etc.).
+    pub fn diff_files(&self, from: &str, to: Option<&str>, paths: &[&Path]) -> Vec<ChangedFile> {
         let Ok(from) = valid_ref(from) else {
             return Vec::new();
         };
-        let mut args = vec!["diff", "--name-status", "-z", from];
+        let mut args = vec!["diff", "--name-status", "-z", "-M", from];
         if let Some(to) = to {
             let Ok(to) = valid_ref(to) else {
                 return Vec::new();
             };
             args.push(to);
         }
-        let path_str = path.map(|p| p.to_string_lossy().into_owned());
-        if let Some(p) = &path_str {
+        let path_strs: Vec<String> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        if !path_strs.is_empty() {
             args.push("--");
-            args.push(p);
+            args.extend(path_strs.iter().map(String::as_str));
         }
         match git(&self.root, &args) {
             Ok(raw) => parse_name_status(&raw),
@@ -732,14 +740,14 @@ impl Repo {
 
     /// Commit log for a revision (branch name or `HEAD`), newest first, capped at `limit`.
     /// `path` (a dir or file) restricts the log to commits that touched that subtree —
-    /// recursive for a directory — so the history view can scope to a folder.
+    /// recursive for a directory — so the history view can scope to a folder. For one file
+    /// followed back across its renames, see [`Repo::file_log`].
     pub fn log(&self, rev: &str, limit: usize, path: Option<&Path>) -> Result<Vec<Commit>> {
         let rev = valid_ref(rev)?;
-        // \x1f (unit separator) between fields; one commit per line (%s/%D are single-line).
         // `--date-order` keeps every parent below all its children (what the graph lays out
         // from); `--parents` rewrites %P to the path-simplified history on a scoped log.
-        let fmt = "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
         let n = format!("-n{limit}");
+        let fmt = format!("--format={LOG_FIELDS}");
         let mut args = vec![
             "log",
             rev,
@@ -747,7 +755,7 @@ impl Repo {
             "--date-order",
             "--parents",
             &n,
-            fmt,
+            &fmt,
         ];
         let path_str = path.map(|p| p.to_string_lossy().into_owned());
         if let Some(p) = &path_str {
@@ -755,28 +763,34 @@ impl Repo {
             args.push(p);
         }
         let raw = git(&self.root, &args)?;
-        Ok(raw
-            .lines()
-            .filter_map(|line| {
-                let mut f = line.split('\u{1f}');
-                Some(Commit {
-                    hash: f.next()?.to_string(),
-                    short: f.next()?.to_string(),
-                    author: f.next()?.to_string(),
-                    date: f.next()?.to_string(),
-                    subject: f.next()?.to_string(),
-                    refs: f.next().unwrap_or("").trim().to_string(),
-                    parents: f
-                        .next()
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect(),
-                })
-            })
-            .collect())
+        Ok(raw.lines().filter_map(parse_log_fields).collect())
     }
 
+    /// One file's commit log for a revision, newest first, capped at `limit` — followed back
+    /// across its renames (`git log --follow`). Each commit's [`Commit::paths`] holds the
+    /// name(s) the file had there, so its diff can be scoped to it.
+    pub fn file_log(&self, rev: &str, limit: usize, file: &Path) -> Result<Vec<Commit>> {
+        let rev = valid_ref(rev)?;
+        let n = format!("-n{limit}");
+        let fmt = format!("--format=%x1e{LOG_FIELDS}");
+        let file_str = file.to_string_lossy().into_owned();
+        let raw = git(
+            &self.root,
+            &[
+                "log",
+                rev,
+                "--follow",
+                "--date=relative",
+                &n,
+                &fmt,
+                "--name-status",
+                "-z",
+                "--",
+                &file_str,
+            ],
+        )?;
+        Ok(parse_file_log(&raw, file))
+    }
     /// Content of `rel` at a committed revision (e.g. `@{u}` or `HEAD`), empty if the
     /// file doesn't exist there (added/deleted) — the two sides of a push diff.
     pub fn committed_content(&self, rev: &str, rel: &Path) -> Result<String> {
@@ -1193,6 +1207,69 @@ impl Repo {
     }
 }
 
+/// The `git log --format` fields every log parses (`parse_log_fields`): \x1f (unit
+/// separator) between fields, one commit per line (%s/%D are single-line).
+const LOG_FIELDS: &str = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
+
+/// One commit from a [`LOG_FIELDS`] line.
+fn parse_log_fields(line: &str) -> Option<Commit> {
+    let mut f = line.split('\u{1f}');
+    Some(Commit {
+        hash: f.next()?.to_string(),
+        short: f.next()?.to_string(),
+        author: f.next()?.to_string(),
+        date: f.next()?.to_string(),
+        subject: f.next()?.to_string(),
+        refs: f.next().unwrap_or("").trim().to_string(),
+        parents: f
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_string)
+            .collect(),
+        paths: Vec::new(),
+    })
+}
+
+/// Parse `git log --follow --name-status -z` of `file` with each record led by \x1e: the
+/// [`LOG_FIELDS`], a NUL, then the file's status entry (`M\0path\0`, or
+/// `R075\0old\0new\0` where it was renamed). A commit with no entry (a merge) keeps the
+/// name the file had in the commit after it. `--follow` doesn't rewrite parents, so each
+/// commit's parent becomes the next one listed: the line the graph draws is the file's.
+fn parse_file_log(raw: &str, file: &Path) -> Vec<Commit> {
+    let mut name = file.to_path_buf();
+    let mut commits: Vec<Commit> = raw
+        .split('\u{1e}')
+        .filter_map(|rec| {
+            let (head, diff) = rec.split_once('\0').unwrap_or((rec, ""));
+            let mut c = parse_log_fields(head.trim_end_matches('\n'))?;
+            let mut tok = diff.split('\0');
+            let status = tok.next().unwrap_or("").trim_start_matches('\n');
+            c.paths = match status.as_bytes().first() {
+                Some(b'R' | b'C') => tok.take(2).map(PathBuf::from).collect(),
+                Some(_) => tok.take(1).map(PathBuf::from).collect(),
+                None => Vec::new(),
+            };
+            match c.paths.first() {
+                // Older commits know the file by its name before this one's change.
+                Some(p) => name.clone_from(p),
+                None => c.paths.push(name.clone()),
+            }
+            Some(c)
+        })
+        .collect();
+    let older: Vec<Vec<String>> = commits
+        .iter()
+        .skip(1)
+        .map(|c| vec![c.hash.clone()])
+        .chain(std::iter::once(Vec::new()))
+        .collect();
+    for (c, parents) in commits.iter_mut().zip(older) {
+        c.parents = parents;
+    }
+    commits
+}
+
 /// Parse `git diff --name-status -z` output into changed files. `-z` = NUL-separated
 /// fields: a status code then a path; renames/copies emit the code (e.g. "R100") followed by
 /// TWO paths (old, new) — we keep the new one. Shared by `diff_files`/`push_files`.
@@ -1201,15 +1278,15 @@ fn parse_name_status(raw: &str) -> Vec<ChangedFile> {
     let mut parts = raw.split('\0').filter(|s| !s.is_empty());
     while let Some(stat) = parts.next() {
         let code = stat.as_bytes().first().copied().unwrap_or(b'M') as char;
-        let path = if code == 'R' || code == 'C' {
-            let _old = parts.next();
-            parts.next()
+        let old_path = if code == 'R' || code == 'C' {
+            parts.next().map(PathBuf::from)
         } else {
-            parts.next()
+            None
         };
-        let Some(path) = path else { break };
+        let Some(path) = parts.next() else { break };
         files.push(ChangedFile {
             path: PathBuf::from(path),
+            old_path,
             status: classify(code, ' '),
         });
     }

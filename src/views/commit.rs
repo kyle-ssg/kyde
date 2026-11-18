@@ -731,7 +731,7 @@ impl Kyde {
             // One push-base resolution feeds both (`push_files()` would resolve it again).
             let base = repo.push_base();
             self.sync
-                .set_push_files(repo.diff_files(&base, Some("HEAD"), None));
+                .set_push_files(repo.diff_files(&base, Some("HEAD"), &[]));
             self.sync.push_base = base;
         }
         // Default to the tab that has work: Push if there's nothing to commit but commits
@@ -968,6 +968,7 @@ mod tests {
         let files: Vec<ChangedFile> = (0..20_000)
             .map(|i| ChangedFile {
                 path: PathBuf::from(format!("pkg{}/mod{}/f{i}.rs", i % 40, i % 400)),
+                old_path: None,
                 status: FileStatus::Modified,
             })
             .collect();

@@ -285,7 +285,7 @@ impl Kyde {
             // One push-base resolution feeds both (`push_files()` would resolve it again).
             let base = repo.push_base();
             self.sync
-                .set_push_files(repo.diff_files(&base, Some("HEAD"), None));
+                .set_push_files(repo.diff_files(&base, Some("HEAD"), &[]));
             self.sync.push_base = base;
         } else {
             self.sync.set_push_files(Vec::new());
