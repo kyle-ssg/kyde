@@ -1031,7 +1031,8 @@ fn menu_row(
 ) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
-        .id(id)
+        .id(id.clone())
+        .debug_selector(move || id.to_string())
         .flex()
         .flex_row()
         .items_center()

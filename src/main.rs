@@ -7906,6 +7906,38 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A rename field opens focused with its name selected, so the first key typed replaces
+    /// it (#229) — here New Group, picked from the ⊕ menu with real clicks.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_new_group_types_over_its_name(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let none = gpui::Modifiers::none();
+        let add = vcx.debug_bounds("agents-add").expect("the ⊕ button");
+        vcx.simulate_click(add.center(), none);
+        vcx.run_until_parked();
+        let row = vcx.debug_bounds("menu-row-1").expect("its New Group row");
+        vcx.simulate_click(row.center(), none);
+        vcx.run_until_parked();
+        vcx.simulate_input("Work");
+        handle
+            .update(&mut vcx, |k, _w, cx| {
+                assert!(matches!(k.agents.renaming, Some(RenameTarget::Group(_))));
+                assert_eq!(k.agents.rename_input.read(cx).text(), "Work");
+            })
+            .unwrap();
+    }
+
     /// The project's own checkout is shared, so its row is always its branch: not its agent's
     /// AI title, not the project's name, and a double-click doesn't rename it.
     #[cfg(feature = "terminal")]

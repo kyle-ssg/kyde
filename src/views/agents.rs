@@ -9729,6 +9729,11 @@ impl Kyde {
         });
         let focus = self.agents.rename_input.read(cx).focus_handle.clone();
         window.focus(&focus);
+        // Opened by a press (a double-click on a row/tab, a context-menu row): keep the
+        // focusable elements under the pointer — the window's root, the menu's panel, whose
+        // close then hands focus "back" — from taking focus again after this, or typing never
+        // reaches the field.
+        window.prevent_default();
         self.agents.renaming = Some(target);
         cx.notify();
     }
