@@ -1665,7 +1665,7 @@ impl Kyde {
 
     /// Removing worktree `wt` loses nothing worth asking about: it isn't pinned, and it's
     /// finished — what the Clean Up window ticks by default (nothing uncommitted, nothing
-    /// unpushed, no agent busy). Without agent tabs (no `terminal`) it always asks.
+    /// unpushed, no agent still on it). Without agent tabs (no `terminal`) it always asks.
     fn agents_wt_disposable(&self, space: &Path, wt: &Path) -> bool {
         #[cfg(feature = "terminal")]
         {
@@ -1728,6 +1728,10 @@ impl Kyde {
         }
         if g.changed == 0 {
             lines.push(("Nothing uncommitted — no work is lost.".into(), false));
+        }
+        #[cfg(feature = "terminal")]
+        if let Some(why) = self.agents_wt_busy(&wt) {
+            lines.push((format!("{why} — removing closes its tabs."), true));
         }
         if let Some(b) = &branch {
             lines.push((format!("The branch {b} is kept."), false));
@@ -4136,6 +4140,13 @@ impl Kyde {
         cx: &mut Context<Self>,
     ) -> usize {
         let now = Instant::now();
+        // From the Clean Up window: the worktrees finished before this pass, to re-tick the
+        // ones it changes.
+        let was_finished = if manual {
+            self.agents_finished_worktrees()
+        } else {
+            std::collections::HashSet::new()
+        };
         for (space, heads) in found.merged {
             self.agents.merged.insert(space, (now, heads));
         }
@@ -4204,8 +4215,17 @@ impl Kyde {
             }
         }
         // Ones already finished when the window opened were ticked then — an untick stands.
+        // A worktree this pass found finished (its last tabs did) gets ticked, and one it found
+        // isn't any more (an agent back at work) gets unticked.
         if manual {
             self.agents.cleanup_tabs.extend(newly);
+            let is_finished = self.agents_finished_worktrees();
+            for wt in is_finished.difference(&was_finished) {
+                self.agents.cleanup_checked.insert(wt.clone());
+            }
+            for wt in was_finished.difference(&is_finished) {
+                self.agents.cleanup_checked.remove(wt);
+            }
         }
         let mut closed = 0;
         if !manual && self.agents.cfg.cleanup_mode == CleanupMode::Auto {
@@ -4246,9 +4266,45 @@ impl Kyde {
         closed
     }
 
+    /// Every worktree [`Self::agents_wt_disposable`] — what the Clean Up window ticks.
+    fn agents_finished_worktrees(&self) -> std::collections::HashSet<PathBuf> {
+        self.agents
+            .cfg
+            .spaces
+            .iter()
+            .filter(|s| !s.scratch)
+            .flat_map(|s| s.worktrees.iter().map(move |w| (&s.path, w)))
+            .filter(|(space, wt)| self.agents_wt_disposable(space, wt))
+            .map(|(_, wt)| wt.clone())
+            .collect()
+    }
+
+    /// Why worktree `wt` isn't finished on its agents' side (`None` = it is): removing it
+    /// closes its tabs, ending their agents — so a tab at work, or one the cleanup hasn't found
+    /// finished (still on its task between turns: an open PR, a CI watch, your next prompt),
+    /// or a background agent at work there keeps it.
+    fn agents_wt_busy(&self, wt: &Path) -> Option<&'static str> {
+        let tabs = self
+            .agents
+            .tabs
+            .get(wt)
+            .map_or(&[][..], |g| g.tabs.as_slice());
+        tabs.iter()
+            .filter(|t| t.verdict.is_none() || t.shown == AgentState::Working)
+            .map(|t| t.shown)
+            .chain(self.agents_subs_in(wt).next().map(|_| AgentState::Working))
+            .max()
+            .map(|s| match s {
+                AgentState::Blocked => "Its agent is waiting on you",
+                AgentState::Working => "Its agent is working",
+                AgentState::Unseen => "Its agent is done — you haven't looked yet",
+                AgentState::Idle | AgentState::None => "Its agent isn't finished",
+            })
+    }
+
     /// One worktree's line in the Clean Up window: what removing it costs, whether it's safe
-    /// to tick by default (nothing uncommitted, nothing unpushed, no agent busy), and whether
-    /// removing it would lose work.
+    /// to tick by default (nothing uncommitted, nothing unpushed, no agent still on it — see
+    /// [`Self::agents_wt_busy`]), and whether removing it would lose work.
     fn agents_wt_cleanup(&self, space: &Path, wt: &Path) -> (String, bool, bool) {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
         let merged = self
@@ -4257,12 +4313,7 @@ impl Kyde {
             .get(space)
             .zip(self.agents.branches.get(wt))
             .is_some_and(|((_, heads), b)| heads.contains(b));
-        let busy = self
-            .agents
-            .tabs
-            .get(wt)
-            .is_some_and(|g| g.tabs.iter().any(|t| t.shown == AgentState::Working))
-            || self.agents_subs_in(wt).next().is_some();
+        let busy = self.agents_wt_busy(wt);
         // Removing it would take the worktree inside it along (git refuses; see
         // `kyde_git::GitError::NestedWorktree`).
         if let Some(inner) = self
@@ -4290,7 +4341,7 @@ impl Kyde {
                 false,
                 true,
             ),
-            Some(_) if busy => ("Its agent is working".into(), false, false),
+            Some(_) if busy.is_some() => (busy.unwrap_or_default().into(), false, false),
             Some(_) if merged => ("PR merged — finished".into(), true, false),
             Some(g) if g.landed => ("Its changes are on main already".into(), true, false),
             Some(g) if g.ahead > 0 => (
@@ -4609,8 +4660,8 @@ impl Kyde {
             .text_color(t.text)
             .child(div().text_color(t.line_number).child(
                 "Ticked tabs are finished; closing one ends its agent. Ticked worktrees are \
-                 finished — nothing uncommitted, nothing unpushed — so removing them loses no \
-                 work. Their tabs close; their branches are kept.",
+                 finished — nothing uncommitted, nothing unpushed, no agent still on it — so \
+                 removing them loses no work. Their tabs close; their branches are kept.",
             ))
             .when(!pinned.is_empty(), |d| {
                 d.child(
@@ -9249,19 +9300,10 @@ impl Kyde {
     fn agents_cleanup_now(&mut self, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
         {
-            // Tick every finished worktree (nothing uncommitted, nothing unpushed, no agent
-            // busy) and every tab already found finished; re-read git so the statuses are
-            // current, and re-run the cleanup's checks (it ticks tabs it newly finds finished).
-            self.agents.cleanup_checked = self
-                .agents
-                .cfg
-                .spaces
-                .iter()
-                .filter(|s| !s.scratch)
-                .flat_map(|s| s.worktrees.iter().map(move |w| (s.path.clone(), w.clone())))
-                .filter(|(space, wt)| self.agents_wt_disposable(space, wt))
-                .map(|(_, wt)| wt)
-                .collect();
+            // Tick every finished worktree and every tab already found finished; re-read git
+            // so the statuses are current, and re-run the cleanup's checks (it re-ticks what
+            // they change).
+            self.agents.cleanup_checked = self.agents_finished_worktrees();
             self.agents.cleanup_tabs = self
                 .agents
                 .tabs
