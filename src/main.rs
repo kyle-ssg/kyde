@@ -895,6 +895,9 @@ pub(crate) enum Submenu {
     Git,
     /// The Nth submenu of the in-window app menu (Recent Projects; see `chrome`).
     App(usize),
+    /// The Agents ⊕'s Continue Cloud Session ▸ — the git projects to continue one in.
+    #[cfg(feature = "terminal")]
+    Cloud,
 }
 
 /// Snapshot of a scroll view's `(pane_w, vp_w, vp_h, max_w, max_h)` used to debounce the
@@ -1668,6 +1671,11 @@ enum WtSource {
     NewBranch(String),
     /// Pull request #n's branch (`gh pr checkout`).
     Pr(u64),
+    /// A detached HEAD at the freshly fetched remote mainline, for a cloud session to be
+    /// continued in (`claude --teleport` checks out the session's own branch there — a branch
+    /// of our own would just be left behind).
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    Teleport,
 }
 
 /// What's being dragged in the sidebar.
@@ -1886,6 +1894,8 @@ struct AgentTab {
     spawned_at: std::time::SystemTime,
     /// Its Claude Code session id, once known (saved, so a relaunch can `--resume` it).
     session: Option<String>,
+    /// It continues a claude.ai/code cloud session (`agents_teleport_tab`): marked so.
+    teleported: bool,
     /// The cleanup's finding: why this tab can be closed (`None` = keep it).
     verdict: Option<String>,
     /// The last AI "is it done?" check: the output it had seen, and its answer.
@@ -3802,6 +3812,9 @@ impl gpui::AssetSource for Assets {
             "icons/plus.svg" => include_bytes!("../assets/icons/plus.svg"),
             // The Agents sidebar footer's add menu (Add Project… / New Group).
             "icons/circle-plus.svg" => include_bytes!("../assets/icons/circle-plus.svg"),
+            // Its Continue Cloud Session ▸, and the mark on a tab that continues one.
+            #[cfg(feature = "terminal")]
+            "icons/cloud.svg" => include_bytes!("../assets/icons/cloud.svg"),
             // A project row's `…` menu: jump to its issues / pull requests / CI.
             "icons/ellipsis.svg" => include_bytes!("../assets/icons/ellipsis.svg"),
             "icons/circle-dot.svg" => include_bytes!("../assets/icons/circle-dot.svg"),
@@ -4602,12 +4615,32 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     view.open_menu(gpui::point(px(300.0), px(36.0)), MenuTarget::Worktrees, cx);
                 }
             }
-            // The sidebar footer's ⊕ menu open, standing on the button.
+            // The sidebar footer's ⊕ menu open, standing on the button. KYDE_SHOT_CLOUD: its
+            // Continue Cloud Session ▸ open, the first worktree's tab continuing one.
             if name == "agents-add" {
+                #[cfg(feature = "terminal")]
+                let cloud = std::env::var_os("KYDE_SHOT_CLOUD").is_some();
+                #[cfg(feature = "terminal")]
+                if cloud {
+                    // Git's listing lands after the menu opens.
+                    let root = view.agents.cfg.spaces[0].path.clone();
+                    view.agents.git_spaces.insert(root);
+                    if let Some(t) = wts
+                        .first()
+                        .and_then(|wt| view.agents.tabs.get_mut(wt))
+                        .and_then(|g| g.tabs.first_mut())
+                    {
+                        t.teleported = true;
+                    }
+                }
                 let gap = px(theme::FRAME_GAP);
                 let x = gap + px(view.agents.sidebar_w / 2.0) - px(8.0);
                 let y = window.viewport_size().height - gap - px(34.0);
                 view.open_menu(gpui::point(x, y), MenuTarget::AgentsAdd, cx);
+                #[cfg(feature = "terminal")]
+                if cloud {
+                    view.open_menu_submenu(Submenu::Cloud, cx);
+                }
             }
             cx.notify();
         }
@@ -5026,7 +5059,10 @@ mod gpui_smoke_tests {
     pub(crate) fn isolate_history() {
         static ONCE: std::sync::Once = std::sync::Once::new();
         ONCE.call_once(|| {
-            let dir = std::env::temp_dir().join(format!("kyde-test-xdg-{}", std::process::id()));
+            // Canonical (macOS's is behind a symlink), as git names the worktrees made in it.
+            let tmp = std::env::temp_dir();
+            let tmp = tmp.canonicalize().unwrap_or(tmp);
+            let dir = tmp.join(format!("kyde-test-xdg-{}", std::process::id()));
             std::env::set_var("XDG_DATA_HOME", &dir);
             // Config too: the keymap / plugin / theme stores would otherwise read — and a test
             // that saves would overwrite — the developer's real ~/.config/kyde (CI has none).
@@ -8608,6 +8644,77 @@ mod gpui_smoke_tests {
             })
             .unwrap();
         let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// The Agents ⊕'s Continue Cloud Session ▸ lists the git projects. Picking one makes a
+    /// fresh worktree of it on no branch of its own (teleport checks the session's branch out
+    /// there) with one agent tab, marked as teleported, whose shell runs `<start command>
+    /// --teleport`.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_continue_cloud_session_opens_a_teleport_tab(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                // Writes what it's given where it runs, instead of starting a real agent.
+                k.agents.cfg.command = "echo >start-line".into();
+                k.agents.cfg.setup_done = true;
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_menu(gpui::point(px(6.0), px(500.0)), MenuTarget::AgentsAdd, cx);
+                let m = k.context_menu.as_ref().expect("menu open");
+                let Some(MenuEntry::Submenu { label, items, .. }) = m.entries.last() else {
+                    panic!("Continue Cloud Session ▸ is the ⊕ menu's last row");
+                };
+                assert_eq!(label.as_ref(), "Continue Cloud Session");
+                let [MenuEntry::Item { label, run, .. }] = items.as_slice() else {
+                    panic!("one item per git project");
+                };
+                assert_eq!(
+                    Some(label.as_ref()),
+                    dir.file_name().and_then(|n| n.to_str())
+                );
+                let run = run.clone();
+                k.close_menu(cx);
+                run(k, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let wt = handle
+            .read_with(cx, |k, _| {
+                let space = k.agents.cfg.spaces.iter().find(|s| s.path == dir).unwrap();
+                let [wt] = space.worktrees.as_slice() else {
+                    panic!("one new worktree: {:?}", space.worktrees);
+                };
+                let tabs = &k.agents.tabs[wt].tabs;
+                assert!(
+                    tabs.len() == 1 && tabs[0].agent && tabs[0].teleported,
+                    "one agent tab, marked as teleported"
+                );
+                wt.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            Repo::discover(&wt).unwrap().current_branch(),
+            None,
+            "no branch of its own"
+        );
+        // Its shell takes the line once it's up.
+        let line = wt.join("start-line");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !std::fs::read_to_string(&line).is_ok_and(|s| s.contains("--teleport")) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "it never ran --teleport"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let _ = std::fs::remove_dir_all(&wt);
     }
 
     /// Scratch: a new scratch tab gets a folder of its own — a row under Scratch, its agent

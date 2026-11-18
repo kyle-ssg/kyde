@@ -416,9 +416,10 @@ impl Kyde {
             .tabs
             .get_mut(wt)
             .and_then(|g| g.tabs.get_mut(before))
-            .filter(|_| t.name.is_some())
+            .filter(|_| t.name.is_some() || t.teleported)
         {
             new.name = t.name;
+            new.teleported = t.teleported;
             self.agents_save(cx);
         }
     }
@@ -636,6 +637,7 @@ impl Kyde {
                             session: t.session.clone(),
                             id: Some(t.id.clone()),
                             name: t.name.clone(),
+                            teleported: t.teleported,
                         })
                         .collect(),
                 );
@@ -879,6 +881,15 @@ impl Kyde {
         self.agents_create_worktree(space, name, WtSource::NewBranch(branch), None, cx);
     }
 
+    /// Continue one of your claude.ai/code cloud sessions of project `space`: in a fresh
+    /// worktree of it (teleport needs a clean checkout of the session's repository, and checks
+    /// its branch out in place), a tab that picks the session (`agents_teleport_tab`).
+    #[cfg(feature = "terminal")]
+    pub(crate) fn agents_continue_cloud(&mut self, space: PathBuf, cx: &mut Context<Self>) {
+        let name = crate::agents::worktree_name(crate::agents::random_seed());
+        self.agents_create_worktree(space, name, WtSource::Teleport, None, cx);
+    }
+
     /// A new Scratch row: a fresh folder under `~/.kyde/scratch` (made — and trusted in Claude
     /// Code, so its agent doesn't open on the trust question — in the background), then
     /// opened, which starts its agent.
@@ -940,9 +951,12 @@ impl Kyde {
             return;
         }
         self.agents_reveal(&space);
-        let doing = start
-            .as_ref()
-            .map_or_else(|| format!("Creating worktree {name}"), |s| s.doing.clone());
+        let teleport = matches!(source, WtSource::Teleport);
+        let doing = match &start {
+            Some(s) => s.doing.clone(),
+            None if teleport => "Making a worktree to continue a cloud session in".to_string(),
+            None => format!("Creating worktree {name}"),
+        };
         self.agents.creating.push(Creating {
             space: space.clone(),
             name,
@@ -972,6 +986,15 @@ impl Kyde {
                                 let _ = repo.fetch_remote_branch(b);
                             }
                             repo.add_worktree(&dest, &br, base.as_deref())
+                        }
+                        // Clean, as teleport needs, and on no branch until it checks out the
+                        // session's.
+                        WtSource::Teleport => {
+                            let base = repo.remote_default();
+                            if let Some(b) = &base {
+                                let _ = repo.fetch_remote_branch(b);
+                            }
+                            repo.add_worktree_detached(&dest, base.as_deref())
                         }
                         // Checked out once, straight at the PR's head (fetched first), then
                         // `gh pr checkout` gives it the PR's branch — no files to change by then.
@@ -1012,6 +1035,7 @@ impl Kyde {
                         this.agents_save(cx);
                         #[cfg(feature = "terminal")]
                         match start {
+                            None if teleport => this.agents_teleport_tab(path.clone(), cx),
                             Some(s) => {
                                 // Made to act on review comments: on every one queued by now.
                                 let prompt = this.agents_feedback_take(&path).unwrap_or(s.prompt);
@@ -2423,6 +2447,28 @@ impl Kyde {
         self.agents_spawn_tab(wt, true, Some(line), Some(session), false, None, cx);
     }
 
+    /// A tab continuing a claude.ai/code cloud session in worktree `wt`: `<start command>
+    /// --teleport`, whose own picker lists your sessions (the CLI has no other way to list
+    /// them). Then it's an agent like any other — its hook reports the session it lands in —
+    /// marked as teleported.
+    fn agents_teleport_tab(&mut self, wt: PathBuf, cx: &mut Context<Self>) {
+        let line = format!("{} --teleport", self.agents.cfg.default_command());
+        let brief = self.agents_task_brief(&wt, false, cx);
+        // Not prompted (its picker, then the session's replay, aren't news), but holding work
+        // the "never used" cleanup must leave alone.
+        self.agents_spawn_tab(wt.clone(), true, Some(line), None, false, brief, cx);
+        if let Some(t) = self
+            .agents
+            .tabs
+            .get_mut(&wt)
+            .and_then(|g| g.tabs.last_mut())
+        {
+            t.teleported = true;
+            t.used = true;
+            self.agents_save(cx);
+        }
+    }
+
     /// Spawn a tab's PTY in `wt`, typing `line` into its shell when given, with `brief` for
     /// its agent's first prompt.
     #[allow(clippy::too_many_arguments)]
@@ -2548,6 +2594,7 @@ impl Kyde {
             .find(|t| t.id == id)
         {
             t.used = true;
+            t.teleported = saved.teleported;
         }
         true
     }
@@ -2637,6 +2684,7 @@ impl Kyde {
             woken: false,
             spawned_at,
             session,
+            teleported: false,
             verdict: None,
             ai: None,
         });
@@ -4791,16 +4839,43 @@ impl Kyde {
         out
     }
 
-    /// The sidebar footer's ⊕ menu.
-    pub(crate) fn agents_add_menu() -> Vec<MenuEntry> {
-        vec![
+    /// The sidebar footer's ⊕ menu — and Continue Cloud Session ▸ in one of the git projects.
+    pub(crate) fn agents_add_menu(&self) -> Vec<MenuEntry> {
+        #[cfg_attr(not(feature = "terminal"), allow(unused_mut))]
+        let mut out = vec![
             MenuEntry::item("Add Project…", |this, _w, cx| {
                 this.agents_add_space_prompt(cx);
             }),
             MenuEntry::item("New Group", |this, window, cx| {
                 this.agents_new_group(None, window, cx);
             }),
-        ]
+        ];
+        #[cfg(feature = "terminal")]
+        {
+            let projects: Vec<MenuEntry> = self
+                .agents
+                .cfg
+                .spaces
+                .iter()
+                .filter(|s| !s.scratch && self.agents.git_spaces.contains(&s.path))
+                .map(|s| {
+                    let p = s.path.clone();
+                    MenuEntry::item(self.agents_space_name(s), move |this, _w, cx| {
+                        this.agents_continue_cloud(p.clone(), cx);
+                    })
+                })
+                .collect();
+            if !projects.is_empty() {
+                out.push(MenuEntry::Divider);
+                out.push(MenuEntry::Submenu {
+                    kind: Submenu::Cloud,
+                    label: "Continue Cloud Session".into(),
+                    icon_label: "Continue Cloud Session".into(),
+                    items: projects,
+                });
+            }
+        }
+        out
     }
 
     /// A sidebar group header's right-click menu.
@@ -8234,6 +8309,9 @@ impl Kyde {
                     (w, w.min(AGENT_TAB_BRIEF))
                 };
                 let mut w = 2.0 + 8.0 + DOT + 6.0 + 6.0 + 18.0 + 4.0;
+                if tab.teleported {
+                    w += 6.0 + 12.0;
+                }
                 if !tab.subs.is_empty() {
                     w += 6.0 + 12.0 + 2.0 + text_w(&tab.subs.len().to_string(), fs - 1.0);
                 }
@@ -8398,6 +8476,23 @@ impl Kyde {
                             .hover(|d| d.bg(t.bg_mid))
                     })
                     .child(status_dot(tab.shown))
+                    // It continues a cloud session.
+                    .when(tab.teleported, |d| {
+                        d.child(
+                            div()
+                                .id(("agents-tab-cloud", i))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .tooltip(ui::tip("Continues a claude.ai/code cloud session"))
+                                .child(
+                                    svg()
+                                        .path("icons/cloud.svg")
+                                        .size(px(12.0))
+                                        .text_color(t.line_number),
+                                ),
+                        )
+                    })
                     .child(if renaming {
                         self.agents_rename_field(cx)
                     } else {

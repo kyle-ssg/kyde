@@ -54,6 +54,7 @@ pub fn menu_icon(label: &str) -> Option<&'static str> {
         "CI" => "icons/circle-play.svg",
         "New Group" => "icons/folder-plus.svg",
         "Add Project" => "icons/plus.svg",
+        "Continue Cloud Session" => "icons/cloud.svg",
         "Remove Group" | "Remove from Group" => "icons/x.svg",
         _ if l.starts_with("Move to") => "icons/folder.svg",
         _ if l.starts_with("Close") => "icons/x.svg",
