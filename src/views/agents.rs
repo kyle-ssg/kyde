@@ -177,37 +177,57 @@ impl Kyde {
                 .filter(|(wt, _)| self.agents.cfg.space_of(wt).is_some())
                 .map(|(wt, tabs)| (wt.clone(), tabs.clone()))
                 .collect();
+            // The worktree on screen keeps what's running in it, working or not.
+            #[cfg(unix)]
+            let shown: std::collections::HashSet<String> = self
+                .agents
+                .selected
+                .as_ref()
+                .and_then(|wt| self.agents.cfg.tabs.get(wt))
+                .into_iter()
+                .flatten()
+                .filter_map(|t| t.id.clone())
+                .collect();
             self.agents.hosts_scanning = true;
             cx.spawn(async move |this, cx| {
-                // Agents still at work in their hosts come back first (exactly as they are);
-                // a host ends the others once Kyde quits, so those tabs are reopened.
-                let (live, saved) = cx
+                // Agents still at work in their hosts come back first (exactly as they are).
+                // The others go: a host ends them once Kyde quits, and one a quick restart
+                // finds still up is released here — those tabs reopen with their worktree.
+                let (live, released, saved) = cx
                     .background_executor()
                     .spawn(async move {
                         #[cfg(unix)]
-                        let live = if crate::agents::hosted() {
-                            crate::agent_host::live_hosts()
+                        let (live, released): (Vec<_>, Vec<_>) = if crate::agents::hosted() {
+                            crate::agent_host::live_hosts().into_iter().partition(|h| {
+                                shown.contains(&h.id) || !crate::agent_host::release(h)
+                            })
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
                         #[cfg(unix)]
                         let ids: std::collections::HashSet<String> =
                             live.iter().map(|h| h.id.clone()).collect();
                         #[cfg(not(unix))]
-                        let (live, ids) = ((), std::collections::HashSet::<String>::new());
+                        let (live, released, ids) =
+                            ((), (), std::collections::HashSet::<String>::new());
                         let saved: Vec<_> = saved
                             .into_iter()
                             .map(|(wt, tabs)| (wt, crate::agents::tabs_to_reopen(tabs, &ids)))
                             .collect();
-                        (live, saved)
+                        (live, released, saved)
                     })
                     .await;
                 this.update(cx, |this, cx| {
                     this.agents.hosts_scanning = false;
                     #[cfg(unix)]
-                    this.agents_reattach(live, true, cx);
+                    {
+                        // One still winding down isn't picked up again by the next scan.
+                        let released = released.into_iter().map(|h| h.id);
+                        this.agents.closed_hosts.extend(released);
+                        this.agents_reattach(live, true, cx);
+                    }
                     #[cfg(not(unix))]
-                    let () = live;
+                    let ((), ()) = (live, released);
                     this.agents_resume_rest(saved, cx);
                 })
                 .ok();
@@ -1828,16 +1848,27 @@ impl Kyde {
     /// A scratch row's ×: close its tabs (asking first while an agent there isn't done) — the
     /// row (and its folder, if empty) goes with the last one.
     fn agents_close_scratch(&mut self, wt: &Path, cx: &mut Context<Self>) {
-        #[cfg(feature = "terminal")]
-        if let Some(g) = self.agents.tabs.get(wt).filter(|g| !g.tabs.is_empty()) {
-            let ids = g.tabs.iter().map(|t| t.id.clone()).collect();
-            self.agents_ask_close(ids, cx);
+        if self.agents_has_tabs(wt) {
+            self.agents_close_sessions(wt, cx);
             return;
         }
         // Closing its last tab forgot it already; a row without tabs goes now.
         if self.agents.cfg.is_scratch(wt) {
             self.agents_forget_worktree(wt, cx);
         }
+    }
+
+    /// End every session in worktree `wt` — its agents and shells — asking first while an
+    /// agent there isn't done. The row stays (a checkout's ×, any row's menu): nothing runs
+    /// for it until it's opened again, which resumes its latest Claude Code session.
+    pub(crate) fn agents_close_sessions(&mut self, wt: &Path, cx: &mut Context<Self>) {
+        #[cfg(feature = "terminal")]
+        if let Some(g) = self.agents.tabs.get(wt) {
+            let ids = g.tabs.iter().map(|t| t.id.clone()).collect();
+            self.agents_ask_close(ids, cx);
+        }
+        #[cfg(not(feature = "terminal"))]
+        let _ = (wt, cx);
     }
 
     /// The window is Agents-only: the IDE chrome (rail, toolbars, status bar, bottom terminal,
@@ -4632,7 +4663,7 @@ impl Kyde {
     }
 
     /// A sidebar worktree row's right-click menu: its project's Issues / Pull Requests / CI
-    /// (onto its own PR / CI run, where it has one), then pinning.
+    /// (onto its own PR / CI run, where it has one), closing its sessions, then pinning.
     pub(crate) fn agents_row_menu(&self, wt: &Path) -> Vec<MenuEntry> {
         let mut out = Vec::new();
         let space = self.agents.cfg.spaces.iter().find(|s| {
@@ -4642,6 +4673,13 @@ impl Kyde {
         if let Some(s) = space {
             out = Self::agents_gh_entries(&s.path, Some(wt));
             out.push(MenuEntry::Divider);
+        }
+        // A scratch row goes with its tabs: its × says so, this wouldn't.
+        if self.agents_has_tabs(wt) && !self.agents.cfg.is_scratch(wt) {
+            let close = wt.to_path_buf();
+            out.push(MenuEntry::item("Close Sessions", move |this, _w, cx| {
+                this.agents_close_sessions(&close, cx);
+            }));
         }
         out.push(self.agents_pin_entry(wt, false));
         out
@@ -7704,7 +7742,8 @@ impl Kyde {
                 .into_any_element()
         };
         // No session open in it: the row steps back, so the ones with agents stand out.
-        let idle = cfg!(feature = "terminal") && !renaming && !self.agents_has_tabs(wt);
+        let open = self.agents_has_tabs(wt);
+        let idle = cfg!(feature = "terminal") && !renaming && !open;
         let lines = div()
             .flex()
             .flex_col()
@@ -7743,11 +7782,14 @@ impl Kyde {
             .children(tree_connector(last))
             .child(lines)
             // Remove: only while hovered — it takes room then, so the badges shift left
-            // rather than being covered. The default worktree (`main`) has none.
-            .when(!is_default && hovered, |d| {
+            // rather than being covered. The default worktree (`main`) can't be removed: its
+            // × closes the sessions open in it, so it has one only while it has some.
+            .when(hovered && (!is_default || open), |d| {
                 d.child(
                     ui::icon_btn(("agents-rm-wt", id), 18.0)
-                        .tooltip(ui::tip(if scratch {
+                        .tooltip(ui::tip(if is_default {
+                            "Close sessions (ends its agents)"
+                        } else if scratch {
                             "Close (ends its agent)"
                         } else {
                             "Remove worktree…"
@@ -7763,7 +7805,9 @@ impl Kyde {
                             cx.listener(move |this, _e, _w, cx| {
                                 cx.stop_propagation();
                                 // Nothing to lose in scratch: no git, and saved files stay.
-                                if scratch {
+                                if is_default {
+                                    this.agents_close_sessions(&rm_wt, cx);
+                                } else if scratch {
                                     this.agents_close_scratch(&rm_wt, cx);
                                 } else {
                                     this.agents_confirm_remove(rm_space.clone(), rm_wt.clone(), cx);

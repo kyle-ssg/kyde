@@ -752,6 +752,17 @@ pub(crate) fn has_work(u: &Unwatched) -> bool {
     }
 }
 
+/// Whether an agent's last hook report (`json`, its state file) says it has nothing to
+/// finish: ready for a prompt, done with nothing left running, or waiting on you. What Kyde
+/// can tell of an agent without asking its host (`agent_host::release`).
+pub(crate) fn reports_idle(json: &str) -> bool {
+    parse_hook(json).is_some_and(|r| match r.hook {
+        Hook::Ready | Hook::Blocked(_) => true,
+        Hook::Done => !left_background(false, &r),
+        Hook::Working | Hook::Ended => false,
+    })
+}
+
 /// Whether the turn report `r` ends left background tasks running — `was` (what the report
 /// before it said) when `r` doesn't say: the idle notification after a `Stop` that listed them.
 pub(crate) fn left_background(was: bool, r: &HookReport) -> bool {
@@ -1896,6 +1907,15 @@ mod tests {
             report(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#);
         let prompt = report(r#"{"hook_event_name":"UserPromptSubmit","prompt":"next"}"#);
         assert!(left_background(false, &stop));
+        // What Kyde reads of an agent it can't ask: idle unless it reports work.
+        assert!(reports_idle(r#"{"hook_event_name":"SessionStart"}"#));
+        assert!(reports_idle(r#"{"hook_event_name":"Stop"}"#));
+        assert!(!reports_idle(
+            r#"{"hook_event_name":"UserPromptSubmit","prompt":"next"}"#
+        ));
+        assert!(!reports_idle(
+            r#"{"hook_event_name":"Stop","background_tasks":[{"id":"b1","type":"shell"}]}"#
+        ));
         assert!(left_background(true, &idle));
         assert!(!left_background(true, &prompt));
     }

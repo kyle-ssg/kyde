@@ -7,8 +7,9 @@
 //! sends keystrokes / resizes back. Quitting Kyde only disconnects, and a host nobody is
 //! attached to keeps its agent just as long as it has something to finish (`watch`): a turn
 //! under way stays until it's done, then the host ends it, as it does an idle one
-//! straight away. The next launch reattaches to the ones still at work (`live_hosts`) and
-//! resumes the rest's sessions. Closing the tab sends `KILL`, which ends the agent and
+//! straight away. The next launch releases the ones with nothing to finish (`release`: a
+//! quick restart finds them still up), reattaches to the ones at work (`live_hosts`) and
+//! resumes a session when its worktree is opened. Closing the tab sends `KILL`, which ends the agent and
 //! everything it started (`end_tree`). The `ky agent …` CLI talks to the same sockets.
 //!
 //! Wire format, both directions: `[kind: u8][len: u32 LE][payload]`.
@@ -26,7 +27,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 /// Bumped when the wire format changes (a host from an older Kyde says so in `HELLO`).
-pub(crate) const VERSION: u32 = 1;
+/// 2: a host answers `RELEASE`.
+pub(crate) const VERSION: u32 = 2;
 /// Output a host keeps for a reattaching viewer.
 const RING_CAP: usize = 4 * 1024 * 1024;
 /// What a Claude Code session exports to the commands it runs. An agent host started from
@@ -66,6 +68,9 @@ pub(crate) const RESIZE: u8 = 3;
 pub(crate) const SNAPSHOT: u8 = 4;
 /// Client → host: end the agent and everything it started (see `end_tree`).
 pub(crate) const KILL: u8 = 5;
+/// Client → host: end the agent unless it has work to finish. Answered with `EXIT` when it's
+/// ending, `HELLO` when it stays.
+pub(crate) const RELEASE: u8 = 6;
 /// Host → client: `HostHello` JSON.
 pub(crate) const HELLO: u8 = 10;
 /// Host → client: PTY output.
@@ -301,6 +306,31 @@ pub(crate) fn send(id: &str, kind: u8, payload: &[u8]) -> io::Result<()> {
     write_frame(&mut s, kind, payload)
 }
 
+/// Launch: let go of host `info` unless its agent has work to finish. Whether it's ending
+/// (or gone already) — `false` when it stays. Reads the agent's state file: call it off the
+/// UI thread.
+pub(crate) fn release(info: &HostInfo) -> bool {
+    if info.version < 2 {
+        // From a Kyde too old to be asked: go by what its agent last reported.
+        let idle = info.agent
+            && std::fs::read_to_string(crate::agents::state_path(&info.id))
+                .is_ok_and(|s| crate::agents::reports_idle(&s));
+        return idle && send(&info.id, KILL, &[]).is_ok();
+    }
+    let Ok(mut s) = UnixStream::connect(sock_path(&info.id)) else {
+        return true;
+    };
+    let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+    if write_frame(&mut s, RELEASE, &[]).is_err() {
+        return true;
+    }
+    // No answer in time: it stays.
+    !matches!(
+        FrameReader::default().next(&mut s),
+        Ok(Some((HELLO, _)) | None)
+    )
+}
+
 /// Host `id`'s size and buffered output (everything it has shown recently, raw).
 pub(crate) fn snapshot(id: &str) -> io::Result<(HostHello, Vec<u8>)> {
     let mut s = UnixStream::connect(sock_path(id))?;
@@ -357,6 +387,8 @@ struct Shared {
     agent: bool,
     started: Instant,
     last_output: Mutex<Instant>,
+    /// The agent's latest hook report (`watch` keeps it current).
+    report: Mutex<Option<Report>>,
     /// When somebody was last there (a viewer attached, a client sent something) or the agent
     /// had work to finish. `None` once the host has given up on it and is ending it (`watch`).
     attended: Mutex<Option<Instant>>,
@@ -426,10 +458,12 @@ impl Shared {
         u32::try_from(fg) != Ok(self.child)
     }
 
-    /// What's known of the agent right now, for `agents::has_work`.
-    fn unwatched(&self, report: Option<&Report>) -> crate::agents::Unwatched {
+    /// Whether the agent has something to finish (`agents::has_work`).
+    fn has_work(&self) -> bool {
+        let report = lock(&self.report);
+        let report = report.as_ref();
         let now = std::time::SystemTime::now();
-        crate::agents::Unwatched {
+        crate::agents::has_work(&crate::agents::Unwatched {
             agent: self.agent,
             running: self.running(),
             hook: report.map(|r| {
@@ -444,7 +478,19 @@ impl Shared {
             background: report.is_some_and(|r| r.background),
             quiet: lock(&self.last_output).elapsed(),
             age: self.started.elapsed(),
+        })
+    }
+
+    /// Give up on the agent, ahead of ending it (`end`): no viewer from here on, and it's
+    /// unregistered at once — a Kyde launching now resumes its session rather than attaching
+    /// to an agent on its way out. `false` if that's under way already.
+    fn abandon(&self) -> bool {
+        if lock(&self.attended).take().is_none() {
+            return false;
         }
+        let _ = std::fs::remove_file(sock_path(&self.id));
+        let _ = std::fs::remove_file(info_path(&self.id));
+        true
     }
 
     /// The agent's terminal closed (or is being abandoned): tell viewers and unregister.
@@ -489,7 +535,7 @@ fn newest_in(dir: &std::path::Path) -> std::time::SystemTime {
 /// session is resumed at the next launch. One still at work is kept until it's done.
 fn watch(shared: &Shared) {
     let state = crate::agents::state_path(&shared.id);
-    let (mut report, mut read): (Option<Report>, _) = (None, None);
+    let mut read = None;
     while !shared.wait_closed(WATCH_EVERY) {
         // Kept across reads: an event that says nothing of its state (a notification)
         // overwrites the file too.
@@ -500,8 +546,9 @@ fn watch(shared: &Shared) {
                 .ok()
                 .and_then(|s| crate::agents::parse_hook(&s));
             if let Some(r) = new {
+                let mut report = lock(&shared.report);
                 let was = report.as_ref().is_some_and(|r| r.background);
-                report = Some(Report {
+                *report = Some(Report {
                     background: crate::agents::left_background(was, &r),
                     hook: r.hook,
                     at,
@@ -509,18 +556,12 @@ fn watch(shared: &Shared) {
             }
         }
         let watched = shared.watchers.load(Ordering::Relaxed) > 0;
-        if watched || crate::agents::has_work(&shared.unwatched(report.as_ref())) {
+        if watched || shared.has_work() {
             shared.touch();
             continue;
         }
-        let mut attended = lock(&shared.attended);
-        if attended.is_some_and(|at| at.elapsed() >= crate::agents::UNWATCHED_GRACE) {
-            *attended = None;
-            drop(attended);
-            // Unregistered first: a Kyde launching now resumes its session rather than
-            // attaching to an agent on its way out.
-            let _ = std::fs::remove_file(sock_path(&shared.id));
-            let _ = std::fs::remove_file(info_path(&shared.id));
+        let unattended = lock(&shared.attended).map(|at| at.elapsed());
+        if unattended.is_some_and(|d| d >= crate::agents::UNWATCHED_GRACE) && shared.abandon() {
             shared.end();
             return;
         }
@@ -710,6 +751,7 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         agent: spec.agent,
         started: Instant::now(),
         last_output: Mutex::new(Instant::now()),
+        report: Mutex::new(None),
         attended: Mutex::new(Some(Instant::now())),
         closed: Mutex::new(false),
         closed_cv: Condvar::new(),
@@ -836,6 +878,18 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
             }
             KILL => {
                 shared.end();
+                break;
+            }
+            RELEASE => {
+                // Kyde is launching and won't show this agent: gone now, not a grace later.
+                // (Never from under a viewer: somebody is looking at it.)
+                let leaving = shared.watchers.load(Ordering::Relaxed) == 0
+                    && !shared.has_work()
+                    && shared.abandon();
+                let _ = write_frame(&mut stream, if leaving { EXIT } else { HELLO }, &[]);
+                if leaving {
+                    shared.end();
+                }
                 break;
             }
             _ => {}
