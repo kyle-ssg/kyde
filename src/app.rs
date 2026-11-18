@@ -186,7 +186,7 @@ impl RepoSnapshot {
             worktrees: repo.worktrees().unwrap_or_default(),
             ahead: repo.ahead_count(),
             behind: repo.behind_count(),
-            push_files: repo.diff_files(&push_base, Some("HEAD"), None),
+            push_files: repo.diff_files(&push_base, Some("HEAD"), &[]),
             push_base,
             scratches,
             merging: repo.merging(),
@@ -792,6 +792,7 @@ impl Kyde {
         if !self.files.iter().any(|f| f.path == rel) {
             self.files.push(ChangedFile {
                 path: rel.clone(),
+                old_path: None,
                 status: FileStatus::Modified,
             });
             cx.notify();

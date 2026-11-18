@@ -414,6 +414,10 @@ impl Kyde {
                         }));
                     }
                 }
+                // The file's commits, across renames (issue #226) — not a scratch file's.
+                if let Some(item) = self.git_history_item(p) {
+                    out.push(item);
+                }
                 // Local History for the edited file (issue #7) — hidden when disabled.
                 if self.lh.store.is_some() {
                     let pl = p.clone();
@@ -534,10 +538,7 @@ impl Kyde {
                             this.open_rollback_path(pr.clone(), cx);
                         }));
                     }
-                    let ph = p.clone();
-                    git.push(MenuEntry::item("Git History", move |this, _w, cx| {
-                        this.enter_history_for(ph.clone(), cx);
-                    }));
+                    git.extend(self.git_history_item(p));
                     git.extend([fetch(), pull()]);
                     if ahead {
                         git.push(push());
@@ -589,6 +590,7 @@ impl Kyde {
                     }
                 }
                 if let Some(tab) = tab {
+                    out.extend(self.git_history_item(&tab));
                     if self.lh.store.is_some() {
                         let tl = tab.clone();
                         out.push(MenuEntry::item("Local History", move |this, _w, cx| {
@@ -731,6 +733,19 @@ impl Kyde {
             }
         }
         out
+    }
+
+    /// "Git History" for a file or folder of the project: the History view scoped to it (a
+    /// file followed across its renames). `None` outside git, and for a scratch file (an
+    /// absolute path — it isn't in the repo).
+    fn git_history_item(&self, path: &std::path::Path) -> Option<MenuEntry> {
+        if !self.is_git || path.is_absolute() {
+            return None;
+        }
+        let p = path.to_path_buf();
+        Some(MenuEntry::item("Git History", move |this, _w, cx| {
+            this.enter_history_for(p.clone(), cx);
+        }))
     }
 
     // ── rendering ─────────────────────────────────────────────────

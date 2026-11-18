@@ -955,10 +955,16 @@ struct HistoryView {
     /// Revision being logged — a branch name, or "HEAD" for the current branch.
     rev: String,
     /// Path the log is scoped to (a folder/file), or `None` for the whole repo. Set when
-    /// the history view is opened from a Browse-tree folder's right-click menu.
+    /// the history view is opened from a file or folder's right-click "Git History". A file
+    /// is followed back across its renames (`Repo::file_log`).
     path: Option<PathBuf>,
     /// Commits shown in the log list (newest first).
     commits: Vec<git::Commit>,
+    /// The `(rev, path)` that `commits` were logged for — a reload of another scope drops
+    /// them at once, rather than showing them under the new scope until git answers.
+    loaded: Option<(String, Option<PathBuf>)>,
+    /// The in-flight log load (`reload_history`); replacing it cancels a stale one.
+    load: Option<gpui::Task<()>>,
     /// The commit graph, one row per entry of `commits` (laid out when they load).
     graph: Vec<git::graph::GraphRow>,
     /// Graph column width in lanes — the widest row, capped (see `history::MAX_LANES`).
@@ -1052,6 +1058,8 @@ impl HistoryView {
             rev: "HEAD".to_string(),
             path: None,
             commits: Vec::new(),
+            loaded: None,
+            load: None,
             graph: Vec::new(),
             graph_lanes: 0,
             selected: None,
@@ -4381,13 +4389,23 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
             }
             view.history.compare = CompareMode::Before;
             view.enter_history(cx);
-            if let Some(i) = view
-                .history
-                .commits
-                .iter()
-                .position(|c| c.subject.starts_with("feat: ease the shimmer"))
-            {
-                view.select_history_commit(i, cx);
+            // The log loads off the UI thread — pick the commit once it's in.
+            if let Some(load) = view.history.load.take() {
+                cx.spawn(async move |this, cx| {
+                    load.await;
+                    this.update(cx, |view, cx| {
+                        if let Some(i) = view
+                            .history
+                            .commits
+                            .iter()
+                            .position(|c| c.subject.starts_with("feat: ease the shimmer"))
+                        {
+                            view.select_history_commit(i, cx);
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
             }
         }
         // Browse view with the bottom terminal panel open, seeded with a couple of commands
@@ -6743,12 +6761,84 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Right-click a file → Git History (#226): offered by the editor and its tab; picking it
+    /// opens History on the file's commits followed back across a rename, and a commit from
+    /// before the rename shows the file's diff under its old name (the rename's own, too).
+    #[gpui::test]
+    fn git_history_from_the_editor_follows_renames(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        git(&dir, &["commit", "-qam", "second"]);
+        git(&dir, &["mv", "app.tsx", "main.tsx"]);
+        git(&dir, &["commit", "-qm", "rename"]);
+        std::fs::write(dir.join("main.tsx"), "const a = 3;\n").unwrap();
+        git(&dir, &["commit", "-qam", "third"]);
+        let main = PathBuf::from("main.tsx");
+        let git_history = |k: &Kyde| {
+            k.context_menu.as_ref().and_then(|m| {
+                m.entries.iter().position(
+                    |e| matches!(e, MenuEntry::Item { label, .. } if label.as_ref() == "Git History"),
+                )
+            })
+        };
+        handle
+            .update(cx, |k, w, cx| {
+                k.open_file(main.clone(), cx);
+                k.open_menu(gpui::point(px(0.0), px(0.0)), MenuTarget::Tab(0), cx);
+                assert!(git_history(k).is_some(), "the tab menu offers Git History");
+                let target = MenuTarget::EditorGit(main.clone(), false, false, false);
+                k.open_menu(gpui::point(px(0.0), px(0.0)), target, cx);
+                k.history.compare = CompareMode::Before;
+                let hl = git_history(k);
+                assert!(hl.is_some(), "the editor menu offers Git History");
+                if let Some(m) = k.context_menu.as_mut() {
+                    m.hl = hl;
+                }
+                k.menu_confirm(&MenuConfirm, w, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.mode == Mode::History);
+                assert_eq!(k.history.path.as_ref(), Some(&main));
+                let subjects: Vec<&str> = k
+                    .history
+                    .commits
+                    .iter()
+                    .map(|c| c.subject.as_str())
+                    .collect();
+                assert_eq!(subjects, ["third", "rename", "second", "init"]);
+                let sides = |k: &Kyde, cx: &App| {
+                    (
+                        k.diff.left.read(cx).text().to_string(),
+                        k.diff.right.read(cx).text().to_string(),
+                    )
+                };
+                k.select_history_commit(2, cx);
+                assert_eq!(
+                    k.history.files.first().map(|f| f.path.clone()),
+                    Some("app.tsx".into())
+                );
+                assert_eq!(
+                    sides(k, cx),
+                    ("const a = 1;\n".into(), "const a = 2;\n".into())
+                );
+                k.select_history_commit(1, cx);
+                assert_eq!(
+                    sides(k, cx),
+                    ("const a = 2;\n".into(), "const a = 2;\n".into())
+                );
+            })
+            .unwrap();
+    }
+
     /// Push tree (#92): a refresh with the same files keeps the user's folder collapses; a
     /// changed file set rebuilds the tree fully expanded.
     #[test]
     fn push_tree_keeps_collapses_until_files_change() {
         let f = |p: &str| ChangedFile {
             path: PathBuf::from(p),
+            old_path: None,
             status: FileStatus::Modified,
         };
         let src = std::path::Path::new("src");
