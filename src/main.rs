@@ -8650,6 +8650,44 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A row's "Close Sessions" (a checkout's ×) ends everything open in the worktree and
+    /// keeps the row — offered only while something is open there.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_closing_a_rows_sessions_keeps_the_row(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents_new_tab(dir.clone(), false, None, cx);
+                let offered = |k: &Kyde| {
+                    k.agents_row_menu(&dir).iter().any(
+                        |e| matches!(e, MenuEntry::Item { label, .. } if label == "Close Sessions"),
+                    )
+                };
+                let now = std::time::Instant::now();
+                for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
+                    t.hook = Some((agents::Hook::Done, now));
+                }
+                assert!(k.agents.tabs[&dir].tabs.len() > 1 && offered(k));
+                k.agents_close_sessions(&dir, cx);
+                assert!(!k.agents.tabs.contains_key(&dir), "every tab closed");
+                assert!(
+                    k.agents.cfg.spaces.iter().any(|s| s.path == dir),
+                    "the row stays"
+                );
+                assert!(!offered(k), "nothing open: nothing to close");
+            })
+            .unwrap();
+    }
+
     /// More tabs than the strip has room for: their titles shorten first, then as many as fit
     /// show — the one on screen among them — and the rest wait behind a `▾` whose menu brings
     /// one up.
