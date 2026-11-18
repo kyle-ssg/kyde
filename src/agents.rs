@@ -1292,10 +1292,15 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// is typed (twice when it arrives before the prompt is drawn), and a seed prompt is a
 /// paragraph, so the line first wipes the screen and scrollback: the agent starts on a clean
 /// terminal. `printf` rather than `clear`, which leaves the scrollback on macOS.
+///
+/// The prompt is typed as keystrokes, and quoting only holds for printable text: a Ctrl-C or
+/// Ctrl-U in it would make the shell drop the half-typed line, quote and all, so whatever
+/// follows runs as a command. Prompts carry third-party text (an issue or pull request's
+/// title), so control characters are dropped here, for every one of them.
 pub(crate) fn seeded_line(cmd: &str, prompt: &str) -> String {
     format!(
         r"printf '\033[H\033[2J\033[3J'; {cmd} {}",
-        shell_quote(prompt)
+        shell_quote(&typeable(prompt))
     )
 }
 
@@ -2039,6 +2044,18 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(out.stdout, b"\x1b[H\x1b[2J\x1b[3Jit's a review");
+    }
+
+    /// A pull request titled to break out of the quotes (Ctrl-U kills the typed line, then
+    /// a command and Enter) still only reaches the agent as text.
+    #[test]
+    fn a_seed_prompt_cannot_type_its_own_command() {
+        let line = seeded_line("claude", "Fix it\x15touch /tmp/pwned\r");
+        assert!(!line.contains(['\x15', '\r']), "{line:?}");
+        assert!(
+            line.ends_with("claude 'Fix ittouch /tmp/pwned'"),
+            "{line:?}"
+        );
     }
 
     #[test]
