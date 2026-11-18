@@ -45,6 +45,32 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.20.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.19.1...kyde-v2.20.0) (2026-11-18)
+
+
+### Features
+
+* **agents:** close a worktree's sessions from its sidebar row ([8f0c3c3](https://github.com/kyle-ssg/kyde/commit/8f0c3c3d80351d5e65abc7539b9aace8114fa464))
+* **agents:** continue a claude.ai/code cloud session from the ⊕ menu ([#234](https://github.com/kyle-ssg/kyde/issues/234)) ([6394be0](https://github.com/kyle-ssg/kyde/commit/6394be052726dc7993305a7a0fa62ca1eaece857)), closes [#227](https://github.com/kyle-ssg/kyde/issues/227)
+* **history:** right-click a file → Git History, following renames ([#233](https://github.com/kyle-ssg/kyde/issues/233)) ([ea0ad4a](https://github.com/kyle-ssg/kyde/commit/ea0ad4a54145f699f676bfe666ee6051138d32af)), closes [#226](https://github.com/kyle-ssg/kyde/issues/226)
+
+
+### Bug Fixes
+
+* **agents:** a tab that falls behind reattaches instead of freezing ([#238](https://github.com/kyle-ssg/kyde/issues/238)) ([9ceefda](https://github.com/kyle-ssg/kyde/commit/9ceefdaf5844873d62ec325bf56c7fbe02e405d4))
+* **agents:** Clean Up doesn't tick a worktree whose agent isn't finished ([#239](https://github.com/kyle-ssg/kyde/issues/239)) ([89e4ed1](https://github.com/kyle-ssg/kyde/commit/89e4ed198e28e74289a1e8bf4b0a7e1c61f3734a))
+* **agents:** drop control characters from every seed prompt ([#221](https://github.com/kyle-ssg/kyde/issues/221)) ([e334a71](https://github.com/kyle-ssg/kyde/commit/e334a71ab48d030cb7cd3c7ae95e45fc7b834e8c))
+* **agents:** judge a tab by its own session, not its folder's newest ([#237](https://github.com/kyle-ssg/kyde/issues/237)) ([a99204f](https://github.com/kyle-ssg/kyde/commit/a99204ff991f82f391fc1d8d36f80c811d6a182c))
+* **agents:** release idle agents at launch instead of reattaching to them ([#232](https://github.com/kyle-ssg/kyde/issues/232)) ([8f0c3c3](https://github.com/kyle-ssg/kyde/commit/8f0c3c3d80351d5e65abc7539b9aace8114fa464))
+* **agents:** show CI runs awaiting approval as pending, not failed ([#236](https://github.com/kyle-ssg/kyde/issues/236)) ([02a7ed2](https://github.com/kyle-ssg/kyde/commit/02a7ed20728a69acac906ada3ddaf28499f749ad))
+* **agents:** start an agent handed a long one-paragraph prompt ([#235](https://github.com/kyle-ssg/kyde/issues/235)) ([47e3fac](https://github.com/kyle-ssg/kyde/commit/47e3facce4a3192c5dae6b2e33c6164bb5ffa695))
+* **agents:** typing replaces a rename field's preselected name ([#231](https://github.com/kyle-ssg/kyde/issues/231)) ([5fe050b](https://github.com/kyle-ssg/kyde/commit/5fe050b1ff41c6a77b7a00a52cdf7df1087a61c7))
+* **deps:** bump libz-sys to 1.1.33 for RUSTSEC-2026-0544 ([#225](https://github.com/kyle-ssg/kyde/issues/225)) ([6e140f3](https://github.com/kyle-ssg/kyde/commit/6e140f3ebf10b39e7277405b2a1db22edeb35a1a))
+* **git:** don't let a branch name become a push or pull option ([#224](https://github.com/kyle-ssg/kyde/issues/224)) ([ba97ad6](https://github.com/kyle-ssg/kyde/commit/ba97ad6e0d3819553dd5b4e389e9086eae224126))
+* **git:** never save through a symlink that leaves the repo ([#223](https://github.com/kyle-ssg/kyde/issues/223)) ([a625a59](https://github.com/kyle-ssg/kyde/commit/a625a59faa2a45dfd2de68c0f6e9287ad73038f6))
+* **terminal:** stop pasted text and program links from running commands ([#222](https://github.com/kyle-ssg/kyde/issues/222)) ([9c8a1df](https://github.com/kyle-ssg/kyde/commit/9c8a1df5b710247ad0955415df99a3f2ee228a86))
+* **update:** refuse an update not signed by Kyde's developer ([#220](https://github.com/kyle-ssg/kyde/issues/220)) ([f205a55](https://github.com/kyle-ssg/kyde/commit/f205a55d58a51dbd37753e942cb69b3345be7525))
+
 ## [2.19.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.19.0...kyde-v2.19.1) (2026-11-17)
 
 
