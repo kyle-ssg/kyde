@@ -5,6 +5,10 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Wait a week after a release before proposing it, so a compromised release is likely to
+    # be found and pulled first.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     groups:
       # tree-sitter core + grammars must move together (ABI alignment), so
@@ -21,6 +25,8 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     ignore:
       # dtolnay/rust-toolchain's tag IS the Rust toolchain version, and ours is pinned to
       # the MSRV (see rust-version in Cargo.toml) on purpose — a dependabot "bump" would

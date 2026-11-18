@@ -224,6 +224,11 @@ so plain rustc warnings fail every step, not just clippy. Rules:
 - **MSRV `1.96`** — `rust-version` in every `Cargo.toml` + `rust-toolchain.toml`; the `msrv`
   CI job builds the workspace on 1.96. `unsafe` needs a `// SAFETY:` comment. Supply chain is
   gated by `cargo-deny` (advisories + licenses + bans).
+- **Workflow actions are locked** in `.github/workflows/actions.lock` (`gh actions-lock`): use
+  a full version tag (`@v7.0.1`, not `@v7` or a SHA), run `gh actions-lock` after touching any
+  `uses:` line, and commit the lockfile with it — never hand-edit it. The `actions-checks`
+  workflow verifies the lockfile and runs zizmor, so a new workflow needs a `permissions:`
+  block and `persist-credentials: false` on checkout.
 
 ### Workspace Cargo conventions (don't regress these)
 - **Metadata + shared deps are inherited, never redeclared.** `[workspace.package]`
