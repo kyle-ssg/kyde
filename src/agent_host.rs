@@ -48,6 +48,11 @@ const PARENT_SESSION_VARS: [&str; 10] = [
     "CLAUDE_PID",
 ];
 
+/// Room a connection has for output its viewer hasn't read yet. The default (8 KB on macOS)
+/// fills in a brief stall in Kyde, and a viewer whose socket stays full past the write timeout
+/// is dropped (`broadcast`) — a reattach and a fresh replay. Only the sending end's buffer
+/// counts for a Unix stream on macOS; Linux caps it at `net.core.wmem_max`.
+const VIEWER_BUF: libc::c_int = 1024 * 1024;
 /// Largest frame accepted — anything bigger is a broken stream.
 const MAX_FRAME: usize = 64 * 1024 * 1024;
 /// How long a closed agent gets to wind down after the hang-up (Claude stopping its MCP
@@ -836,8 +841,21 @@ fn broadcast(viewers: &mut Vec<UnixStream>, bytes: &[u8]) {
 
 /// One connection: an attaching viewer, or a one-shot request (snapshot, input, kill).
 fn serve(mut stream: UnixStream, shared: &Shared) {
-    // A viewer that stops reading is dropped (`broadcast`) rather than stalling the agent.
+    // A viewer that stops reading is dropped (`broadcast`) rather than stalling the agent —
+    // once it's this far behind.
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    // SAFETY: setsockopt on the socket `stream` owns (open across the call), reading the
+    // `c_int` `VIEWER_BUF` points at, with its exact size. Best effort: a failure keeps the
+    // default.
+    unsafe {
+        libc::setsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            std::ptr::from_ref(&VIEWER_BUF).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
     let mut frames = FrameReader::default();
     // Whether this connection attached: a watcher until it hangs up.
     let mut attached = false;
