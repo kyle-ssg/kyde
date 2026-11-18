@@ -71,6 +71,9 @@ pub enum GitError {
     /// take that checkout, uncommitted work and all, with it.
     #[error("worktree {0:?} is inside it — remove that one first")]
     NestedWorktree(PathBuf),
+    /// Writing this repo path would land outside the repository, through a symlink in it.
+    #[error("{0:?} links outside the repository — Kyde won't write there")]
+    OutsideRepo(PathBuf),
 }
 
 /// Result alias for every fallible `kyde-git` operation.
@@ -1189,9 +1192,10 @@ impl Repo {
         Some((ahead, behind))
     }
 
-    /// Write new content to a working-tree file (used by the editor on save).
+    /// Write new content to a working-tree file (used by the editor on save). Refused when a
+    /// symlink would take the write outside the repo (see [`write_target`]).
     pub fn save_file(&self, rel: &Path, content: &str) -> Result<()> {
-        let full = self.root.join(rel);
+        let full = write_target(&self.root, rel)?;
         if let Some(parent) = full.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -1284,6 +1288,48 @@ fn classify(x: char, y: char) -> FileStatus {
 /// Reject a branch/ref name that git would misread as a flag (leading `-`) or
 /// that is empty. Guards the new-branch text box against argument injection;
 /// not a full `git check-ref-format`. Returns the trimmed name on success.
+/// Where writing `rel` under `root` goes: `root.join(rel)`, refused when the write would
+/// really land outside `root`. A cloned repo can commit a symlink (`notes.md ->
+/// ../../.zshrc`), and a save, a merge resolve or a local-history restore must not write over
+/// a file elsewhere through it. A link to another file in the repo still writes through. An
+/// absolute `rel` is one of Kyde's own files (a scratch buffer) and goes where it says.
+///
+/// ```
+/// let root = std::env::temp_dir();
+/// assert!(kyde_git::write_target(&root, "new/file.txt".as_ref()).is_ok());
+/// assert!(kyde_git::write_target(&root, "../elsewhere.txt".as_ref()).is_err());
+/// ```
+///
+/// # Errors
+/// [`GitError::OutsideRepo`] when the write would land outside `root` (a dangling link
+/// included: writing through it creates its target), and [`GitError::Io`] when `root` can't
+/// be resolved.
+pub fn write_target(root: &Path, rel: &Path) -> Result<PathBuf> {
+    let full = root.join(rel);
+    if rel.is_absolute() {
+        return Ok(full);
+    }
+    let outside = || GitError::OutsideRepo(rel.to_path_buf());
+    let real_root = root
+        .canonicalize()
+        .map_err(io_err(format!("resolving {root:?}")))?;
+    // The deepest part of the path that's there (a link counts, dangling or not), resolved;
+    // the rest will be made under it.
+    let mut there = full.as_path();
+    let mut made = Vec::new();
+    while there.symlink_metadata().is_err() {
+        made.push(there.file_name().ok_or_else(outside)?);
+        there = there.parent().ok_or_else(outside)?;
+    }
+    let real = there.canonicalize().map_err(|_| outside())?;
+    let real = made.iter().rev().fold(real, |p, part| p.join(part));
+    if real.starts_with(&real_root) {
+        Ok(full)
+    } else {
+        Err(outside())
+    }
+}
+
 fn valid_ref(name: &str) -> Result<&str> {
     let n = name.trim();
     if n.is_empty() {
@@ -1615,6 +1661,46 @@ mod tests {
         assert!(valid_ref("").is_err());
         assert_eq!(valid_ref("feature/x").unwrap(), "feature/x");
         assert_eq!(valid_ref("  main  ").unwrap(), "main"); // trims
+    }
+
+    /// A cloned repo's symlinks can point anywhere: saving through one that leaves the repo
+    /// (to a file, a missing file or a folder) is refused and the target is untouched, while
+    /// a link to another file in the repo and a brand-new file still save.
+    #[cfg(unix)]
+    #[test]
+    fn saving_never_writes_through_a_link_out_of_the_repo() {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("kyde-links-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (work, home) = (base.join("repo"), base.join("home"));
+        fs::create_dir_all(&work).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        git(&work, &["init", "-q"]).unwrap();
+        fs::write(home.join(".zshrc"), "mine\n").unwrap();
+        fs::write(work.join("AGENTS.md"), "a\n").unwrap();
+        symlink("../home/.zshrc", work.join("notes.md")).unwrap();
+        symlink("../home/.zshenv", work.join("dangling.md")).unwrap();
+        symlink("../home", work.join("docs")).unwrap();
+        symlink("AGENTS.md", work.join("CLAUDE.md")).unwrap();
+        let repo = Repo::discover(&work).unwrap();
+
+        for rel in ["notes.md", "dangling.md", "docs/x.md", "docs/new/x.md"] {
+            let err = repo.save_file(Path::new(rel), "pwned\n").unwrap_err();
+            assert!(matches!(err, GitError::OutsideRepo(_)), "{rel}: {err}");
+        }
+        assert_eq!(fs::read_to_string(home.join(".zshrc")).unwrap(), "mine\n");
+        assert_eq!(
+            fs::read_dir(&home).unwrap().count(),
+            1,
+            "nothing made in home"
+        );
+
+        repo.save_file(Path::new("CLAUDE.md"), "b\n").unwrap();
+        assert_eq!(fs::read_to_string(work.join("AGENTS.md")).unwrap(), "b\n");
+        repo.save_file(Path::new("src/new.rs"), "c\n").unwrap();
+        assert_eq!(fs::read_to_string(work.join("src/new.rs")).unwrap(), "c\n");
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// Committing a `git rm`'d file must work: its deletion is already staged, so the

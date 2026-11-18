@@ -6612,7 +6612,9 @@ impl Kyde {
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |_this, _e, _w, cx| {
-                                    if !link.is_empty() {
+                                    // A check's link is whatever its CI app reported: open
+                                    // web pages only, never another app's URL scheme.
+                                    if link.starts_with("https://") || link.starts_with("http://") {
                                         cx.open_url(&link);
                                     }
                                 }),
