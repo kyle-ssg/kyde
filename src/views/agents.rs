@@ -54,15 +54,45 @@ const TITLE_AFTER_PROMPT: Duration = Duration::from_secs(15);
 #[cfg(feature = "terminal")]
 const FEEDBACK_STARTING: Duration = Duration::from_mins(1);
 /// One tab for the cleanup's background probe: worktree, spawn time, shell pid, last output,
-/// and the AI question to ask about it (if any).
+/// and what to ask the AI about it (if anything).
 #[cfg(feature = "terminal")]
 type Probe = (
     PathBuf,
     std::time::SystemTime,
     u32,
     Option<Instant>,
-    Option<String>,
+    Option<DoneAsk>,
 );
+
+/// What the UI knows of a tab for the AI "is this done?" check; [`done_question`] adds its
+/// session's title and prompts off the UI thread.
+#[cfg(feature = "terminal")]
+struct DoneAsk {
+    /// The tab's own Claude Code session (`None`: its agent hasn't started one).
+    session: Option<String>,
+    git: String,
+    tail: String,
+}
+
+/// The AI check's question about a tab in `wt`: the title and prompts of its own session —
+/// not the worktree's newest, which can be another tab's (or an older one, when this tab's
+/// agent never started) — its git state, and the last lines on its screen. Reads the session
+/// file: call it off the UI thread.
+#[cfg(feature = "terminal")]
+fn done_question(wt: &Path, ask: &DoneAsk) -> String {
+    let ctx = ask
+        .session
+        .as_deref()
+        .and_then(|s| crate::agents::read_session_context(wt, s));
+    let field = |f: Option<&String>| f.map_or("(unknown)".to_string(), |s| clip(s, 400));
+    crate::agents::done_prompt(
+        &field(ctx.as_ref().and_then(|c| c.title.as_ref())),
+        &field(ctx.as_ref().and_then(|c| c.first_prompt.as_ref())),
+        &field(ctx.as_ref().and_then(|c| c.last_prompt.as_ref())),
+        &ask.git,
+        &ask.tail,
+    )
+}
 
 /// One worktree's agent tabs (by spawn time) and the Claude Code session each was matched to.
 type SessionMatches = (PathBuf, Vec<(std::time::SystemTime, Option<String>)>);
@@ -4012,7 +4042,7 @@ impl Kyde {
                     && t.ai.as_ref().is_none_or(|a| a.after != t.last_output);
                 let question = ask.then(|| {
                     budget -= 1;
-                    self.agents_done_question(wt, t, cx)
+                    self.agents_done_ask(wt, t, cx)
                 });
                 probes.push((
                     wt.clone(),
@@ -4053,7 +4083,8 @@ impl Kyde {
                 .background_executor()
                 .spawn(async move {
                     let mut f = crate::agents::SweepFound::default();
-                    for (wt, spawned, pid, after, question) in probes {
+                    for (wt, spawned, pid, after, ask) in probes {
+                        let question = ask.map(|a| done_question(&wt, &a));
                         let key = (wt, spawned);
                         f.at_prompt
                             .push((key.clone(), crate::agents::shell_is_idle(pid)));
@@ -4082,23 +4113,17 @@ impl Kyde {
         .detach();
     }
 
-    /// The AI check's question about tab `t` of worktree `wt`: its title and prompts (from
-    /// its Claude Code session), its git state, and the last lines on its screen.
-    fn agents_done_question(&self, wt: &Path, t: &AgentTab, cx: &gpui::App) -> String {
-        let ctx = self.agents.contexts.get(wt);
-        let field = |f: Option<&String>| f.map_or("(unknown)".to_string(), |s| clip(s, 400));
+    /// What the AI check needs from the UI about tab `t` of worktree `wt` ([`DoneAsk`]).
+    fn agents_done_ask(&self, wt: &Path, t: &AgentTab, cx: &gpui::App) -> DoneAsk {
         let g = self.agents.git.get(wt).copied().unwrap_or_default();
-        let git = format!(
-            "{} uncommitted change(s), {} commit(s) not pushed",
-            g.changed, g.ahead
-        );
-        crate::agents::done_prompt(
-            &field(ctx.and_then(|c| c.title.as_ref())),
-            &field(ctx.and_then(|c| c.first_prompt.as_ref())),
-            &field(ctx.and_then(|c| c.last_prompt.as_ref())),
-            &git,
-            &t.view.read(cx).tail_text(30),
-        )
+        DoneAsk {
+            session: t.session.clone(),
+            git: format!(
+                "{} uncommitted change(s), {} commit(s) not pushed",
+                g.changed, g.ahead
+            ),
+            tail: t.view.read(cx).tail_text(30),
+        }
     }
 
     /// Decide with what the probe found: mark each tab's `verdict`, and — in Auto mode, not
@@ -10303,5 +10328,39 @@ mod tests {
         assert_eq!(fit_tabs(200.0, &w, 3, 2.0, 22.0), (vec![0, 1, 2, 3], true));
         // Room for two short tabs beside the ▾: CI (active) stays, PRs + Issues go.
         assert_eq!(fit_tabs(110.0, &w, 3, 2.0, 22.0), (vec![0, 3], true));
+    }
+
+    /// The AI's "is this done?" question describes the tab's own session, not the newest in
+    /// its folder (another tab's, or an older one when its agent never started); a tab with
+    /// no session is unknown.
+    #[cfg(feature = "terminal")]
+    #[test]
+    fn done_question_describes_the_tabs_own_session() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let wt = std::env::temp_dir().join(format!("kyde-done-question-{}", std::process::id()));
+        let dir = crate::agents::claude_project_dir(&wt).unwrap();
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = |text: &str| {
+            serde_json::json!({ "type": "user", "message": { "content": text } }).to_string()
+        };
+        std::fs::write(dir.join("mine.jsonl"), prompt("add a personal email field")).unwrap();
+        std::fs::write(dir.join("other.jsonl"), prompt("any npm vulnerabilities")).unwrap();
+        let ask = |session: Option<&str>| DoneAsk {
+            session: session.map(Into::into),
+            git: String::new(),
+            tail: String::new(),
+        };
+
+        let q = done_question(&wt, &ask(Some("mine")));
+        assert!(q.contains("Task: add a personal email field"), "{q}");
+        assert!(!q.contains("npm"), "{q}");
+        let q = done_question(&wt, &ask(None));
+        assert!(q.contains("Task: (unknown)") && !q.contains("npm"), "{q}");
     }
 }

@@ -1127,11 +1127,33 @@ pub(crate) fn read_agent_context(wt: &std::path::Path) -> Option<AgentContext> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "jsonl"))
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .max_by_key(|(t, _)| *t)?;
-    let tail = read_end(&path, TAIL_BYTES, true);
-    let head = read_end(&path, HEAD_BYTES, false);
-    let mut ctx = context_from(&head, &tail, Some(updated));
+    Some(context_of_file(&path, Some(updated)))
+}
+
+/// [`AgentContext`] for Claude Code session `session` in worktree `wt`'s project folder — one
+/// tab's own, where [`read_agent_context`] gives whichever session there is newest. `None`
+/// without that file. File IO: call it off the UI thread.
+pub(crate) fn read_session_context(wt: &std::path::Path, session: &str) -> Option<AgentContext> {
+    // An id is a file name, never a path.
+    if session.is_empty()
+        || !session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return None;
+    }
+    let path = claude_project_dir(wt)?.join(format!("{session}.jsonl"));
+    let updated = std::fs::metadata(&path).ok()?.modified().ok();
+    Some(context_of_file(&path, updated))
+}
+
+/// The context in session file `path`, from its head and tail.
+fn context_of_file(path: &std::path::Path, updated: Option<std::time::SystemTime>) -> AgentContext {
+    let tail = read_end(path, TAIL_BYTES, true);
+    let head = read_end(path, HEAD_BYTES, false);
+    let mut ctx = context_from(&head, &tail, updated);
     ctx.session = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-    Some(ctx)
+    ctx
 }
 
 /// Parse the context out of a session file's `head` and `tail` (JSONL; a line cut by the
