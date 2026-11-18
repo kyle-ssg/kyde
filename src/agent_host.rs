@@ -374,8 +374,7 @@ struct Shared {
     /// Recent output. Its lock also orders a new viewer's replay before any live output.
     ring: Mutex<Ring>,
     viewers: Mutex<Vec<UnixStream>>,
-    /// Attached connections still open: somebody (Kyde) is watching. Not `viewers`: one too
-    /// slow to take output is dropped from that list, but is still there.
+    /// Attached connections still open: somebody (Kyde) is watching.
     watchers: AtomicUsize,
     writer: Mutex<std::fs::File>,
     pty: Mutex<tty::Pty>,
@@ -818,13 +817,26 @@ fn pump(mut master: std::fs::File, shared: &Shared) {
         let mut ring = lock(&shared.ring);
         ring.push(bytes);
         *lock(&shared.last_output) = Instant::now();
-        lock(&shared.viewers).retain_mut(|v| write_frame(v, OUT, bytes).is_ok());
+        broadcast(&mut lock(&shared.viewers), bytes);
     }
+}
+
+/// Live output to every viewer. One that can't take it in time (its write timeout) is
+/// dropped — and hung up on, so it reattaches for a fresh replay: left connected, its typing
+/// would still reach the agent while it never saw another byte.
+fn broadcast(viewers: &mut Vec<UnixStream>, bytes: &[u8]) {
+    viewers.retain_mut(|v| {
+        let ok = write_frame(v, OUT, bytes).is_ok();
+        if !ok {
+            let _ = v.shutdown(std::net::Shutdown::Both);
+        }
+        ok
+    });
 }
 
 /// One connection: an attaching viewer, or a one-shot request (snapshot, input, kill).
 fn serve(mut stream: UnixStream, shared: &Shared) {
-    // A viewer that stops reading is dropped rather than stalling the agent.
+    // A viewer that stops reading is dropped (`broadcast`) rather than stalling the agent.
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let mut frames = FrameReader::default();
     // Whether this connection attached: a watcher until it hangs up.
@@ -849,13 +861,15 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
                     rows,
                 };
                 let hello = serde_json::to_vec(&hello).unwrap_or_default();
-                if write_frame(&mut out, HELLO, &hello).is_ok()
-                    && write_frame(&mut out, OUT, &ring.bytes()).is_ok()
+                if write_frame(&mut out, HELLO, &hello).is_err()
+                    || write_frame(&mut out, OUT, &ring.bytes()).is_err()
                 {
-                    lock(&shared.viewers).push(out);
-                    if !std::mem::replace(&mut attached, true) {
-                        shared.watchers.fetch_add(1, Ordering::Relaxed);
-                    }
+                    // Hang up (a half-sent replay can't be continued): the viewer retries.
+                    break;
+                }
+                lock(&shared.viewers).push(out);
+                if !std::mem::replace(&mut attached, true) {
+                    shared.watchers.fetch_add(1, Ordering::Relaxed);
                 }
                 drop(ring);
                 // Repaint for the new viewer (the replay may start mid-screen).
@@ -949,6 +963,29 @@ mod tests {
         let ws = parse_resize(&p).unwrap();
         assert_eq!((ws.num_cols, ws.num_lines, ws.cell_height), (120, 40, 17));
         assert!(f.next(&mut r).is_err(), "end of stream");
+    }
+
+    /// A viewer that stops reading is dropped from the live output *and* hung up on — left
+    /// connected, it would never see output again while its typing still reached the agent.
+    #[test]
+    fn a_viewer_too_slow_for_its_output_is_hung_up_on() {
+        let (host_end, viewer) = UnixStream::pair().unwrap();
+        host_end
+            .set_write_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        // `serve` keeps reading the connection (its typing) on a handle of its own.
+        let _serving = host_end.try_clone().unwrap();
+        viewer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut viewers = vec![host_end];
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..100 {
+            broadcast(&mut viewers, &chunk);
+        }
+        assert!(viewers.is_empty(), "a full socket drops the viewer");
+        // Past what it was sent, its stream ends instead of going quiet.
+        (&viewer).read_to_end(&mut Vec::new()).unwrap();
     }
 
     #[test]
