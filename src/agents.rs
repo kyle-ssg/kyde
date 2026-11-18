@@ -1308,10 +1308,17 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// Ctrl-U in it would make the shell drop the half-typed line, quote and all, so whatever
 /// follows runs as a command. Prompts carry third-party text (an issue or pull request's
 /// title), so control characters are dropped here, for every one of them.
+///
+/// It's typed before the shell is up, and macOS's tty drops whatever passes ~1024 bytes of
+/// one line — the closing quote and Enter with it, so the agent never starts. Each line of
+/// the prompt is wrapped to [`PROMPT_LINE_MAX`] (a paragraph `ky agent new` is handed is
+/// one line).
 pub(crate) fn seeded_line(cmd: &str, prompt: &str) -> String {
+    let mut wrapped = String::new();
+    push_wrapped(&mut wrapped, "", &typeable(prompt));
     format!(
         r"printf '\033[H\033[2J\033[3J'; {cmd} {}",
-        shell_quote(&typeable(prompt))
+        shell_quote(wrapped.trim_end())
     )
 }
 
@@ -1327,9 +1334,9 @@ pub(crate) struct Feedback {
     pub comments: Vec<(String, String)>,
 }
 
-/// A hand-off prompt's longest line, counting `'` and `\` as the 4 bytes `shell_quote` makes
-/// of each: a new agent's prompt is typed into its shell, and macOS's tty mangles a line past
-/// ~1024 bytes.
+/// A seed prompt's longest line, counting `'` and `\` as the 4 bytes `shell_quote` makes of
+/// each: a new agent's prompt is typed into its shell, and macOS's tty mangles a line past
+/// ~1024 bytes (`seeded_line`).
 pub(crate) const PROMPT_LINE_MAX: usize = 400;
 /// The most of one comment handed over (bytes); a longer one is cut.
 const FEEDBACK_BODY_MAX: usize = 4000;
@@ -2066,6 +2073,25 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(out.stdout, b"\x1b[H\x1b[2J\x1b[3Jit's a review");
+    }
+
+    /// A one-paragraph prompt (what `ky agent new --prompt` is usually handed) is typed as
+    /// lines macOS's tty takes whole, and still reaches the command word for word.
+    #[test]
+    fn a_long_seed_prompt_is_typed_in_lines_the_tty_keeps() {
+        let prompt = format!("{}it's the end", "word ".repeat(400));
+        let line = seeded_line("printf %s", &prompt);
+        assert!(line.lines().all(|l| l.len() < 1024), "{line}");
+        let out = std::process::Command::new("sh")
+            .args(["-c", &line])
+            .output()
+            .unwrap();
+        let got = String::from_utf8(out.stdout).unwrap();
+        let got = got.strip_prefix("\x1b[H\x1b[2J\x1b[3J").unwrap();
+        assert!(
+            got.split_whitespace().eq(prompt.split_whitespace()),
+            "{got}"
+        );
     }
 
     /// A pull request titled to break out of the quotes (Ctrl-U kills the typed line, then

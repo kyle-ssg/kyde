@@ -734,10 +734,7 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         }
     }
     let master = pty.file().try_clone()?;
-    let mut writer = pty.file().try_clone()?;
-    if let Some(line) = &spec.line {
-        writer.write_all(format!("{line}\n").as_bytes())?;
-    }
+    let writer = pty.file().try_clone()?;
     let shared = Arc::new(Shared {
         id: spec.id.clone(),
         ring: Mutex::new(Ring::default()),
@@ -785,6 +782,17 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
     {
         let shared = Arc::clone(&shared);
         std::thread::spawn(move || watch(&shared));
+    }
+    // Typed beside `pump`, never before it: past ~1 KB the write waits for the shell to read,
+    // and a starting shell can't while its prompt is stuck in output nobody drains. The
+    // writer is held until it's all in, so a viewer's keys land after it.
+    if let Some(line) = spec.line {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            if let Err(e) = lock(&shared.writer).write_all(format!("{line}\n").as_bytes()) {
+                eprintln!("kyde agent host: typing the start line: {e}");
+            }
+        });
     }
     pump(master, &shared);
     // The agent's terminal closed: let a `KILL` under way know, and outlast it.
