@@ -692,7 +692,7 @@ impl Kyde {
             MenuTarget::AgentRow(wt) => out = self.agents_row_menu(wt),
             MenuTarget::AgentSpace(space) => out = self.agents_space_menu(space),
             MenuTarget::AgentGroup(id) => out = self.agents_group_menu(*id),
-            MenuTarget::AgentsAdd => out = Self::agents_add_menu(),
+            MenuTarget::AgentsAdd => out = self.agents_add_menu(),
             #[cfg(feature = "terminal")]
             MenuTarget::AgentTab(wt, id) => out = self.agents_tab_menu(wt, id),
             // One menu of the menu bar (Linux).
@@ -801,11 +801,15 @@ impl Kyde {
                                 let lit = menu.sub_hl == Some(j);
                                 self.menu_entry(e, (i, Some(j)), lit, cx)
                             });
+                            // A menu standing on the window's bottom (the Agents ⊕) flies
+                            // out upward too, so a long flyout isn't cut off below.
+                            let up = matches!(menu.target, MenuTarget::AgentsAdd);
                             wrap = wrap.child(
                                 panel_chrome(div())
                                     .absolute()
                                     .left_full()
-                                    .top_0()
+                                    .when(up, gpui::Styled::bottom_0)
+                                    .when(!up, gpui::Styled::top_0)
                                     .ml(px(4.0))
                                     .min_w(px(150.0))
                                     .children(flyout),

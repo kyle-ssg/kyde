@@ -94,6 +94,9 @@ pub struct SavedTab {
     /// A name you gave it (else it's titled by its agent).
     #[serde(default)]
     pub name: Option<String>,
+    /// It continues a claude.ai/code cloud session (`--teleport`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub teleported: bool,
 }
 
 /// What each worktree row in the sidebar shows (besides its status dot).
@@ -656,16 +659,15 @@ pub fn scratch_dir() -> PathBuf {
 }
 
 /// Where a new linked worktree named `name` for `space` is checked out:
-/// `~/.kyde/worktrees/<space folder name>/<name>`.
+/// `~/.kyde/worktrees/<space folder name>/<name>` — beside [`agents_dir`], like
+/// [`scratch_dir`] (so tests' throwaway `$KYDE_AGENTS_DIR` moves it too).
 #[must_use]
 pub fn worktree_path(space: &Path, name: &str) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let group = space
         .file_name()
         .map_or_else(|| "space".into(), |n| n.to_string_lossy().into_owned());
-    PathBuf::from(home)
-        .join(".kyde")
-        .join("worktrees")
+    agents_dir()
+        .with_file_name("worktrees")
         .join(group)
         .join(name)
 }

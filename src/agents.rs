@@ -1918,6 +1918,7 @@ mod tests {
             session: session.map(Into::into),
             id: Some(id.into()),
             name: name.map(Into::into),
+            ..Default::default()
         };
         let saved = vec![
             tab("reopen-live", true, Some("live"), None),
@@ -1935,6 +1936,7 @@ mod tests {
                     session: Some("its-latest".into()),
                     id: None,
                     name: Some("Fix login".into()),
+                    ..Default::default()
                 },
                 SavedTab::default(),
             ]
