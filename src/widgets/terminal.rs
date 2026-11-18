@@ -157,10 +157,11 @@ enum Backend {
             alacritty_terminal::event_loop::State,
         )>,
     },
-    /// An agent host's PTY (see `agent_host`), over its socket — it outlives this view.
+    /// An agent host's PTY (see `agent_host`), over its socket — it outlives this view. Shared
+    /// with the reader thread, which swaps in a new connection when it reattaches.
     #[cfg(unix)]
     Host {
-        stream: std::sync::Mutex<std::os::unix::net::UnixStream>,
+        stream: Arc<std::sync::Mutex<std::os::unix::net::UnixStream>>,
     },
 }
 
@@ -183,11 +184,11 @@ impl Backend {
             Self::Local { notifier, .. } => notifier.on_resize(ws),
             #[cfg(unix)]
             Self::Host { stream, .. } => {
-                let s = stream
-                    .get_mut()
+                let mut s = stream
+                    .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = crate::agent_host::write_frame(
-                    s,
+                    &mut *s,
                     crate::agent_host::RESIZE,
                     &crate::agent_host::resize_payload(ws),
                 );
@@ -510,17 +511,40 @@ impl TerminalView {
         Ok((stream, reader))
     }
 
-    /// A view on an agent host's terminal (see `agent_host`), over a [`Self::connect_host`]
+    /// A view on agent host `id`'s terminal (see `agent_host`), over a [`Self::connect_host`]
     /// connection: its recent output is replayed, then it streams live.
     #[cfg(unix)]
     pub fn attach(
-        (stream, mut reader): (
+        id: &str,
+        conn: (
             std::os::unix::net::UnixStream,
             std::os::unix::net::UnixStream,
         ),
         cx: &mut Context<Self>,
     ) -> Self {
+        let id = id.to_string();
+        Self::attach_with(conn, move || Self::connect_host(&id), cx)
+    }
+
+    /// [`Self::attach`], reattaching with `reconnect` when the host hangs up without `EXIT` —
+    /// it drops a view that falls behind (`agent_host::broadcast`). The tab closes only once
+    /// the agent's terminal has, or its host is gone.
+    #[cfg(unix)]
+    fn attach_with(
+        (stream, mut reader): (
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::UnixStream,
+        ),
+        mut reconnect: impl FnMut() -> std::io::Result<(
+                std::os::unix::net::UnixStream,
+                std::os::unix::net::UnixStream,
+            )> + Send
+            + 'static,
+        cx: &mut Context<Self>,
+    ) -> Self {
         use crate::agent_host as host;
+        type Parser =
+            alacritty_terminal::vte::ansi::Processor<alacritty_terminal::vte::ansi::StdSyncHandler>;
         let (tx, rx) = unbounded::<AlacEvent>();
         let proxy = EventProxy(tx);
         let term = Arc::new(FairMutex::new(Term::new(
@@ -529,13 +553,16 @@ impl TerminalView {
             proxy.clone(),
         )));
         let pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let stream = Arc::new(std::sync::Mutex::new(stream));
         {
             let (term, pid) = (term.clone(), pid.clone());
+            // Weak: once the view (and its backend) is gone, nothing reattaches.
+            let writer = Arc::downgrade(&stream);
             std::thread::spawn(move || {
-                let mut parser: alacritty_terminal::vte::ansi::Processor<
-                    alacritty_terminal::vte::ansi::StdSyncHandler,
-                > = alacritty_terminal::vte::ansi::Processor::new();
+                let mut parser = Parser::new();
                 let mut frames = host::FrameReader::default();
+                // This connection got its HELLO: a hang-up after that is worth reattaching.
+                let mut served = false;
                 loop {
                     // A synchronized update left open is flushed at its deadline.
                     let wait = parser.sync_timeout().sync_timeout().map(|d| {
@@ -545,6 +572,7 @@ impl TerminalView {
                     let _ = reader.set_read_timeout(wait);
                     match frames.next(&mut reader) {
                         Ok(Some((host::HELLO, json))) => {
+                            served = true;
                             if let Ok(h) = serde_json::from_slice::<host::HostHello>(&json) {
                                 pid.store(h.pid, std::sync::atomic::Ordering::Relaxed);
                                 // Replay at the size it was drawn at.
@@ -556,29 +584,41 @@ impl TerminalView {
                             parser.advance(&mut *term.lock(), &bytes);
                             proxy.send_event(AlacEvent::Wakeup);
                         }
+                        // The agent's terminal closed: so does the tab.
+                        Ok(Some((host::EXIT, _))) => {
+                            proxy.send_event(AlacEvent::Exit);
+                            break;
+                        }
                         Ok(Some(_)) => {}
                         Ok(None) => {
                             parser.stop_sync(&mut *term.lock());
                             proxy.send_event(AlacEvent::Wakeup);
                         }
-                        // EXIT, or the host went away: the tab closes.
+                        // Hung up on: attach again for a fresh replay. Only a host that's gone
+                        // (or never served this connection) closes the tab.
                         Err(_) => {
-                            proxy.send_event(AlacEvent::Exit);
-                            break;
+                            let again = writer
+                                .upgrade()
+                                .filter(|_| served)
+                                .and_then(|w| Some((w, reconnect().ok()?)));
+                            let Some((w, (s, r))) = again else {
+                                proxy.send_event(AlacEvent::Exit);
+                                break;
+                            };
+                            *w.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = s;
+                            reader = r;
+                            frames = host::FrameReader::default();
+                            parser = Parser::new();
+                            served = false;
+                            // The replay draws everything again, onto a clean slate (RIS).
+                            parser.advance(&mut *term.lock(), b"\x1bc");
                         }
                     }
                 }
             });
         }
         Self::pump_events(rx, cx);
-        Self::build(
-            term,
-            Backend::Host {
-                stream: std::sync::Mutex::new(stream),
-            },
-            pid,
-            cx,
-        )
+        Self::build(term, Backend::Host { stream }, pid, cx)
     }
 
     /// Foreground pump: drain IO-thread events into entity updates (repaint, write-back).
@@ -3414,6 +3454,69 @@ mod tests {
         assert!(passwd_shell().is_none_or(|s| s.starts_with('/')));
     }
 
+    /// A view on a fake host's end of a socket pair, with no host to reattach to.
+    #[cfg(unix)]
+    fn on_fake_host(
+        conn: (
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::UnixStream,
+        ),
+        cx: &mut Context<TerminalView>,
+    ) -> TerminalView {
+        TerminalView::attach_with(conn, || Err(std::io::ErrorKind::NotFound.into()), cx)
+    }
+
+    /// A host that hangs up without EXIT (it dropped this view for falling behind) is attached
+    /// again: a fresh replay, typing that reaches the agent — not a tab frozen on old output.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_host_hanging_up_is_reattached_with_a_fresh_replay(cx: &mut gpui::TestAppContext) {
+        use crate::agent_host as host;
+        use std::os::unix::net::UnixStream;
+        let hello = serde_json::to_vec(&host::HostHello {
+            version: host::VERSION,
+            pid: 1,
+            cols: 80,
+            rows: 24,
+        })
+        .unwrap();
+        let (mut first, ours) = UnixStream::pair().unwrap();
+        let (mut second, again) = UnixStream::pair().unwrap();
+        let mut again = Some(again);
+        let view = cx.new(|cx| {
+            TerminalView::attach_with(
+                (ours.try_clone().unwrap(), ours),
+                move || {
+                    let s = again.take().ok_or(std::io::ErrorKind::NotFound)?;
+                    Ok((s.try_clone()?, s))
+                },
+                cx,
+            )
+        });
+        host::write_frame(&mut first, host::HELLO, &hello).unwrap();
+        host::write_frame(&mut first, host::OUT, b"stale").unwrap();
+        drop(first);
+        host::write_frame(&mut second, host::HELLO, &hello).unwrap();
+        host::write_frame(&mut second, host::OUT, b"replayed").unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while view.read_with(cx, |v, _| v.tail_text(5)) != "replayed" {
+            assert!(Instant::now() < deadline, "never reattached");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cx.run_until_parked();
+        assert!(!view.read_with(cx, |v, _| v.exited), "the tab stays open");
+        view.update(cx, |v, _| v.backend.write(b"y".to_vec().into()));
+        second
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(
+            host::FrameReader::default().next(&mut second).unwrap(),
+            Some((host::INPUT, b"y".to_vec())),
+            "typing goes to the new connection"
+        );
+    }
+
     /// A host's HELLO that lands after the first paint puts the grid back at the host's size;
     /// the next paint must restore the panel's size, or the agent's lines wrap until a resize.
     #[cfg(unix)]
@@ -3422,7 +3525,7 @@ mod tests {
         use crate::agent_host as host;
         let (mut fake_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
         let reader = ours.try_clone().unwrap();
-        let view = cx.new(|cx| TerminalView::attach((ours, reader), cx));
+        let view = cx.new(|cx| on_fake_host((ours, reader), cx));
         let grid = |cx: &mut gpui::TestAppContext| {
             view.read_with(cx, |v, _| {
                 let t = v.term.lock();
@@ -3457,7 +3560,7 @@ mod tests {
         use crate::agent_host as host;
         let (mut fake_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
         let reader = ours.try_clone().unwrap();
-        let view = cx.new(|cx| TerminalView::attach((ours, reader), cx));
+        let view = cx.new(|cx| on_fake_host((ours, reader), cx));
         let cols =
             |cx: &mut gpui::TestAppContext| view.read_with(cx, |v, _| v.term.lock().columns());
         let t0 = Instant::now();
@@ -3498,7 +3601,7 @@ mod tests {
     fn cmd_over_a_url_marks_it_as_a_link(cx: &mut gpui::TestAppContext) {
         let (_host, ours) = std::os::unix::net::UnixStream::pair().unwrap();
         let reader = ours.try_clone().unwrap();
-        let (view, vcx) = cx.add_window_view(|_w, cx| TerminalView::attach((ours, reader), cx));
+        let (view, vcx) = cx.add_window_view(|_w, cx| on_fake_host((ours, reader), cx));
         view.update(vcx, |v, _| {
             let mut p: alacritty_terminal::vte::ansi::Processor =
                 alacritty_terminal::vte::ansi::Processor::new();

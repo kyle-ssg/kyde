@@ -2575,7 +2575,7 @@ impl Kyde {
             let conn = crate::agent_host::spawn(&spec)
                 .and_then(|()| terminal::TerminalView::connect_host(id));
             match conn {
-                Ok(conn) => Some(cx.new(|cx| terminal::TerminalView::attach(conn, cx))),
+                Ok(conn) => Some(cx.new(|cx| terminal::TerminalView::attach(id, conn, cx))),
                 Err(e) => {
                     self.agents.note = Some(format!(
                         "Couldn't start the agent host ({e}) — this tab ends when Kyde quits"
@@ -2604,7 +2604,7 @@ impl Kyde {
         let Ok(conn) = terminal::TerminalView::connect_host(id) else {
             return false;
         };
-        let view = cx.new(|cx| terminal::TerminalView::attach(conn, cx));
+        let view = cx.new(|cx| terminal::TerminalView::attach(id, conn, cx));
         self.agents_add_tab(
             wt,
             view,
