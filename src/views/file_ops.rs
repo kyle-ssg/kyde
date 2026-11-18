@@ -220,10 +220,13 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Open the "rename" prompt for `path` (rel), pre-filled with its current name.
+    /// Open the "rename" prompt for `path` (rel), pre-filled with its current name and the
+    /// part you'd retype selected: a file's name up to its extension (`main` of `main.rs`), a
+    /// folder's (or a dotfile's, `.gitignore`) whole name.
     pub(crate) fn start_rename(
         &mut self,
         path: PathBuf,
+        is_dir: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -232,9 +235,15 @@ impl Kyde {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let stem = match cur.rfind('.') {
+            Some(dot) if dot > 0 && !is_dir => dot,
+            _ => cur.len(),
+        };
         self.name_prompt = Some(NamePrompt::Rename(path));
-        self.name_input
-            .update(cx, |e, cx| e.set_content(cur, Lang::PlainText, cx));
+        self.name_input.update(cx, |e, cx| {
+            e.set_content(cur, Lang::PlainText, cx);
+            e.select_range(0..stem, cx);
+        });
         let handle = self.name_input.read(cx).focus_handle.clone();
         window.focus(&handle);
         window.defer(cx, move |window, _cx| window.focus(&handle));

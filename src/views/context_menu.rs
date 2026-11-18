@@ -504,7 +504,7 @@ impl Kyde {
                 // Rename / Delete — a folder rename carries its whole subtree.
                 let (pn, pd) = (p.clone(), p.clone());
                 out.push(MenuEntry::item("Rename…", move |this, window, cx| {
-                    this.start_rename(pn.clone(), window, cx);
+                    this.start_rename(pn.clone(), is_dir, window, cx);
                 }));
                 out.push(MenuEntry::item("Delete…", move |this, _w, cx| {
                     this.open_delete(pd.clone(), cx);
@@ -1031,7 +1031,8 @@ fn menu_row(
 ) -> gpui::Stateful<gpui::Div> {
     let t = theme::get();
     div()
-        .id(id)
+        .id(id.clone())
+        .debug_selector(move || id.to_string())
         .flex()
         .flex_row()
         .items_center()
