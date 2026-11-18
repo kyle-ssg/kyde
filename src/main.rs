@@ -5325,6 +5325,26 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// Renaming a file opens with its name up to the extension selected, so typing replaces
+    /// just that (#229).
+    #[gpui::test]
+    fn rename_prompt_types_over_the_file_stem(cx: &mut TestAppContext) {
+        let (handle, _dir) = boot(cx);
+        handle
+            .update(cx, |k, w, cx| {
+                k.start_rename(PathBuf::from("app.tsx"), false, w, cx);
+            })
+            .unwrap();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        cx.simulate_input(handle.into(), "main");
+        handle
+            .update(cx, |k, _w, cx| {
+                assert_eq!(k.name_input.read(cx).text(), "main.tsx");
+            })
+            .unwrap();
+    }
+
     /// Tree drag & drop (issue #65): dropping a file onto a folder moves it there; a
     /// drop that's a no-op (already in that folder) or into a folder's own subtree is
     /// refused so it can't destroy the source.
