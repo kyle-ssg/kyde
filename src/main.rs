@@ -8795,6 +8795,56 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A worktree with nothing uncommitted or unpushed isn't finished while its agent is
+    /// still on the task between turns (an open PR, your next prompt): its × asks, and the
+    /// Clean Up window doesn't tick it — until the cleanup finds its tab finished.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_keeps_a_worktree_whose_agent_isnt_finished(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("task");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "task"],
+        );
+        // Its branch is on the remote: nothing to push.
+        git(&dir, &["update-ref", "refs/remotes/origin/task", "HEAD"]);
+        let wt = wt.canonicalize().unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents_new_tab(wt.clone(), true, None, cx);
+                // Off screen: the checkout is the one shown.
+                k.agents_select(dir.clone(), cx);
+                k.agents.git.insert(wt.clone(), agents::WtGit::default());
+                k.agents_confirm_remove(dir.clone(), wt.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.remove_wt_win.is_some(), "its agent isn't finished: asks");
+                k.agents.removing = None;
+                k.close_modal_window(ModalKind::RemoveWorktree, cx);
+                // The Clean Up window's pass finds the tab finished: its agent quit an hour ago.
+                let mut found = agents::SweepFound::default();
+                let t = &mut k.agents.tabs.get_mut(&wt).unwrap().tabs[0];
+                t.unseen = false;
+                t.shown = agents::AgentState::Idle;
+                t.last_active = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_hours(1))
+                    .unwrap();
+                found.at_prompt.push(((wt.clone(), t.spawned_at), true));
+                assert!(!k.agents.cleanup_checked.contains(&wt));
+                k.agents_apply_sweep(found, true, cx);
+                assert!(k.agents.cleanup_checked.contains(&wt), "now it's ticked");
+            })
+            .unwrap();
+    }
+
     /// A pinned worktree is left alone by the cleanup: a tab there the rules would close
     /// stays open, unmarked — until it's unpinned.
     #[cfg(feature = "terminal")]
