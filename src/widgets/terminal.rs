@@ -779,24 +779,7 @@ impl TerminalView {
     /// The last `max_lines` non-blank lines of the live screen, as plain text (what the agent
     /// last showed — fed to the cleanup's AI check).
     pub fn tail_text(&self, max_lines: usize) -> String {
-        let term = self.term.lock();
-        let grid = term.grid();
-        let (rows, cols) = (grid.screen_lines(), grid.columns());
-        let mut lines: Vec<String> = (0..rows)
-            .map(|l| {
-                let row = &grid[Line(i32::try_from(l).unwrap_or(0))];
-                (0..cols)
-                    .map(|c| row[Column(c)].c)
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect();
-        while lines.last().is_some_and(String::is_empty) {
-            lines.pop();
-        }
-        let start = lines.len().saturating_sub(max_lines);
-        lines[start..].join("\n")
+        tail_text(&*self.term.lock(), max_lines)
     }
 
     /// Everything it has shown — scrollback and screen — as plain text (trailing blanks
@@ -3272,6 +3255,40 @@ fn prompt_suggestion<T>(term: &Term<T>) -> Option<(String, GridPoint)> {
     Some((text.split_whitespace().collect::<Vec<_>>().join(" "), end))
 }
 
+/// The last `max_lines` non-blank lines of `term`'s live screen, as plain text. Claude's prompt
+/// suggestion is left out: nobody sent it, but as plain text it reads as a prompt typed into
+/// the box, and a model judging the tab takes it for something you asked.
+fn tail_text<T>(term: &Term<T>, max_lines: usize) -> String {
+    let grid = term.grid();
+    let (rows, cols) = (grid.screen_lines(), grid.columns());
+    // The box rows its suggestion is on: the cursor's, down to where it ends.
+    let suggested = prompt_suggestion(term).map(|(_, end)| grid.cursor.point.line..=end.line);
+    let mut lines: Vec<String> = (0..rows)
+        .map(|l| {
+            let line = Line(i32::try_from(l).unwrap_or(0));
+            let greyed = suggested.as_ref().is_some_and(|r| r.contains(&line));
+            let row = &grid[line];
+            (0..cols)
+                .map(|c| &row[Column(c)])
+                .map(|cell| {
+                    if greyed && cell.flags.contains(Flags::DIM) {
+                        ' '
+                    } else {
+                        cell.c
+                    }
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
 /// What a key does to Claude's prompt suggestion, drawn as if typed into its box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OnSuggestion {
@@ -4188,6 +4205,25 @@ mod tests {
             Some(("yes commit it".into(), GridPoint::new(Line(1), Column(15))))
         );
         assert_eq!(box_with("yes commit it"), None);
+    }
+
+    /// What the AI checks read of a tab leaves Claude's suggestion out — it was never sent —
+    /// and keeps the same words when you typed them.
+    #[test]
+    fn tail_text_leaves_out_claude_prompt_suggestion() {
+        let tail = |text: &str| {
+            let bytes =
+                format!("All done.\r\n\u{276f}\u{a0}{text}\r\n\u{2500}\u{2500}\r\x1b[2C\x1b[1A");
+            tail_text(&term_with(40, 4, bytes.as_bytes()), 4)
+        };
+        assert_eq!(
+            tail("\x1b[2mwatch the deploy\x1b[22m"),
+            "All done.\n\u{276f}\n\u{2500}\u{2500}"
+        );
+        assert_eq!(
+            tail("watch the deploy"),
+            "All done.\n\u{276f}\u{a0}watch the deploy\n\u{2500}\u{2500}"
+        );
     }
 
     /// Enter on a suggestion sends it, as it would typed text — Claude alone submits nothing.
