@@ -913,6 +913,63 @@ impl Repo {
         args.len() == 5 || git(&self.root, &args).is_ok()
     }
 
+    /// How many commits HEAD has that `commit` doesn't — `0` when everything on this branch
+    /// is in it (HEAD is `commit` or one of its ancestors). `None` when `commit` isn't in
+    /// this repository (never fetched): it can't be told then.
+    pub fn commits_past(&self, commit: &str) -> Option<usize> {
+        let range = format!("{}..HEAD", valid_ref(commit).ok()?);
+        git(&self.root, &["rev-list", "--count", &range])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// How many of `files` (working-tree files, as paths from the repository root) are
+    /// `rev`'s copy of the same path, byte for byte — deleting those loses nothing `rev`
+    /// doesn't have. Compared as git would store them (line-ending and filter attributes
+    /// applied). `0` when it can't be told.
+    pub fn same_as(&self, rev: &str, files: &[&Path]) -> usize {
+        let Ok(rev) = valid_ref(rev) else {
+            return 0;
+        };
+        let paths: Vec<String> = files
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        if paths.is_empty() {
+            return 0;
+        }
+        // `rev`'s files at those paths, as `<mode> blob <oid>\t<path>` records.
+        let mut args = vec!["ls-tree", "-z", rev, "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let Ok(listed) = git(&self.root, &args) else {
+            return 0;
+        };
+        let theirs: Vec<(&str, &str)> = listed
+            .split('\0')
+            .filter_map(|rec| {
+                let (meta, path) = rec.split_once('\t')?;
+                let mut it = meta.split(' ');
+                let (mode, kind, oid) = (it.next()?, it.next()?, it.next()?);
+                (kind == "blob" && mode.starts_with("100")).then_some((path, oid))
+            })
+            .collect();
+        if theirs.is_empty() {
+            return 0;
+        }
+        // The same paths here, hashed the way `git add` would store them.
+        let mut args = vec!["hash-object", "--"];
+        args.extend(theirs.iter().map(|(path, _)| *path));
+        let Ok(ours) = git(&self.root, &args) else {
+            return 0;
+        };
+        ours.lines()
+            .zip(&theirs)
+            .filter(|(mine, (_, oid))| mine == oid)
+            .count()
+    }
+
     /// Refresh one remote-tracking branch (`origin/main` → `git fetch origin main`). Never
     /// prompts for credentials (it runs in the background): a fetch that would need them fails.
     pub fn fetch_remote_branch(&self, remote_ref: &str) -> Result<()> {
