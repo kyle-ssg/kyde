@@ -883,6 +883,32 @@ impl TerminalView {
         }
     }
 
+    /// Whether Claude Code's input box is empty — a greyed suggestion or hint doesn't count —
+    /// so a command sent now arrives on its own rather than added to a draft. `None` when the
+    /// cursor isn't in the box: a dialog (a permission prompt, a picker) stands in for it.
+    pub fn claude_box_empty(&self) -> Option<bool> {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let at = grid.cursor.point;
+        if !term.mode().contains(TermMode::SHOW_CURSOR) {
+            return None;
+        }
+        // Up from the cursor to the box's `❯ ` row, over the indented rows of a draft.
+        let mut line = at.line;
+        while grid[line][Column(0)].c != PROMPT_MARK {
+            if grid[line][Column(0)].c != ' ' || line <= grid.topmost_line() {
+                return None;
+            }
+            line = Line(line.0 - 1);
+        }
+        let cell = &grid[at.line][at.column];
+        Some(
+            line == at.line
+                && at.column.0 == 2
+                && (matches!(cell.c, ' ' | '\0' | '\u{a0}') || cell.flags.contains(Flags::DIM)),
+        )
+    }
+
     /// Claude's prompt suggestion on screen, unless it's the one already accepted for you.
     fn open_suggestion(&self, term: &Term<EventProxy>) -> Option<(String, GridPoint)> {
         if !self.claude_done {

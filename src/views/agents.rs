@@ -18,6 +18,8 @@ mod ci;
 mod context;
 #[cfg(feature = "terminal")]
 mod find;
+#[cfg(feature = "terminal")]
+mod quick_actions;
 
 /// How often the status/cleanup ticker runs, and how many ticks between cleanup sweeps.
 #[cfg(feature = "terminal")]
@@ -49,6 +51,13 @@ const CONTEXT_EVERY_TICKS: u32 = 5 * 60;
 /// …and once this long after a tab's first prompt (time for Claude Code to title it).
 #[cfg(feature = "terminal")]
 const TITLE_AFTER_PROMPT: Duration = Duration::from_secs(15);
+/// How long after a prompt is sent its tab's model is read again — time for a `/model` to
+/// have run and Claude Code to have recorded the switch.
+#[cfg(feature = "terminal")]
+const MODEL_AFTER_SUBMIT: Duration = Duration::from_secs(1);
+/// Height of the strip along an agent tab's bottom edge that holds its model.
+#[cfg(feature = "terminal")]
+const MODEL_STRIP_H: f32 = 24.0;
 /// An agent tab this new, with no hook report yet, counts as alive: its agent is starting.
 #[cfg(feature = "terminal")]
 const FEEDBACK_STARTING: Duration = Duration::from_mins(1);
@@ -2831,6 +2840,10 @@ impl Kyde {
             woken: false,
             spawned_at,
             session,
+            transcript: None,
+            model: None,
+            actions: Vec::new(),
+            actions_for: None,
             teleported: false,
             verdict: None,
             ai: None,
@@ -3267,12 +3280,49 @@ impl Kyde {
         tab.used = true;
         // You typed this one (its hook report may come too late to say so).
         tab.woken = false;
-        if !tab.agent || !(first || untitled) {
+        let agent = tab.agent;
+        // It may have been a `/model`, which reports nothing once it has run: the model is
+        // read again a moment later.
+        let reread = agent
+            .then(|| Some((tab.id.clone(), tab.transcript.clone()?)))
+            .flatten();
+        if let Some((id, transcript)) = reread {
+            self.agents_reread_model(id, transcript, cx);
+        }
+        if !agent || !(first || untitled) {
             return;
         }
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TITLE_AFTER_PROMPT).await;
             this.update(cx, Self::agents_refresh_contexts).ok();
+        })
+        .detach();
+    }
+
+    /// Read tab `id`'s model from its session file `transcript` again, once a prompt sent to it
+    /// has had time to run.
+    fn agents_reread_model(&mut self, id: String, transcript: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(MODEL_AFTER_SUBMIT).await;
+            let read = cx
+                .background_executor()
+                .spawn(async move { crate::agents::read_session_model(&transcript) });
+            let Some(model) = read.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let tab = this
+                    .agents
+                    .tabs
+                    .values_mut()
+                    .flat_map(|g| g.tabs.iter_mut())
+                    .find(|t| t.id == id);
+                if let Some(t) = tab.filter(|t| t.model.as_ref() != Some(&model)) {
+                    t.model = Some(model);
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -3336,6 +3386,7 @@ impl Kyde {
         if self.mode == Mode::Agents && gh_tab == SideTab::Code {
             self.agents_refresh_row_ci(ticks, cx);
         }
+        self.agents_pick_actions(cx);
         if self.mode == Mode::Agents
             && ticks.is_multiple_of(SUB_AGE_TICKS)
             && self.agents.selected.as_deref().is_some_and(|w| {
@@ -3464,7 +3515,7 @@ impl Kyde {
                                 )
                             });
                             if Some(m) == seen {
-                                let (state, moved, wrote) = (None, None, None);
+                                let (state, moved, wrote, model) = (None, None, None, None);
                                 return Some(HookRead {
                                     wt,
                                     id,
@@ -3474,6 +3525,7 @@ impl Kyde {
                                     subs,
                                     session,
                                     follow,
+                                    model,
                                 });
                             }
                             // Its latest write, read again only when there's a new one.
@@ -3492,6 +3544,22 @@ impl Kyde {
                             let last = wrote.as_ref().map_or(kept, |(_, w)| w.clone());
                             let moved =
                                 crate::agents::moved_worktree(&wt, report.as_ref(), last.as_ref());
+                            // Its model, once a turn is over (or the session's just begun):
+                            // the session's own say, else what a fresh one started on.
+                            let model = report
+                                .as_ref()
+                                .filter(|r| {
+                                    use crate::agents::Hook;
+                                    matches!(r.hook, Hook::Ready | Hook::Done)
+                                })
+                                .and_then(|r| {
+                                    r.transcript
+                                        .as_deref()
+                                        .and_then(crate::agents::read_session_model)
+                                        .or_else(|| {
+                                            r.model.as_deref().map(crate::agents::model_label)
+                                        })
+                                });
                             let state = Some((m, report));
                             Some(HookRead {
                                 wt,
@@ -3502,6 +3570,7 @@ impl Kyde {
                                 subs,
                                 session,
                                 follow,
+                                model,
                             })
                         })
                         .collect()
@@ -3524,6 +3593,7 @@ impl Kyde {
         let active = self.agents.window_active;
         let (mut learned, mut sound, mut moves) = (false, None, Vec::new());
         let (mut subs_changed, mut stopped, mut live) = (false, Vec::new(), Vec::new());
+        let mut model_changed = false;
         // Worktrees with review feedback waiting, whose agents just reported: each may be free
         // for it now. (Only these — a busy check for every queue each tick would spawn `pgrep`s.)
         let mut waiting: Vec<PathBuf> = found
@@ -3543,6 +3613,7 @@ impl Kyde {
             subs,
             session,
             follow,
+            model,
         } in found
         {
             let Some(g) = self.agents.tabs.get_mut(&wt) else {
@@ -3596,7 +3667,14 @@ impl Kyde {
             if wrote.is_some() {
                 t.wrote = wrote;
             }
+            if let Some(m) = model.filter(|m| t.model.as_ref() != Some(m)) {
+                t.model = Some(m);
+                model_changed = true;
+            }
             let Some(r) = report else { continue };
+            if r.transcript.is_some() {
+                t.transcript.clone_from(&r.transcript);
+            }
             if let Some(s) = r.session.filter(|s| t.session.as_ref() != Some(s)) {
                 t.session = Some(s);
                 learned = true;
@@ -3626,6 +3704,13 @@ impl Kyde {
             let at = Instant::now().checked_sub(age).unwrap_or_else(Instant::now);
             let done = r.hook == Hook::Done;
             t.view.update(cx, |v, cx| v.set_claude_done(done, cx));
+            // The same finished turn reported again (Claude's idle reminder) keeps the quick
+            // actions picked for it — no second pick.
+            if let (true, Some((Hook::Done, was))) = (done, &t.hook) {
+                if t.actions_for == Some(*was) {
+                    t.actions_for = Some(at);
+                }
+            }
             t.hook = Some((r.hook, at));
         }
         if let Some(s) = sound {
@@ -3638,6 +3723,9 @@ impl Kyde {
             self.agents_move_tab(&from, &id, to, cx);
         }
         self.agents_keep_done(stopped, &live, cx);
+        if model_changed {
+            cx.notify();
+        }
         if subs_changed {
             // A feed you're at the bottom of follows its newest step.
             let h = &self.agents.sub_scroll;
@@ -8227,6 +8315,154 @@ impl Kyde {
             .collect()
     }
 
+    /// An agent tab's model menu: the models to switch it to (its own ticked) and Claude Code's
+    /// own picker for the rest — or, when it can't switch right now, `why`.
+    #[cfg(feature = "terminal")]
+    pub(crate) fn agents_model_menu(
+        &self,
+        wt: &Path,
+        id: &str,
+        why: Option<&'static str>,
+    ) -> Vec<MenuEntry> {
+        if let Some(why) = why {
+            return vec![MenuEntry::Note(why.into())];
+        }
+        let model = self
+            .agents
+            .tabs
+            .get(wt)
+            .and_then(|g| g.tabs.iter().find(|t| t.id == id))
+            .and_then(|t| t.model.as_deref());
+        // "Opus 5.5" is the Opus family's.
+        let family = model.and_then(|m| m.split_whitespace().next());
+        let pick = |label: String, alias: Option<&'static str>| {
+            let (wt, id) = (wt.to_path_buf(), id.to_string());
+            MenuEntry::item(label, move |this, _w, cx| {
+                this.agents_switch_model(&wt, &id, alias, cx);
+            })
+        };
+        let mut out: Vec<MenuEntry> = crate::agents::MODELS
+            .iter()
+            .map(|&(alias, name)| {
+                let label = if family == Some(name) {
+                    format!("✓ {name}")
+                } else {
+                    name.to_string()
+                };
+                pick(label, Some(alias))
+            })
+            .collect();
+        out.push(MenuEntry::Divider);
+        out.push(pick("More Models…".into(), None));
+        out
+    }
+
+    /// Why tab `id`'s Claude can't be handed a command right now (`None`: it can) — asked as
+    /// its model menu opens or a quick action is clicked, as a command typed now would land in
+    /// a dialog or on the end of a draft.
+    #[cfg(feature = "terminal")]
+    fn agents_send_blocker(&self, wt: &Path, id: &str, cx: &App) -> Option<&'static str> {
+        let t = self.agents.tabs.get(wt)?.tabs.iter().find(|t| t.id == id)?;
+        let answer = "Answer Claude first";
+        if t.shown == AgentState::Blocked {
+            return Some(answer);
+        }
+        match t.view.read(cx).claude_box_empty() {
+            None => Some(answer),
+            Some(false) => Some("Clear Claude's input box first"),
+            Some(true) => None,
+        }
+    }
+
+    /// Switch tab `id`'s model: hand its Claude Code `/model <alias>` — or plain `/model`,
+    /// which opens Claude Code's own picker. Claude Code may ask first (a conversation cached
+    /// for one model is re-read by another), and keeps the pick as its default for new
+    /// sessions, as its picker does. The corner shows the new model once Claude Code has
+    /// switched (`agents_on_submit` reads it again).
+    #[cfg(feature = "terminal")]
+    fn agents_switch_model(
+        &mut self,
+        wt: &Path,
+        id: &str,
+        alias: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(t) = self
+            .agents
+            .tabs
+            .get(wt)
+            .and_then(|g| g.tabs.iter().find(|t| t.id == id))
+        else {
+            return;
+        };
+        let command = alias.map_or_else(|| "/model".to_string(), |a| format!("/model {a}"));
+        t.view
+            .update(cx, |v, cx| v.submit_prompt(&command, true, cx));
+        // Claude's question, or its picker, is answered from the keyboard.
+        self.agents.focus_pending = true;
+        cx.notify();
+    }
+
+    /// An agent tab's model, in its pane's bottom-right corner: a small dropdown to switch it.
+    /// Only while Claude Code runs there and has said which model it's on.
+    #[cfg(feature = "terminal")]
+    fn render_agents_model(
+        &self,
+        wt: &Path,
+        tab: &AgentTab,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let model = tab.model.clone()?;
+        if !tab.agent || matches!(tab.hook, Some((crate::agents::Hook::Ended, _))) {
+            return None;
+        }
+        let t = theme::get();
+        let open = self.context_menu.as_ref().is_some_and(
+            |m| matches!(&m.target, MenuTarget::AgentModel(_, id, _) if *id == tab.id),
+        );
+        let fg = if open { t.text } else { t.line_number };
+        let (wt, id) = (wt.to_path_buf(), tab.id.clone());
+        Some(
+            div()
+                .id("agents-model")
+                .debug_selector(|| "agents-model".into())
+                .tooltip(ui::tip("Switch Claude's model"))
+                .group("agents-model")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .h(px(20.0))
+                .px_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .text_size(px(t.ui_font_size - 1.0))
+                .text_color(fg)
+                .hover(|d| d.bg(t.bg_light).text_color(t.text))
+                .when(open, |d| d.bg(t.bg_light))
+                .child(SharedString::from(model))
+                .child(
+                    svg()
+                        .path("icons/chevron-down.svg")
+                        .size(px(12.0))
+                        .text_color(fg)
+                        .group_hover("agents-model", |s| s.text_color(t.text)),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let why = this.agents_send_blocker(&wt, &id, cx);
+                        // Standing on the chip, right-aligned with it.
+                        let at = gpui::point(e.position.x + px(12.0), e.position.y - px(12.0));
+                        let target = MenuTarget::AgentModel(wt.clone(), id.clone(), why);
+                        this.open_menu(at, target, cx);
+                    }),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Bring one of worktree `wt`'s strip tabs on screen, as clicking it does.
     #[cfg(feature = "terminal")]
     fn agents_show_strip_tab(&mut self, wt: &Path, tab: &StripTab, cx: &mut Context<Self>) {
@@ -8970,7 +9206,7 @@ impl Kyde {
         let body = if let Some(bg) = shown_sub {
             self.render_agents_sub_feed(bg, ui, cx)
         } else if let Some(tab) = group.and_then(|g| g.tabs.get(g.active)) {
-            div()
+            let term = div()
                 .flex_1()
                 .min_h_0()
                 .pl_2()
@@ -8979,9 +9215,35 @@ impl Kyde {
                 // island's rounded bottom-right corner (and the top-right one when the strip
                 // is hidden).
                 .pr_1()
-                .pb_1()
-                .child(tab.view.clone())
-                .into_any_element()
+                .when(!tab.agent, gpui::Styled::pb_1)
+                .child(tab.view.clone());
+            if tab.agent {
+                // Along an agent's bottom edge, its model in the corner and its quick actions
+                // beside it — below Claude Code's own footer rather than over it (its notices
+                // take that row's right side).
+                // Always there, so the terminal keeps its height as the model comes and goes.
+                let corner = div()
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .justify_end()
+                    .items_center()
+                    .gap_1()
+                    .h(px(MODEL_STRIP_H))
+                    .pr_2()
+                    .children(self.render_agents_actions(wt, tab, cx))
+                    .children(self.render_agents_model(wt, tab, cx));
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(term)
+                    .child(corner)
+                    .into_any_element()
+            } else {
+                term.into_any_element()
+            }
         } else {
             let restart = wt.to_path_buf();
             ui::empty_state("No tabs open in this worktree", ui)

@@ -864,6 +864,13 @@ enum MenuTarget {
     /// (as the strip last drew them) — pick one to show it.
     #[cfg(feature = "terminal")]
     AgentTabs(PathBuf, Vec<(StripTab, SharedString, agents::AgentState)>),
+    /// An agent tab's model, in its pane's bottom-right corner (worktree, tab id, why it
+    /// can't switch right now — found as the menu opens): the models to switch it to.
+    #[cfg(feature = "terminal")]
+    AgentModel(PathBuf, String, Option<&'static str>),
+    /// Why one of an agent tab's quick actions can't be sent to its Claude right now.
+    #[cfg(feature = "terminal")]
+    AgentWhy(&'static str),
 }
 
 /// One of a worktree's strip tabs, by id: its own tab, or a background agent's.
@@ -1903,6 +1910,16 @@ struct AgentTab {
     spawned_at: std::time::SystemTime,
     /// Its Claude Code session id, once known (saved, so a relaunch can `--resume` it).
     session: Option<String>,
+    /// Its session's file, as its hook last named it — where its model is read from.
+    transcript: Option<PathBuf>,
+    /// The model its Claude Code is on, as Claude Code names it ("Opus 5.5"), once known —
+    /// shown, and switched, from the pane's bottom-right corner.
+    model: Option<String>,
+    /// The follow-ups it offers beside its model (`agents::QuickAction`), picked for the turn
+    /// that ended at `actions_for` (its `Done` report's time) — shown only while that's still
+    /// its latest report.
+    actions: Vec<agents::QuickAction>,
+    actions_for: Option<std::time::Instant>,
     /// It continues a claude.ai/code cloud session (`agents_teleport_tab`): marked so.
     teleported: bool,
     /// The cleanup's finding: why this tab can be closed (`None` = keep it).
@@ -1929,6 +1946,8 @@ struct HookRead {
     session: Option<PathBuf>,
     /// A helper of its to follow into the worktree it works in (`agents::helper_to_follow`).
     follow: Option<(String, PathBuf)>,
+    /// The model its session is on, read when it reported ready or done.
+    model: Option<String>,
 }
 
 /// One AI "is this tab done?" answer, and what it was asked about.
@@ -4456,9 +4475,12 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
         // finished (KYDE_SHOT_SUB picks one's work to show: `a1` / `a0`). `agents-groups`
         // (manual, validation): the project in a Work group, a folded Personal group of two
         // more, and one ungrouped — mid-drag onto Work's header. `agents-add` (manual,
-        // validation): the sidebar footer's ⊕ menu open.
+        // validation): the sidebar footer's ⊕ menu open. `agents-model` (manual, validation):
+        // the on-screen tab's model menu open, in its pane's bottom-right corner, beside its
+        // quick actions.
         #[cfg(feature = "terminal")]
-        "agents" | "agents-background" | "agents-code" | "agents-groups" | "agents-add" => {
+        "agents" | "agents-background" | "agents-code" | "agents-groups" | "agents-add"
+        | "agents-model" => {
             // Real paths, as git lists them (a symlinked fixture dir would show twice).
             let real = |p: PathBuf| p.canonicalize().unwrap_or(p);
             let root = std::env::var("KYDE_SHOT_REPO")
@@ -4545,6 +4567,8 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 else {
                     continue;
                 };
+                // Each runs Claude Code on Opus, as its hook would say.
+                t.model = Some("Opus 5.5".into());
                 match i {
                     // The second worktree's agent asks to run a command, as the Claude Code
                     // hook would report it: "needs input".
@@ -4625,6 +4649,32 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                 view.agents_open_code(wt.clone(), Some(Mode::Browse), cx);
                 if std::env::var_os("KYDE_SHOT_WT_MENU").is_some() {
                     view.open_menu(gpui::point(px(300.0), px(36.0)), MenuTarget::Worktrees, cx);
+                }
+            }
+            // The on-screen (first) worktree's tab's model menu, standing on its corner — its
+            // turn over, with the quick actions picked for its PR and a pending release.
+            if let (true, Some(wt)) = (name == "agents-model", wts.first()) {
+                let tab = view
+                    .agents
+                    .tabs
+                    .get_mut(wt)
+                    .and_then(|g| g.tabs.first_mut());
+                let id = tab.map(|t| {
+                    let done = std::time::Instant::now();
+                    t.hook = Some((crate::agents::Hook::Done, done));
+                    t.actions_for = Some(done);
+                    t.actions = crate::agents::quick_actions(&crate::agents::ActionFacts {
+                        pr: Some((240, false)),
+                        release: Some((230, "chore(main): release kyde 2.21.0".into())),
+                        ..Default::default()
+                    });
+                    t.id.clone()
+                });
+                if let Some(id) = id {
+                    let size = window.viewport_size();
+                    let gap = px(theme::FRAME_GAP);
+                    let at = gpui::point(size.width - gap - px(8.0), size.height - gap - px(26.0));
+                    view.open_menu(at, MenuTarget::AgentModel(wt.clone(), id, None), cx);
                 }
             }
             // The sidebar footer's ⊕ menu open, standing on the button. KYDE_SHOT_CLOUD: its
@@ -8096,6 +8146,74 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// An agent tab's model, in its pane's corner — through the real hook files and poll: a
+    /// fresh session shows the model it started on before any reply, a `/model` switch its
+    /// session file records replaces it, and its menu won't type a switch where Claude's input
+    /// box isn't (here a plain shell — as for a dialog).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_tab_shows_and_switches_its_model(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let id = handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                k.agents.tabs[&dir].tabs.last().unwrap().id.clone()
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let transcript = dir.join("s1.jsonl");
+        let report = |vcx: &mut gpui::VisualTestContext, event: serde_json::Value| {
+            std::thread::sleep(std::time::Duration::from_millis(20)); // a new mtime
+            let mut event = event;
+            event["session_id"] = "s1".into();
+            event["transcript_path"] = transcript.to_string_lossy().into_owned().into();
+            std::fs::write(agents::state_path(&id), event.to_string()).unwrap();
+            handle
+                .update(vcx, |k, _w, cx| k.agents_poll_hooks(cx))
+                .unwrap();
+            vcx.run_until_parked();
+            handle
+                .update(vcx, |k, _w, _cx| k.agents.tabs[&dir].tabs[0].model.clone())
+                .unwrap()
+        };
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "model": "claude-opus-5-5",
+        });
+        assert_eq!(report(&mut vcx, start).as_deref(), Some("Opus 5.5"));
+        let corner = vcx
+            .debug_bounds("agents-model")
+            .expect("the model, in the corner");
+        let switched = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "<local-command-stdout>Set model to Fable 5.2 and saved as your \
+                            default for new sessions</local-command-stdout>",
+            },
+        });
+        std::fs::write(&transcript, format!("{switched}\n")).unwrap();
+        let stop = serde_json::json!({ "hook_event_name": "Stop" });
+        assert_eq!(report(&mut vcx, stop).as_deref(), Some("Fable 5.2"));
+        vcx.simulate_click(corner.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        handle
+            .update(&mut vcx, |k, _w, _cx| {
+                let menu = k.context_menu.as_ref().expect("its menu");
+                assert!(
+                    matches!(menu.entries.as_slice(), [views::MenuEntry::Note(_)]),
+                    "no models to pick — a `/model` would land in the shell"
+                );
+            })
+            .unwrap();
+    }
+
     /// The project's own checkout is shared, so its row is always its branch: not its agent's
     /// AI title, not the project's name, and a double-click doesn't rename it.
     #[cfg(feature = "terminal")]
@@ -9384,6 +9502,7 @@ mod gpui_smoke_tests {
             transcript: Some(transcript.clone()),
             background: None,
             woken: None,
+            model: None,
         };
         let to = agents::moved_worktree(&dir, Some(&report), None).expect("EnterWorktree'd");
         handle
@@ -9397,6 +9516,7 @@ mod gpui_smoke_tests {
                     subs: None,
                     session: Some(to.clone()),
                     follow: None,
+                    model: None,
                 };
                 k.agents_apply_hooks(vec![read], cx);
                 assert_eq!(k.agents.tabs[&dir].tabs.len(), 1, "the first tab stays");
