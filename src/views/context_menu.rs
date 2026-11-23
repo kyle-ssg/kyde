@@ -655,6 +655,10 @@ impl Kyde {
             }
             #[cfg(feature = "terminal")]
             MenuTarget::AgentTabs(wt, tabs) => out = self.agents_more_tabs_menu(wt, tabs),
+            #[cfg(feature = "terminal")]
+            MenuTarget::AgentModel(wt, id, why) => out = self.agents_model_menu(wt, id, *why),
+            #[cfg(feature = "terminal")]
+            MenuTarget::AgentWhy(why) => out = vec![MenuEntry::Note((*why).into())],
             MenuTarget::SideTabs(tabs) => {
                 for &tab in tabs {
                     let Some(&(_, _, label, _)) =
@@ -885,11 +889,17 @@ impl Kyde {
                 // Branch actions fly out LEFT of the branch popup: `at` is the popup's left
                 // edge, so anchor the menu's top-RIGHT corner there. The Agents sidebar's
                 // footer ⊕ sits at the window's bottom, so its menu stands on `at` (bottom-
-                // left). Every other menu hangs from its top-left at the cursor.
+                // left); an agent tab's model sits in its pane's bottom-right corner, so its
+                // menu stands on `at` right-aligned. Every other menu hangs from its top-left
+                // at the cursor.
                 let mut anchored = gpui::anchored().position(menu.at);
                 match menu.target {
                     MenuTarget::Branch(_) => anchored = anchored.anchor(gpui::Corner::TopRight),
                     MenuTarget::AgentsAdd => anchored = anchored.anchor(gpui::Corner::BottomLeft),
+                    #[cfg(feature = "terminal")]
+                    MenuTarget::AgentModel(..) | MenuTarget::AgentWhy(_) => {
+                        anchored = anchored.anchor(gpui::Corner::BottomRight);
+                    }
                     _ => {}
                 }
                 gpui::deferred(anchored.snap_to_window_with_margin(px(8.0)).child(panel))

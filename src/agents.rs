@@ -62,6 +62,9 @@ pub(crate) struct HookReport {
     /// session a background task finished or a Monitor fired — rather than you (`None` for
     /// other events).
     pub woken: Option<bool>,
+    /// The model id a fresh session starts on (a `SessionStart`'s; a resumed one's doesn't
+    /// say).
+    pub model: Option<String>,
 }
 
 /// The subagent an event came from (Claude Code's `agent_id`) — `None` for the session's own.
@@ -120,6 +123,7 @@ pub(crate) fn parse_hook(json: &str) -> Option<HookReport> {
         transcript: path("transcript_path"),
         background,
         woken,
+        model: Some(s("model")).filter(|m| !m.is_empty()).map(Into::into),
     })
 }
 
@@ -932,13 +936,19 @@ pub(crate) fn done_prompt(
 /// when it says so, `None` when not done or when the check couldn't run. Spawns `claude`
 /// (a few seconds): call it off the UI thread.
 pub(crate) fn ai_says_done(prompt: &str) -> Option<String> {
+    parse_verdict(&ask_small_model(prompt)?)
+}
+
+/// A small model's (`claude -p --model haiku`) reply to `prompt`; `None` when `claude` can't
+/// run. Spawns it (a few seconds): call it off the UI thread.
+fn ask_small_model(prompt: &str) -> Option<String> {
     let out = std::process::Command::new(claude_bin())
-        // Outside any project, so no CLAUDE.md / settings are loaded for the check.
+        // Outside any project, so no CLAUDE.md / settings are loaded for the question.
         .current_dir(std::env::temp_dir())
         .args(["-p", "--model", "haiku", prompt])
         .output()
         .ok()?;
-    parse_verdict(&String::from_utf8_lossy(&out.stdout))
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// `Some(reason)` when the model's reply is `{"done": true, "reason": …}` (fenced or not).
@@ -952,6 +962,185 @@ pub(crate) fn parse_verdict(reply: &str) -> Option<String> {
             .trim()
             .to_string()
     })
+}
+
+/// A one-click follow-up an agent tab offers once its agent finishes a turn — along its pane's
+/// bottom edge, beside its model — handed to its Claude Code as a prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct QuickAction {
+    /// Which it is (what the model picking them names it by).
+    pub id: &'static str,
+    /// What its button says.
+    pub label: &'static str,
+    /// What it has Claude do, in a few words (its tooltip).
+    pub hint: String,
+    /// The prompt it sends.
+    pub prompt: String,
+}
+
+/// What a worktree's quick actions turn on. Read off the UI thread ([`read_action_facts`]).
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub(crate) struct ActionFacts {
+    pub git: WtGit,
+    /// Its branch's open pull request: number, and whether it's still a draft.
+    pub pr: Option<(u64, bool)>,
+    /// The workflow whose latest run on its branch failed.
+    pub ci_failed: Option<String>,
+    /// The repository's open release-please pull request (another branch's): number, title.
+    pub release: Option<(u64, String)>,
+}
+
+/// Read [`ActionFacts`] for worktree `wt`. Runs git and `gh` (network): call it off the UI
+/// thread. Without `gh` (or GitHub) only the git-side actions apply.
+pub(crate) fn read_action_facts(wt: &std::path::Path) -> ActionFacts {
+    use kyde_git::github;
+    let (branch, git) = read_git(wt).unwrap_or_default();
+    let prs = github::prs(wt, github::PrFilter::All, "").unwrap_or_default();
+    let ours = |head: &str| branch.as_deref() == Some(head);
+    ActionFacts {
+        git,
+        pr: prs
+            .iter()
+            .find(|p| ours(&p.head))
+            .map(|p| (p.number, p.draft)),
+        ci_failed: branch.as_deref().and_then(|b| {
+            let runs = github::branch_runs(wt, b).ok()?;
+            let run = github::branch_headline(&runs, b)?;
+            (run.state() == github::RunState::Failed).then(|| run.workflow.clone())
+        }),
+        release: prs
+            .iter()
+            .find(|p| p.head.starts_with("release-please--") && !ours(&p.head))
+            .map(|p| (p.number, p.title.clone())),
+    }
+}
+
+/// The quick actions that apply to a worktree in state `f`, most pressing first.
+pub(crate) fn quick_actions(f: &ActionFacts) -> Vec<QuickAction> {
+    let mut out = Vec::new();
+    let mut add = |id, label, hint: String, prompt: String| {
+        out.push(QuickAction {
+            id,
+            label,
+            hint,
+            prompt,
+        });
+    };
+    if let Some(workflow) = &f.ci_failed {
+        add(
+            "fix-ci",
+            "Fix CI",
+            format!("Claude finds out why {workflow} failed, fixes it and pushes"),
+            format!(
+                "This branch's CI is failing ({workflow}). Find out why from the failed run's \
+                 log (`gh run view --log-failed`), fix it, commit and push the fix, then make \
+                 sure the new run passes."
+            ),
+        );
+    }
+    if f.git.changed > 0 {
+        add(
+            "commit-push",
+            "Commit & push",
+            "Claude commits this worktree's changes and pushes them".into(),
+            "Commit the changes in this worktree with a clear message, then push them.".into(),
+        );
+    }
+    if f.pr.is_none() && f.git.ahead > 0 && f.git.changed == 0 {
+        add(
+            "open-pr",
+            "Open a PR",
+            "Claude pushes this branch and opens a pull request".into(),
+            "Push this branch and open a pull request for it (`gh pr create`), with a title \
+             and description that sum up what it changes."
+                .into(),
+        );
+    }
+    if let (Some((n, false)), None) = (f.pr, &f.ci_failed) {
+        add(
+            "merge-green",
+            "Merge when green",
+            format!("Claude waits for #{n}'s checks to pass, then merges it"),
+            format!(
+                "Merge pull request #{n} once its checks pass: wait for them with `gh pr \
+                 checks {n} --watch`, and only once every check has passed, merge it with `gh \
+                 pr merge {n}` using the repository's usual merge method. Don't use `--auto` \
+                 (without required checks it merges at once). If a check fails, don't merge — \
+                 tell me which one failed and why."
+            ),
+        );
+    }
+    if let Some((n, title)) = &f.release {
+        add(
+            "merge-release",
+            "Merge release PR when ready",
+            format!("Claude waits for the open PRs to land in #{n}, then merges it"),
+            format!(
+                "Merge release pull request #{n} (\"{title}\") once it includes every pull \
+                 request meant for this release. List the other open pull requests (`gh pr \
+                 list`) and wait for each one that belongs in this release to merge, checking \
+                 every few minutes — ask me about any that looks unlikely to merge soon (a \
+                 draft, failing, or stale). Then make sure #{n} has been updated to include \
+                 them, wait for its checks to pass (`gh pr checks {n} --watch`) and merge it. \
+                 Tell me which pull requests went into it."
+            ),
+        );
+    }
+    out
+}
+
+/// The question for the small model picking which of `options` an agent tab offers now its
+/// turn is over, from what's known of the tab.
+pub(crate) fn actions_prompt(
+    title: &str,
+    latest: &str,
+    terminal_tail: &str,
+    options: &[QuickAction],
+) -> String {
+    let listed: String = options
+        .iter()
+        .map(|a| format!("- {}: {} — {}\n", a.id, a.label, a.hint))
+        .collect();
+    format!(
+        "An AI coding agent in a terminal tab has just finished a turn. Pick the one-click \
+         follow-ups its user would plausibly want next, from the options below — none if \
+         nothing fits (its work isn't finished, it asked the user something, or the user \
+         is clearly heading elsewhere).\n\n\
+         Title: {title}\nLatest prompt: {latest}\n\
+         Last lines of the terminal:\n{terminal_tail}\n\n\
+         Options:\n{listed}\n\
+         Reply with ONLY JSON: {{\"actions\": [\"<id>\", …]}} — at most 3, most useful first."
+    )
+}
+
+/// The options the model's reply (`{"actions": [ids…]}`, fenced or not) picked, in its order:
+/// at most 3, never one it wasn't offered. `None` when the reply can't be read.
+pub(crate) fn parse_actions(reply: &str, options: &[QuickAction]) -> Option<Vec<QuickAction>> {
+    let json = &reply[reply.find('{')?..=reply.rfind('}')?];
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let mut picked: Vec<QuickAction> = Vec::new();
+    for id in v
+        .get("actions")?
+        .as_array()?
+        .iter()
+        .filter_map(|a| a.as_str())
+    {
+        let fresh = !picked.iter().any(|p| p.id == id);
+        if let Some(a) = options.iter().find(|a| a.id == id).filter(|_| fresh) {
+            picked.push(a.clone());
+        }
+    }
+    picked.truncate(3);
+    Some(picked)
+}
+
+/// Ask the small model (`claude -p --model haiku`) which of `options` to offer, with `prompt`
+/// ([`actions_prompt`]) — or, when it can't be asked, the first three. Spawns `claude` (a few
+/// seconds): call it off the UI thread.
+pub(crate) fn pick_actions(prompt: &str, options: Vec<QuickAction>) -> Vec<QuickAction> {
+    ask_small_model(prompt)
+        .and_then(|reply| parse_actions(&reply, &options))
+        .unwrap_or_else(|| options.into_iter().take(3).collect())
 }
 
 /// A worktree's git state, as its sidebar row shows it.
@@ -1204,6 +1393,108 @@ fn human_prompt(line: &str) -> Option<String> {
     };
     let text = text.trim();
     (!text.is_empty() && !text.starts_with('<')).then(|| text.to_string())
+}
+
+/// The models an agent tab's model menu offers: Claude Code's `/model` aliases (each follows
+/// its family's newest version) and the family each names. The rest — a pinned version, a
+/// 1M-context variant, this session only — are in Claude Code's own picker (More Models…).
+pub(crate) const MODELS: [(&str, &str); 4] = [
+    ("opus", "Opus"),
+    ("fable", "Fable"),
+    ("sonnet", "Sonnet"),
+    ("haiku", "Haiku"),
+];
+
+/// A model id or `/model` alias named as Claude Code names it: `claude-opus-5-5` → "Opus
+/// 5.5", `claude-haiku-4-5-20251001` → "Haiku 4.5", `claude-opus-5-5[1m]` → "Opus 5.5 (1M
+/// context)", `sonnet` → "Sonnet". An id of another shape comes back as it is.
+pub(crate) fn model_label(id: &str) -> String {
+    let id = id.trim();
+    let (base, long) = id
+        .strip_suffix("[1m]")
+        .map_or((id, false), |base| (base, true));
+    let (mut family, mut version) = (None, Vec::new());
+    for part in base.strip_prefix("claude-").unwrap_or(base).split('-') {
+        if !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()) {
+            // A date stamp (`20251001`) isn't part of the version.
+            if part.len() <= 2 {
+                version.push(part);
+            }
+        } else if family.is_none() && !part.is_empty() {
+            family = Some(part);
+        } else {
+            return id.to_string();
+        }
+    }
+    let Some(family) = family else {
+        return id.to_string();
+    };
+    let mut chars = family.chars();
+    let mut out: String = chars
+        .next()
+        .into_iter()
+        .flat_map(char::to_uppercase)
+        .collect();
+    out.push_str(chars.as_str());
+    if !version.is_empty() {
+        out = format!("{out} {}", version.join("."));
+    }
+    if long {
+        out.push_str(" (1M context)");
+    }
+    out
+}
+
+/// The model a session is on, from its file's tail: whichever is newer of its latest reply's
+/// model and its latest `/model` switch ("Set model to …"), named as [`model_label`] names
+/// it. `None` when the tail holds neither — a fresh session (its `SessionStart` says).
+pub(crate) fn transcript_model(tail: &str) -> Option<String> {
+    tail.lines().rev().find_map(|line| {
+        let reply = line.contains("\"type\":\"assistant\"");
+        if !reply && !line.contains("<local-command-stdout>Set model to ") {
+            return None;
+        }
+        let v: serde_json::Value = serde_json::from_str(line).ok()?;
+        let message = v.get("message")?;
+        if reply {
+            // A background agent's turn, or an error Claude Code wrote itself (`<synthetic>`).
+            if v.get("type")?.as_str()? != "assistant"
+                || v.get("isSidechain").and_then(serde_json::Value::as_bool) == Some(true)
+            {
+                return None;
+            }
+            let id = message.get("model")?.as_str()?;
+            return (!id.starts_with('<')).then(|| model_label(id));
+        }
+        let said = message
+            .get("content")?
+            .as_str()?
+            .strip_prefix("<local-command-stdout>Set model to ")?;
+        let name: String = strip_sgr(said.split(" and saved").next()?.split("</").next()?)
+            .trim_matches(|c: char| c == '`' || c.is_whitespace())
+            .into();
+        (!name.is_empty()).then_some(name)
+    })
+}
+
+/// `text` without its colour / weight escapes (`ESC [ … m`).
+fn strip_sgr(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The model the session in file `transcript` is on ([`transcript_model`]), from its tail.
+/// File IO: call it off the UI thread.
+pub(crate) fn read_session_model(transcript: &std::path::Path) -> Option<String> {
+    transcript_model(&read_end(transcript, TAIL_BYTES, true))
 }
 
 /// Up to `n` bytes from the start (or the `end`) of a file, lossily as text; empty on error.
@@ -2165,6 +2456,110 @@ mod tests {
     }
 
     #[test]
+    fn quick_actions_follow_the_worktrees_git_and_github_state() {
+        let ids =
+            |f: ActionFacts| -> Vec<&str> { quick_actions(&f).iter().map(|a| a.id).collect() };
+        let git = |changed, ahead| WtGit {
+            changed,
+            ahead,
+            landed: false,
+        };
+        let release = Some((230, "chore(main): release 2.21.0".to_string()));
+        assert!(
+            ids(ActionFacts::default()).is_empty(),
+            "a clean, pushed branch"
+        );
+        // Committed, no PR yet → open one; with changes left → commit them first.
+        let committed = ActionFacts {
+            git: git(0, 2),
+            ..Default::default()
+        };
+        assert_eq!(ids(committed), ["open-pr"]);
+        assert_eq!(
+            ids(ActionFacts {
+                git: git(3, 2),
+                ..Default::default()
+            }),
+            ["commit-push"]
+        );
+        // A ready PR merges when green; a draft doesn't, nor does one whose CI failed — that's
+        // fixed first. A release PR open elsewhere waits on the rest.
+        let pr = |draft, ci: Option<&str>| ActionFacts {
+            pr: Some((240, draft)),
+            ci_failed: ci.map(Into::into),
+            release: release.clone(),
+            ..Default::default()
+        };
+        assert_eq!(ids(pr(false, None)), ["merge-green", "merge-release"]);
+        assert_eq!(ids(pr(true, None)), ["merge-release"]);
+        assert_eq!(ids(pr(false, Some("check"))), ["fix-ci", "merge-release"]);
+    }
+
+    #[test]
+    fn the_models_pick_keeps_to_the_actions_offered() {
+        let options = quick_actions(&ActionFacts {
+            pr: Some((240, false)),
+            release: Some((230, "release".into())),
+            ..Default::default()
+        });
+        let ids = |reply: &str| -> Option<Vec<&str>> {
+            parse_actions(reply, &options).map(|p| p.iter().map(|a| a.id).collect())
+        };
+        // Its order, without one it wasn't offered or a repeat.
+        let reply = "```json\n{\"actions\": [\"merge-release\", \"fix-ci\", \"merge-release\", \
+                     \"merge-green\"]}\n```";
+        assert_eq!(ids(reply), Some(vec!["merge-release", "merge-green"]));
+        assert_eq!(
+            ids(r#"{"actions": []}"#),
+            Some(vec![]),
+            "nothing fits right now"
+        );
+        assert_eq!(
+            ids("I can't tell."),
+            None,
+            "unreadable: the caller falls back"
+        );
+    }
+
+    #[test]
+    fn a_sessions_model_is_its_latest_reply_or_switch_whichever_is_newer() {
+        let reply = |model: &str, sidechain: bool| {
+            format!(
+                r#"{{"isSidechain":{sidechain},"message":{{"model":"{model}","role":"assistant"}},"type":"assistant"}}"#
+            )
+        };
+        let switch = |said: &str| {
+            serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": format!("<local-command-stdout>{said}</local-command-stdout>")},
+            })
+            .to_string()
+        };
+        let model = |lines: &[String]| transcript_model(&lines.join("\n"));
+        assert_eq!(model(&[]), None, "a fresh session's file says nothing yet");
+        let opus = reply("claude-opus-5-5", false);
+        assert_eq!(
+            model(std::slice::from_ref(&opus)).as_deref(),
+            Some("Opus 5.5")
+        );
+        // Switched after that reply — older Claude Code quotes the name, newer bolds it.
+        let fable = switch("Set model to `Fable 5.2` and saved as your default for new sessions");
+        assert_eq!(model(&[opus.clone(), fable]).as_deref(), Some("Fable 5.2"));
+        let haiku = switch("Set model to \u{1b}[1mHaiku 5.5\u{1b}[22m and saved as your default");
+        assert_eq!(model(&[opus.clone(), haiku]).as_deref(), Some("Haiku 5.5"));
+        // A background agent's turn, or an error Claude Code wrote itself, isn't the session's.
+        let others = [
+            opus,
+            reply("claude-haiku-4-5-20251001", true),
+            reply("<synthetic>", false),
+        ];
+        assert_eq!(model(&others).as_deref(), Some("Opus 5.5"));
+        assert_eq!(model_label("claude-haiku-4-5-20251001"), "Haiku 4.5");
+        assert_eq!(model_label("claude-opus-5-5[1m]"), "Opus 5.5 (1M context)");
+        assert_eq!(model_label("sonnet"), "Sonnet");
+    }
+
+    #[test]
     fn hook_events_drive_the_dot_and_an_interrupt_falls_back_to_output() {
         let ev = |json: &str| parse_hook(json).map(|r| r.hook);
         assert_eq!(
@@ -2176,6 +2571,7 @@ mod tests {
                 transcript: None,
                 background: None,
                 woken: None,
+                model: None,
             })
         );
         assert_eq!(
@@ -2502,6 +2898,7 @@ mod tests {
             transcript: None,
             background: Some(ids.iter().map(ToString::to_string).collect()),
             woken: None,
+            model: None,
         };
         assert!(sub_live(&sub, t(10), Some((&stop(&["a1"]), t(20))), t(30)));
         assert!(!sub_live(&sub, t(10), Some((&stop(&[]), t(20))), t(30)));
