@@ -2804,7 +2804,16 @@ impl Kyde {
                     };
                     // Its shell exited: nothing left to lose. Its own menu's Close asks.
                     if v.read(cx).exited {
+                        let tab = &this.agents.tabs[&key].tabs[i];
+                        let (id, name) = (tab.id.clone(), tab.name.clone());
+                        let on_screen = this
+                            .agents_visible_tab()
+                            .is_some_and(|(w, at)| w == key && at == i);
                         this.agents_close_by_hand(&key, i, cx);
+                        #[cfg(all(feature = "terminal", unix))]
+                        this.agents_follow_move(id, name, on_screen, cx);
+                        #[cfg(not(all(feature = "terminal", unix)))]
+                        let _ = (id, name, on_screen);
                     } else {
                         let id = this.agents.tabs[&key].tabs[i].id.clone();
                         this.agents_ask_close(vec![id], cx);
@@ -2888,6 +2897,8 @@ impl Kyde {
             crate::agents::state_path(&gone.id),
             crate::agents::brief_path(&gone.id),
             crate::agents::write_path(&gone.id),
+            // A move it had asked for dies with it.
+            crate::agents::move_path(&gone.id),
         ];
         let subs = crate::agents::sub_dir(&gone.id);
         cx.background_executor()
@@ -3807,6 +3818,99 @@ impl Kyde {
         }
         self.agents_save(cx);
         self.agents_refresh_branches(cx);
+        cx.notify();
+    }
+
+    /// Tab `id` closed because its agent moved to another project (`ky agent move`): put the
+    /// agent carrying its session on there in its place, once it's up — under the tab's name,
+    /// joining that project's worktrees if Kyde doesn't list it yet, and shown if the tab was
+    /// on screen. Nothing for a tab that just ended.
+    #[cfg(all(feature = "terminal", unix))]
+    fn agents_follow_move(
+        &mut self,
+        id: String,
+        name: Option<String>,
+        on_screen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let bg = cx.background_executor().clone();
+            let Some(moved) = bg
+                .spawn(async move { crate::agent_host::take_moved(&id) })
+                .await
+            else {
+                return;
+            };
+            // It starts once the old agent has exited: a few seconds at most.
+            for _ in 0..80 {
+                let want = moved.id.clone();
+                let up = bg
+                    .spawn(
+                        async move { crate::agent_host::live_hosts().iter().any(|h| h.id == want) },
+                    )
+                    .await;
+                if up {
+                    this.update(cx, |this, cx| {
+                        this.agents_adopt_moved(moved, name, on_screen, cx);
+                    })
+                    .ok();
+                    return;
+                }
+                bg.timer(Duration::from_millis(250)).await;
+            }
+        })
+        .detach();
+    }
+
+    /// The tab for `moved`, an agent that has come from another project's tab (named `name`,
+    /// shown when `on_screen`) — see [`Self::agents_follow_move`].
+    #[cfg(all(feature = "terminal", unix))]
+    fn agents_adopt_moved(
+        &mut self,
+        moved: crate::agent_host::Moved,
+        name: Option<String>,
+        on_screen: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let open = self.agents.tabs.iter().find_map(|(wt, g)| {
+            let i = g.tabs.iter().position(|t| t.id == moved.id)?;
+            Some((wt.clone(), i))
+        });
+        let wt = if let Some((wt, i)) = open {
+            // The host scan found it first.
+            if let Some(g) = self.agents.tabs.get_mut(&wt) {
+                g.active = i;
+                if let Some(t) = g.tabs.get_mut(i).filter(|_| name.is_some()) {
+                    t.name = name;
+                }
+            }
+            wt
+        } else {
+            if let Some(s) = self
+                .agents
+                .cfg
+                .spaces
+                .iter_mut()
+                .find(|s| s.path == moved.space)
+            {
+                if s.path != moved.to && !s.worktrees.contains(&moved.to) {
+                    s.worktrees.push(moved.to.clone());
+                }
+            }
+            let saved = kyde_config::agents::SavedTab {
+                agent: true,
+                name,
+                ..Default::default()
+            };
+            if !self.agents_attach_tab(moved.to.clone(), &saved, &moved.id, cx) {
+                return;
+            }
+            moved.to
+        };
+        if on_screen {
+            self.agents_select(wt, cx);
+        }
+        self.agents_save(cx);
         cx.notify();
     }
 
