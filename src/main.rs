@@ -1551,6 +1551,10 @@ struct AgentsView {
     /// Worktrees whose tabs were opened this launch (their saved tabs are now the live ones).
     #[cfg(feature = "terminal")]
     restored: std::collections::HashSet<PathBuf>,
+    /// Worktrees whose last tab you closed this launch: opening one shows its empty pane, not
+    /// its last session resumed, until a tab is started there.
+    #[cfg(feature = "terminal")]
+    closed: std::collections::HashSet<PathBuf>,
     /// Each space's own checkout vs its remote mainline, from the last background sync.
     main_sync: std::collections::HashMap<PathBuf, agents::MainSync>,
     /// Per space: when its merged PRs were last fetched, and their head branches.
@@ -2109,6 +2113,8 @@ impl AgentsView {
             hiding: std::collections::HashSet::new(),
             #[cfg(feature = "terminal")]
             restored: std::collections::HashSet::new(),
+            #[cfg(feature = "terminal")]
+            closed: std::collections::HashSet::new(),
             main_sync: std::collections::HashMap::new(),
             #[cfg(feature = "terminal")]
             merged: std::collections::HashMap::new(),
@@ -8983,6 +8989,17 @@ mod gpui_smoke_tests {
                     "the row stays"
                 );
                 assert!(!offered(k), "nothing open: nothing to close");
+                // Opening the row again doesn't bring back what you closed.
+                k.agents_select(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(!k.agents.tabs.contains_key(&dir), "closed stays closed");
+                // Until you start one there: from then on it opens as any row does.
+                k.agents_new_tab(dir.clone(), false, None, cx);
+                assert!(!k.agents.closed.contains(&dir));
             })
             .unwrap();
     }
