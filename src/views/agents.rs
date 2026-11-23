@@ -4169,21 +4169,11 @@ impl Kyde {
             }
         }
         let at_prompt: std::collections::HashMap<_, _> = found.at_prompt.into_iter().collect();
-        // Worktrees whose branch has a merged PR.
         let merged: std::collections::HashSet<PathBuf> = self
             .agents
             .tabs
             .keys()
-            .filter(|wt| {
-                let space = self.agents.cfg.space_of(wt).map(|s| s.path.clone());
-                let branch = self.agents.branches.get(*wt);
-                space
-                    .and_then(|s| self.agents.merged.get(&s))
-                    .zip(branch)
-                    .is_some_and(|((_, heads), b)| heads.contains(b))
-                    // …or whose work is on main already (squash-merged).
-                    || self.agents.git.get(*wt).is_some_and(|g| g.landed)
-            })
+            .filter(|wt| self.agents_wt_merged(wt))
             .cloned()
             .collect();
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
@@ -4287,18 +4277,37 @@ impl Kyde {
             .collect()
     }
 
+    /// Worktree `wt`'s branch has a merged pull request, or its work is on main already
+    /// (squash-merged).
+    fn agents_wt_merged(&self, wt: &Path) -> bool {
+        let space = self.agents.cfg.space_of(wt).map(|s| s.path.clone());
+        let branch = self.agents.branches.get(wt);
+        space
+            .and_then(|s| self.agents.merged.get(&s))
+            .zip(branch)
+            .is_some_and(|((_, heads), b)| heads.contains(b))
+            || self.agents.git.get(wt).is_some_and(|g| g.landed)
+    }
+
     /// Why worktree `wt` isn't finished on its agents' side (`None` = it is): removing it
     /// closes its tabs, ending their agents — so a tab at work, or one the cleanup hasn't found
     /// finished (still on its task between turns: an open PR, a CI watch, your next prompt),
-    /// or a background agent at work there keeps it.
+    /// or a background agent at work there keeps it. Once its work is merged, a tab sitting
+    /// at its prompt has nothing left to do: it doesn't wait out the quiet spell the cleanup
+    /// needs before judging (reopening the worktree resumes its session, which restarts it).
     fn agents_wt_busy(&self, wt: &Path) -> Option<&'static str> {
         let tabs = self
             .agents
             .tabs
             .get(wt)
             .map_or(&[][..], |g| g.tabs.as_slice());
+        let merged = self.agents_wt_merged(wt);
         tabs.iter()
-            .filter(|t| t.verdict.is_none() || t.shown == AgentState::Working)
+            .filter(|t| match t.shown {
+                AgentState::Working => true,
+                AgentState::Idle | AgentState::None if merged => false,
+                _ => t.verdict.is_none(),
+            })
             .map(|t| t.shown)
             .chain(self.agents_subs_in(wt).next().map(|_| AgentState::Working))
             .max()
