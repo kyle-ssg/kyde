@@ -28,7 +28,6 @@ const SWEEP_EVERY_TICKS: u32 = 60;
 #[cfg(feature = "terminal")]
 const MAX_AI_CHECKS: usize = 3;
 /// How often each space's merged PRs are re-fetched.
-#[cfg(feature = "terminal")]
 const MERGED_EVERY: Duration = Duration::from_mins(10);
 #[cfg(feature = "terminal")]
 const GIT_EVERY_TICKS: u32 = 5;
@@ -579,7 +578,7 @@ impl Kyde {
                     (branches, git_spaces, listed)
                 })
                 .await;
-            let Ok(all) = this.update(cx, |this, cx| {
+            let Ok((all, pr_heads)) = this.update(cx, |this, cx| {
                 this.agents.branches = branches;
                 this.agents.git_spaces = git_spaces;
                 if this.agents_adopt_worktrees(listed) {
@@ -587,21 +586,32 @@ impl Kyde {
                 }
                 this.agents_load_row_ci(cx);
                 cx.notify();
-                this.agents
+                let all: Vec<PathBuf> = this
+                    .agents
                     .cfg
                     .spaces
                     .iter()
                     .filter(|s| !s.scratch)
                     .flat_map(|s| std::iter::once(&s.path).chain(&s.worktrees))
                     .cloned()
-                    .collect::<Vec<_>>()
+                    .collect();
+                // Where each one's pull request was merged, for those that have one.
+                let pr_heads: std::collections::HashMap<PathBuf, String> = all
+                    .iter()
+                    .filter_map(|wt| Some((wt.clone(), this.agents_pr_head(wt)?.to_string())))
+                    .collect();
+                (all, pr_heads)
             }) else {
                 return;
             };
             // 2. Changed-files + unpushed counts for every worktree, in parallel.
             let read = cx
                 .background_executor()
-                .spawn(async move { crate::agents::per_worktree(all, crate::agents::read_git) })
+                .spawn(async move {
+                    crate::agents::per_worktree(all, |wt| {
+                        crate::agents::read_git(wt, pr_heads.get(wt).map(String::as_str))
+                    })
+                })
                 .await;
             this.update(cx, |this, cx| {
                 // A worktree whose unpushed commits are gone just pushed: its CI is starting.
@@ -632,11 +642,116 @@ impl Kyde {
                     }
                 }
                 this.agents.git_refreshing = false;
+                this.agents_refresh_merged(cx);
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The commit worktree `wt`'s pull request was merged at: `Some` when its branch has a
+    /// merged pull request, as of the last [`Self::agents_refresh_merged`].
+    pub(crate) fn agents_pr_head(&self, wt: &Path) -> Option<&str> {
+        let space = &self.agents.cfg.space_of(wt)?.path;
+        let (_, heads) = self.agents.merged.get(space)?;
+        heads.get(self.agents.branches.get(wt)?).map(String::as_str)
+    }
+
+    /// Re-read each git project's merged pull requests in the background — one `gh` call
+    /// each, at most every [`MERGED_EVERY`] (a failed one waits as long) — and which of its
+    /// worktrees have nothing past theirs. The rows' merged mark, the Clean Up window and
+    /// the cleanup's "pull request is merged" rule all read the result.
+    fn agents_refresh_merged(&mut self, cx: &mut Context<Self>) {
+        // No `gh` from a test run: tests hand `agents_apply_merged` what it would find.
+        if cfg!(test) {
+            return;
+        }
+        let now = Instant::now();
+        let due: Vec<(PathBuf, Vec<(PathBuf, String)>)> = self
+            .agents
+            .cfg
+            .spaces
+            .iter()
+            .filter(|s| self.agents.git_spaces.contains(&s.path))
+            .filter(|s| {
+                self.agents
+                    .merged
+                    .get(&s.path)
+                    .is_none_or(|(at, _)| at.elapsed() >= MERGED_EVERY)
+            })
+            .map(|s| {
+                let rows = s
+                    .rows()
+                    .into_iter()
+                    .filter_map(|wt| {
+                        let branch = self.agents.branches.get(&wt)?.clone();
+                        Some((wt, branch))
+                    })
+                    .collect();
+                (s.path.clone(), rows)
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        // Stamped now, so the next git refresh doesn't ask again while this one is out.
+        for (space, _) in &due {
+            self.agents
+                .merged
+                .entry(space.clone())
+                .or_insert_with(|| (now, std::collections::HashMap::new()))
+                .0 = now;
+        }
+        cx.spawn(async move |this, cx| {
+            let found: Vec<crate::agents::MergedFound> = cx
+                .background_executor()
+                .spawn(async move {
+                    due.into_iter()
+                        .filter_map(|(space, rows)| crate::agents::read_merged(space, &rows))
+                        .collect()
+                })
+                .await;
+            this.update(cx, |this, cx| this.agents_apply_merged(found, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Take in what [`Self::agents_refresh_merged`] read. A worktree whose HEAD is in its
+    /// merged pull request has nothing left to push, whatever git counts against a remote
+    /// branch the merge deleted. With the Clean Up window open, the worktrees this finishes
+    /// get ticked.
+    pub(crate) fn agents_apply_merged(
+        &mut self,
+        found: Vec<crate::agents::MergedFound>,
+        cx: &mut Context<Self>,
+    ) {
+        if found.is_empty() {
+            return;
+        }
+        #[cfg(feature = "terminal")]
+        let was = self
+            .cleanup_win
+            .is_some()
+            .then(|| self.agents_finished_worktrees());
+        let now = Instant::now();
+        for f in found {
+            self.agents.merged.insert(f.space, (now, f.heads));
+            for wt in f.within {
+                if let Some(g) = self.agents.git.get_mut(&wt).filter(|g| g.ahead > 0) {
+                    g.ahead = 0;
+                    g.landed = true;
+                }
+            }
+        }
+        #[cfg(feature = "terminal")]
+        if let Some(was) = was {
+            for wt in self.agents_finished_worktrees().difference(&was) {
+                self.agents.cleanup_checked.insert(wt.clone());
+            }
+        }
+        cx.notify();
     }
 
     /// Put the live tabs into the saved layout: worktrees opened this launch save what's open
@@ -1637,22 +1752,23 @@ impl Kyde {
         wt: PathBuf,
         cx: &mut Context<Self>,
     ) {
-        if !self.agents_wt_disposable(&space, &wt) {
+        if !self.agents_wt_disposable(&wt) {
             self.agents_ask_remove(space, wt, cx);
             return;
         }
+        let pr_head = self.agents_pr_head(&wt).map(str::to_string);
         cx.spawn(async move |this, cx| {
             let dir = wt.clone();
             let read = cx
                 .background_executor()
-                .spawn(async move { crate::agents::read_git(&dir) })
+                .spawn(async move { crate::agents::read_git(&dir, pr_head.as_deref()) })
                 .await;
             this.update(cx, |this, cx| {
                 match read {
                     Some((_, g)) => this.agents.git.insert(wt.clone(), g),
                     None => this.agents.git.remove(&wt),
                 };
-                if this.agents_wt_disposable(&space, &wt) {
+                if this.agents_wt_disposable(&wt) {
                     this.agents_remove_worktree(space, wt, cx);
                 } else {
                     this.agents_ask_remove(space, wt, cx);
@@ -1666,14 +1782,14 @@ impl Kyde {
     /// Removing worktree `wt` loses nothing worth asking about: it isn't pinned, and it's
     /// finished — what the Clean Up window ticks by default (nothing uncommitted, nothing
     /// unpushed, no agent still on it). Without agent tabs (no `terminal`) it always asks.
-    fn agents_wt_disposable(&self, space: &Path, wt: &Path) -> bool {
+    fn agents_wt_disposable(&self, wt: &Path) -> bool {
         #[cfg(feature = "terminal")]
         {
-            !self.agents.cfg.pinned.contains(wt) && self.agents_wt_cleanup(space, wt).1
+            !self.agents.cfg.pinned.contains(wt) && self.agents_wt_cleanup(wt).1
         }
         #[cfg(not(feature = "terminal"))]
         {
-            let _ = (space, wt);
+            let _ = wt;
             false
         }
     }
@@ -4068,24 +4184,8 @@ impl Kyde {
         if probes.is_empty() {
             return;
         }
-        // Merged-PR heads per space, re-fetched at most every 10 minutes (one `gh` call each).
-        let stale: Vec<PathBuf> = if rules.merged {
-            self.agents
-                .cfg
-                .spaces
-                .iter()
-                .filter(|s| self.agents.git_spaces.contains(&s.path))
-                .filter(|s| {
-                    self.agents
-                        .merged
-                        .get(&s.path)
-                        .is_none_or(|(at, _)| at.elapsed() >= MERGED_EVERY)
-                })
-                .map(|s| s.path.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Which pull requests are merged comes with the git refresh, not from this pass.
+        self.agents_refresh_merged(cx);
         let worktrees: std::collections::HashSet<PathBuf> =
             probes.iter().map(|p| p.0.clone()).collect();
         self.agents.sweeping = true;
@@ -4107,11 +4207,6 @@ impl Kyde {
                     for wt in worktrees {
                         let clean = crate::agents::worktree_is_clean(&wt);
                         f.clean.insert(wt, clean);
-                    }
-                    for space in stale {
-                        if let Ok(heads) = kyde_git::github::merged_heads(&space) {
-                            f.merged.push((space, heads));
-                        }
                     }
                     f
                 })
@@ -4155,9 +4250,6 @@ impl Kyde {
         } else {
             std::collections::HashSet::new()
         };
-        for (space, heads) in found.merged {
-            self.agents.merged.insert(space, (now, heads));
-        }
         for ((wt, spawned), after, done) in found.ai {
             if let Some(t) = self
                 .agents
@@ -4265,28 +4357,22 @@ impl Kyde {
     }
 
     /// Every worktree [`Self::agents_wt_disposable`] — what the Clean Up window ticks.
-    fn agents_finished_worktrees(&self) -> std::collections::HashSet<PathBuf> {
+    pub(crate) fn agents_finished_worktrees(&self) -> std::collections::HashSet<PathBuf> {
         self.agents
             .cfg
             .spaces
             .iter()
             .filter(|s| !s.scratch)
-            .flat_map(|s| s.worktrees.iter().map(move |w| (&s.path, w)))
-            .filter(|(space, wt)| self.agents_wt_disposable(space, wt))
-            .map(|(_, wt)| wt.clone())
+            .flat_map(|s| &s.worktrees)
+            .filter(|wt| self.agents_wt_disposable(wt))
+            .cloned()
             .collect()
     }
 
     /// Worktree `wt`'s branch has a merged pull request, or its work is on main already
     /// (squash-merged).
     fn agents_wt_merged(&self, wt: &Path) -> bool {
-        let space = self.agents.cfg.space_of(wt).map(|s| s.path.clone());
-        let branch = self.agents.branches.get(wt);
-        space
-            .and_then(|s| self.agents.merged.get(&s))
-            .zip(branch)
-            .is_some_and(|((_, heads), b)| heads.contains(b))
-            || self.agents.git.get(wt).is_some_and(|g| g.landed)
+        self.agents_pr_head(wt).is_some() || self.agents.git.get(wt).is_some_and(|g| g.landed)
     }
 
     /// Why worktree `wt` isn't finished on its agents' side (`None` = it is): removing it
@@ -4322,14 +4408,15 @@ impl Kyde {
     /// One worktree's line in the Clean Up window: what removing it costs, whether it's safe
     /// to tick by default (nothing uncommitted, nothing unpushed, no agent still on it — see
     /// [`Self::agents_wt_busy`]), and whether removing it would lose work.
-    fn agents_wt_cleanup(&self, space: &Path, wt: &Path) -> (String, bool, bool) {
+    fn agents_wt_cleanup(&self, wt: &Path) -> (String, bool, bool) {
         let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let merged = self
-            .agents
-            .merged
-            .get(space)
-            .zip(self.agents.branches.get(wt))
-            .is_some_and(|((_, heads), b)| heads.contains(b));
+        let merged = self.agents_pr_head(wt).is_some();
+        // A merged pull request with work it doesn't have: said first, it's easy to miss.
+        let leftover = if merged {
+            "PR merged, with leftover work — "
+        } else {
+            ""
+        };
         let busy = self.agents_wt_busy(wt);
         // Removing it would take the worktree inside it along (git refuses; see
         // `kyde_git::GitError::NestedWorktree`).
@@ -4351,7 +4438,7 @@ impl Kyde {
             None => ("Git state not read yet".into(), false, false),
             Some(g) if g.changed > 0 => (
                 format!(
-                    "{} uncommitted change{} — lost if removed",
+                    "{leftover}{} uncommitted change{} — lost if removed",
                     g.changed,
                     plural(g.changed)
                 ),
@@ -4359,17 +4446,18 @@ impl Kyde {
                 true,
             ),
             Some(_) if busy.is_some() => (busy.unwrap_or_default().into(), false, false),
-            Some(_) if merged => ("PR merged — finished".into(), true, false),
-            Some(g) if g.landed => ("Its changes are on main already".into(), true, false),
+            // Commits the merge didn't take (made since) aren't finished work.
             Some(g) if g.ahead > 0 => (
                 format!(
-                    "{} commit{} not pushed — kept on the branch",
+                    "{leftover}{} commit{} not pushed — kept on the branch",
                     g.ahead,
                     plural(g.ahead)
                 ),
                 false,
                 false,
             ),
+            Some(_) if merged => ("PR merged — safe to close".into(), true, false),
+            Some(g) if g.landed => ("Its changes are on main already".into(), true, false),
             Some(_) => ("Nothing uncommitted, nothing to push".into(), true, false),
         }
     }
@@ -4581,7 +4669,7 @@ impl Kyde {
                     .into_any_element(),
             );
             for wt in space.worktrees.iter().filter(|w| !pinned.contains(*w)) {
-                let (status, _, danger) = self.agents_wt_cleanup(&space.path, wt);
+                let (status, _, danger) = self.agents_wt_cleanup(wt);
                 let checked = self.agents.cleanup_checked.contains(wt);
                 let title = self
                     .agents
@@ -4626,12 +4714,7 @@ impl Kyde {
             .agents
             .cleanup_checked
             .iter()
-            .filter(|wt| {
-                self.agents
-                    .cfg
-                    .space_of(wt)
-                    .is_some_and(|s| self.agents_wt_cleanup(&s.path, wt).2)
-            })
+            .filter(|wt| self.agents_wt_cleanup(wt).2)
             .count();
         let closing =
             self.agents_cleanup_tabs_to_close().len() + self.agents_cleanup_subs_to_close().len();
@@ -7839,7 +7922,11 @@ impl Kyde {
             .flatten();
         let badges = fields
             .git
-            .then(|| git_badges((ns, id), self.agents.git.get(wt)))
+            .then(|| {
+                // A project's own checkout isn't closed: only linked worktrees get the mark.
+                let merged = !is_default && self.agents_pr_head(wt).is_some();
+                git_badges((ns, id), self.agents.git.get(wt), merged)
+            })
             .flatten();
         // One line: dot, title, then what needs saying (status, activity, CI, git).
         title_line()
@@ -10235,25 +10322,18 @@ fn worktree_title(space: Option<&Path>, wt: &Path) -> String {
 }
 
 /// A row's git badges: ↑ + unpushed commits, ✎ + uncommitted files — or a ✓ when it's clean
-/// and everything is pushed (the tooltip spells them out). Nothing outside git.
+/// and everything is pushed (the tooltip spells them out). `merged` (its branch's pull
+/// request is) leads with a merge mark: in the accent colour, alone, when nothing is left —
+/// safe to close — and in the modified colour, before the counts, when work is. Nothing
+/// outside git.
 fn git_badges(
     id: impl Into<gpui::ElementId>,
     g: Option<&crate::agents::WtGit>,
+    merged: bool,
 ) -> Option<gpui::Stateful<gpui::Div>> {
     let g = *g?;
     let t = theme::get();
-    let plural = |n: usize| if n == 1 { "" } else { "s" };
-    let tip = match (g.changed, g.ahead) {
-        (0, 0) if g.landed => "No uncommitted changes · already merged into main".to_string(),
-        (0, 0) => "No uncommitted changes · everything pushed".to_string(),
-        (0, a) => format!("{a} commit{} to push", plural(a)),
-        (c, 0) => format!("{c} uncommitted change{}", plural(c)),
-        (c, a) => format!(
-            "{c} uncommitted change{} · {a} commit{} to push",
-            plural(c),
-            plural(a)
-        ),
-    };
+    let tip = crate::agents::git_tip(g, merged);
     Some(
         div()
             .id(id)
@@ -10265,7 +10345,16 @@ fn git_badges(
             .text_size(px(t.ui_font_size - 1.0))
             .tooltip(ui::tip(tip))
             // Icons + counts; the tooltip spells them out.
-            .when(g.changed == 0 && g.ahead == 0, |d| {
+            .when(merged, |d| {
+                d.child(svg().path("icons/git-merge.svg").size(px(12.0)).text_color(
+                    if g.settled() {
+                        t.primary
+                    } else {
+                        t.status_modified
+                    },
+                ))
+            })
+            .when(g.settled() && !merged, |d| {
                 d.child(
                     svg()
                         .path("icons/check.svg")

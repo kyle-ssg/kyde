@@ -880,8 +880,6 @@ pub(crate) struct SweepFound {
     pub at_prompt: Vec<((std::path::PathBuf, std::time::SystemTime), bool)>,
     /// Per worktree: no uncommitted changes.
     pub clean: std::collections::HashMap<std::path::PathBuf, bool>,
-    /// Per space whose cache was stale: its merged PRs' head branches.
-    pub merged: Vec<(std::path::PathBuf, std::collections::HashSet<String>)>,
     /// Per tab the AI was asked about: its last output when asked, and `Some(why)` if done.
     pub ai: Vec<AiAnswer>,
 }
@@ -957,32 +955,133 @@ pub(crate) fn parse_verdict(reply: &str) -> Option<String> {
 /// A worktree's git state, as its sidebar row shows it.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct WtGit {
-    /// Files with uncommitted changes (incl. untracked).
+    /// Files with uncommitted changes (incl. untracked), not counting `same`.
     pub changed: usize,
     /// Commits not yet pushed (a new branch counts from its fork point on the remote mainline).
     pub ahead: usize,
     /// Its commits are unpushed but their changes are all on the remote mainline already
-    /// (squash-merged elsewhere) — finished, nothing to push.
+    /// (squash-merged elsewhere, or in its branch's merged pull request) — finished, nothing
+    /// to push.
     pub landed: bool,
+    /// Untracked files left out of `changed`: each is the remote mainline's copy of that
+    /// path, byte for byte (a generated file the mainline has too), so removing the worktree
+    /// loses nothing with them.
+    pub same: usize,
 }
 
-/// Read worktree `wt`'s branch + [`WtGit`]; `None` outside git. Runs git: call it off the
-/// UI thread.
-pub(crate) fn read_git(wt: &std::path::Path) -> Option<(Option<String>, WtGit)> {
-    let repo = kyde_git::Repo::discover(wt).ok()?;
-    let mut g = WtGit {
-        changed: repo.status().map_or(0, |files| files.len()),
-        ahead: repo.ahead_count().unwrap_or(0),
-        landed: false,
+impl WtGit {
+    /// Nothing uncommitted, nothing unpushed: removing the worktree loses no work.
+    pub fn settled(self) -> bool {
+        self.changed == 0 && self.ahead == 0
+    }
+}
+
+/// What a row's git badges say in words (their tooltip). `merged`: its branch's pull request
+/// is — "safe to close" once nothing is left here, "with leftover work" while something is.
+pub(crate) fn git_tip(g: WtGit, merged: bool) -> String {
+    let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let left: Vec<String> = [
+        (g.changed > 0).then(|| count(g.changed, "uncommitted change")),
+        (g.ahead > 0).then(|| count(g.ahead, "commit") + " to push"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut tip = match (merged, left.is_empty()) {
+        (true, true) => "PR merged · nothing uncommitted, nothing to push — safe to close".into(),
+        (true, false) => format!("PR merged, with leftover work · {}", left.join(" · ")),
+        (false, true) if g.landed => "No uncommitted changes · already merged into main".into(),
+        (false, true) => "No uncommitted changes · everything pushed".into(),
+        (false, false) => left.join(" · "),
     };
-    if g.ahead > 0 && repo.remote_default().is_some_and(|m| repo.landed_on(&m)) {
-        g = WtGit {
-            ahead: 0,
-            landed: true,
-            ..g
-        };
+    if g.same > 0 {
+        tip.push_str(&format!(
+            " · {} not counted: the same as main's",
+            count(g.same, "untracked file")
+        ));
+    }
+    tip
+}
+
+/// The most untracked files [`read_git`] compares with the mainline's copies — past that
+/// the worktree plainly has work in it.
+const SAME_CHECK_MAX: usize = 100;
+
+/// Read worktree `wt`'s branch + [`WtGit`]; `None` outside git. `pr_head` is the commit its
+/// branch's pull request was merged at, if it has one (`kyde_git::github::merged_heads`).
+/// Runs git: call it off the UI thread.
+pub(crate) fn read_git(
+    wt: &std::path::Path,
+    pr_head: Option<&str>,
+) -> Option<(Option<String>, WtGit)> {
+    let repo = kyde_git::Repo::discover(wt).ok()?;
+    let files = repo.status().unwrap_or_default();
+    let untracked: Vec<&std::path::Path> = files
+        .iter()
+        .filter(|f| f.status == kyde_git::FileStatus::Untracked)
+        .map(|f| f.path.as_path())
+        .collect();
+    let mut g = WtGit {
+        changed: files.len(),
+        ahead: repo.ahead_count().unwrap_or(0),
+        ..WtGit::default()
+    };
+    let check_same = !untracked.is_empty() && untracked.len() <= SAME_CHECK_MAX;
+    let mainline = (check_same || g.ahead > 0)
+        .then(|| repo.remote_default())
+        .flatten();
+    if check_same {
+        g.same = mainline
+            .as_deref()
+            .map_or(0, |m| repo.same_as(m, &untracked));
+        g.changed -= g.same;
+    }
+    if g.ahead > 0 {
+        // A merge usually deletes the remote branch, and git then counts the whole branch as
+        // unpushed: only what the merged pull request doesn't have still is.
+        if let Some(past) = pr_head.and_then(|c| repo.commits_past(c)) {
+            g.ahead = g.ahead.min(past);
+        }
+        // Nothing past the merge, or it's all on the mainline already: where it was going.
+        if g.ahead == 0 || mainline.is_some_and(|m| repo.landed_on(&m)) {
+            g.ahead = 0;
+            g.landed = true;
+        }
     }
     Some((repo.current_branch(), g))
+}
+
+/// What a `gh` read of one project's merged pull requests found.
+pub(crate) struct MergedFound {
+    pub space: std::path::PathBuf,
+    /// Head branch → the commit its pull request was merged at.
+    pub heads: std::collections::HashMap<String, String>,
+    /// The project's worktrees whose HEAD is in their branch's merged pull request.
+    pub within: Vec<std::path::PathBuf>,
+}
+
+/// Read `space`'s merged pull requests, and which of `worktrees` (each with its branch) have
+/// nothing past theirs. `None` when `gh` couldn't say. Runs `gh` + git: call it off the UI
+/// thread.
+pub(crate) fn read_merged(
+    space: std::path::PathBuf,
+    worktrees: &[(std::path::PathBuf, String)],
+) -> Option<MergedFound> {
+    let heads = kyde_git::github::merged_heads(&space).ok()?;
+    let within = worktrees
+        .iter()
+        .filter(|(wt, branch)| {
+            heads.get(branch).is_some_and(|commit| {
+                kyde_git::Repo::discover(wt).is_ok_and(|repo| repo.commits_past(commit) == Some(0))
+            })
+        })
+        .map(|(wt, _)| wt.clone())
+        .collect();
+    Some(MergedFound {
+        space,
+        heads,
+        within,
+    })
 }
 
 /// One `git worktree list` for `space`'s repo: the space's own branch, then every OTHER
@@ -1008,8 +1107,9 @@ pub(crate) fn repo_worktrees(space: &std::path::Path) -> Option<RepoWorktrees> {
 /// files, so a dozen worktrees cost about one). Blocks: call it off the UI thread.
 pub(crate) fn per_worktree<T: Send>(
     wts: Vec<std::path::PathBuf>,
-    f: fn(&std::path::Path) -> T,
+    f: impl Fn(&std::path::Path) -> T + Sync,
 ) -> Vec<(std::path::PathBuf, T)> {
+    let f = &f;
     std::thread::scope(|s| {
         let jobs: Vec<_> = wts
             .into_iter()

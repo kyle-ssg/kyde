@@ -591,11 +591,17 @@ pub fn parse_detail(json: &str, what: &str) -> Result<ItemDetail> {
 #[serde(rename_all = "camelCase")]
 struct RawHead {
     head_ref_name: String,
+    head_ref_oid: String,
+    /// From a fork: its branch name (often `main`) says nothing about a branch here.
+    #[serde(default)]
+    is_cross_repository: bool,
 }
 
-/// Head branches of the merged pull requests in `dir`'s repo (the most recent 200) — a
-/// worktree on one of them is finished.
-pub fn merged_heads(dir: &Path) -> Result<std::collections::HashSet<String>> {
+/// The merged pull requests in `dir`'s repo (the most recent 200; ones from forks left
+/// out), as head branch → the commit that was merged. A worktree on one of those branches is finished once it has
+/// nothing past that commit ([`crate::Repo::commits_past`]): what it has was made after the
+/// merge.
+pub fn merged_heads(dir: &Path) -> Result<std::collections::HashMap<String, String>> {
     let raw = gh(
         dir,
         &[
@@ -606,14 +612,20 @@ pub fn merged_heads(dir: &Path) -> Result<std::collections::HashSet<String>> {
             "--limit",
             "200",
             "--json",
-            "headRefName",
+            "headRefName,headRefOid,isCrossRepository",
         ],
     )?;
     let heads: Vec<RawHead> = serde_json::from_str(&raw).map_err(|source| GitError::Json {
         what: "gh pr list --state merged".into(),
         source,
     })?;
-    Ok(heads.into_iter().map(|h| h.head_ref_name).collect())
+    // `gh` lists the newest first: a branch merged twice keeps its latest pull request.
+    Ok(heads
+        .into_iter()
+        .rev()
+        .filter(|h| !h.is_cross_repository)
+        .map(|h| (h.head_ref_name, h.head_ref_oid))
+        .collect())
 }
 
 /// Pull request `number`'s changes as a unified diff (`gh pr diff`, no checkout needed).
