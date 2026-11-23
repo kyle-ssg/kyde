@@ -45,6 +45,22 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.21.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.20.0...kyde-v2.21.0) (2026-11-23)
+
+
+### Features
+
+* **agents:** mark a worktree whose PR is merged as safe to close ([#241](https://github.com/kyle-ssg/kyde/issues/241)) ([88a613a](https://github.com/kyle-ssg/kyde/commit/88a613ac625e87b985378b0250db31dc0e9ad67a))
+* **agents:** model switcher and AI-picked quick actions on agent tabs ([#245](https://github.com/kyle-ssg/kyde/issues/245)) ([da90d3d](https://github.com/kyle-ssg/kyde/commit/da90d3dba9c00c7f72b28d9ab919b93db89acde4))
+* **agents:** move a session to another project with `ky agent move` ([#246](https://github.com/kyle-ssg/kyde/issues/246)) ([eee6c5a](https://github.com/kyle-ssg/kyde/commit/eee6c5a7b335aff10cd06f8625c2aada93b81256))
+
+
+### Bug Fixes
+
+* **agents:** a row whose sessions you closed stays closed when opened ([#240](https://github.com/kyle-ssg/kyde/issues/240)) ([9393d8d](https://github.com/kyle-ssg/kyde/commit/9393d8d7fb652bc35f6ea13bf6895f30299e3f8d))
+* **agents:** Clean Up ticks a merged worktree whose agent is at its prompt ([#244](https://github.com/kyle-ssg/kyde/issues/244)) ([31f8d22](https://github.com/kyle-ssg/kyde/commit/31f8d229afbd157f7af8fc99e54c728c80ec3b69))
+* **agents:** judge a branch's CI icon by its tip commit ([#243](https://github.com/kyle-ssg/kyde/issues/243)) ([7cf3bdd](https://github.com/kyle-ssg/kyde/commit/7cf3bddc3b3cc792a9585d268d6cd76e3d6219d7))
+
 ## [2.20.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.19.1...kyde-v2.20.0) (2026-11-18)
 
 
