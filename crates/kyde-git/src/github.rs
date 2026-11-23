@@ -591,11 +591,17 @@ pub fn parse_detail(json: &str, what: &str) -> Result<ItemDetail> {
 #[serde(rename_all = "camelCase")]
 struct RawHead {
     head_ref_name: String,
+    head_ref_oid: String,
+    /// From a fork: its branch name (often `main`) says nothing about a branch here.
+    #[serde(default)]
+    is_cross_repository: bool,
 }
 
-/// Head branches of the merged pull requests in `dir`'s repo (the most recent 200) — a
-/// worktree on one of them is finished.
-pub fn merged_heads(dir: &Path) -> Result<std::collections::HashSet<String>> {
+/// The merged pull requests in `dir`'s repo (the most recent 200; ones from forks left
+/// out), as head branch → the commit that was merged. A worktree on one of those branches is finished once it has
+/// nothing past that commit ([`crate::Repo::commits_past`]): what it has was made after the
+/// merge.
+pub fn merged_heads(dir: &Path) -> Result<std::collections::HashMap<String, String>> {
     let raw = gh(
         dir,
         &[
@@ -606,14 +612,20 @@ pub fn merged_heads(dir: &Path) -> Result<std::collections::HashSet<String>> {
             "--limit",
             "200",
             "--json",
-            "headRefName",
+            "headRefName,headRefOid,isCrossRepository",
         ],
     )?;
     let heads: Vec<RawHead> = serde_json::from_str(&raw).map_err(|source| GitError::Json {
         what: "gh pr list --state merged".into(),
         source,
     })?;
-    Ok(heads.into_iter().map(|h| h.head_ref_name).collect())
+    // `gh` lists the newest first: a branch merged twice keeps its latest pull request.
+    Ok(heads
+        .into_iter()
+        .rev()
+        .filter(|h| !h.is_cross_repository)
+        .map(|h| (h.head_ref_name, h.head_ref_oid))
+        .collect())
 }
 
 /// Pull request `number`'s changes as a unified diff (`gh pr diff`, no checkout needed).
@@ -1119,6 +1131,8 @@ pub struct WorkflowRun {
     pub title: String,
     /// The branch it ran on.
     pub branch: String,
+    /// The commit it ran on (its full SHA).
+    pub head_sha: String,
     /// What started it (`push`, `pull_request`, …).
     pub event: String,
     /// `queued` / `in_progress` / `completed` / …
@@ -1235,7 +1249,7 @@ pub struct RunDetail {
 
 /// The `--json` fields of a run, for `gh run list` / `gh run view`.
 const RUN_FIELDS: &str =
-    "databaseId,number,attempt,workflowName,displayTitle,headBranch,event,status,conclusion,url,createdAt";
+    "databaseId,number,attempt,workflowName,displayTitle,headBranch,headSha,event,status,conclusion,url,createdAt";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1251,6 +1265,8 @@ struct RawRun {
     display_title: String,
     #[serde(default)]
     head_branch: String,
+    #[serde(default)]
+    head_sha: String,
     #[serde(default)]
     event: String,
     #[serde(default)]
@@ -1271,6 +1287,7 @@ impl From<RawRun> for WorkflowRun {
             workflow: r.workflow_name,
             title: r.display_title,
             branch: r.head_branch,
+            head_sha: r.head_sha,
             event: r.event,
             status: r.status,
             conclusion: r.conclusion,
@@ -1349,8 +1366,11 @@ pub fn branch_runs(dir: &Path, branch: &str) -> Result<Vec<WorkflowRun>> {
     )?)
 }
 
-/// The run of `runs` (newest first, as [`parse_runs`] marks them) most worth a look: of each
-/// workflow's latest, a failed one, else one under way, else the newest.
+/// The run of one branch's `runs` (newest first, as [`parse_runs`] marks them) most worth a
+/// look, judged on the branch's tip — the commit its newest run ran on: of each workflow's
+/// latest there, a failed one, else one under way, else the newest. An older commit's runs
+/// are out of date, like GitHub's own status for the tip: a workflow that didn't run again
+/// on it (a deploy a CMS webhook starts, a path-filtered build) doesn't keep it red.
 ///
 /// ```
 /// use kyde_git::github::{headline_run, parse_runs};
@@ -1388,6 +1408,16 @@ pub fn headline_run(runs: &[WorkflowRun]) -> Option<&WorkflowRun> {
 /// assert_eq!(branch_headline(&v, "fix-y").map(|r| r.id), Some(1)); // not main's run
 /// assert_eq!(branch_headline(&v, "main").map(|r| r.id), Some(3));
 /// assert!(branch_headline(&v, "never-pushed").is_none());
+///
+/// // A deploy that failed on main's previous commit, and that its tip didn't run again:
+/// // the tip's runs passed, so main is green.
+/// let v = parse_runs(
+///     r#"[{"databaseId":6,"workflowName":"build","headBranch":"main","headSha":"b2",
+///         "status":"completed","conclusion":"success"},
+///        {"databaseId":5,"workflowName":"deploy cms","headBranch":"main","headSha":"a1",
+///         "status":"completed","conclusion":"failure"}]"#,
+/// ).unwrap();
+/// assert_eq!(branch_headline(&v, "main").map(|r| r.id), Some(6));
 /// ```
 #[must_use]
 pub fn branch_headline<'a>(runs: &'a [WorkflowRun], branch: &str) -> Option<&'a WorkflowRun> {
@@ -1396,7 +1426,8 @@ pub fn branch_headline<'a>(runs: &'a [WorkflowRun], branch: &str) -> Option<&'a 
 
 /// [`headline_run`] of the `runs` that `keep` lets through.
 fn headline(runs: &[WorkflowRun], keep: impl Fn(&WorkflowRun) -> bool) -> Option<&WorkflowRun> {
-    let kept = || runs.iter().filter(|r| keep(r));
+    let tip = &runs.iter().find(|r| keep(r))?.head_sha;
+    let kept = || runs.iter().filter(|r| keep(r) && r.head_sha == *tip);
     let latest = || kept().filter(|r| r.superseded_by.is_none());
     latest()
         .find(|r| r.state() == RunState::Failed)

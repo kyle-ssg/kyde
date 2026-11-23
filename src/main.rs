@@ -1558,12 +1558,21 @@ struct AgentsView {
     /// Worktrees whose tabs were opened this launch (their saved tabs are now the live ones).
     #[cfg(feature = "terminal")]
     restored: std::collections::HashSet<PathBuf>,
+    /// Worktrees whose last tab you closed this launch: opening one shows its empty pane, not
+    /// its last session resumed, until a tab is started there.
+    #[cfg(feature = "terminal")]
+    closed: std::collections::HashSet<PathBuf>,
     /// Each space's own checkout vs its remote mainline, from the last background sync.
     main_sync: std::collections::HashMap<PathBuf, agents::MainSync>,
-    /// Per space: when its merged PRs were last fetched, and their head branches.
-    #[cfg(feature = "terminal")]
-    merged:
-        std::collections::HashMap<PathBuf, (std::time::Instant, std::collections::HashSet<String>)>,
+    /// Per space: when its merged PRs were last asked for, and each one's head branch → the
+    /// commit it was merged at (`agents_refresh_merged`).
+    merged: std::collections::HashMap<
+        PathBuf,
+        (
+            std::time::Instant,
+            std::collections::HashMap<String, String>,
+        ),
+    >,
     /// A cleanup pass is gathering facts in the background.
     #[cfg(feature = "terminal")]
     sweeping: bool,
@@ -2128,8 +2137,9 @@ impl AgentsView {
             hiding: std::collections::HashSet::new(),
             #[cfg(feature = "terminal")]
             restored: std::collections::HashSet::new(),
-            main_sync: std::collections::HashMap::new(),
             #[cfg(feature = "terminal")]
+            closed: std::collections::HashSet::new(),
+            main_sync: std::collections::HashMap::new(),
             merged: std::collections::HashMap::new(),
             #[cfg(feature = "terminal")]
             sweeping: false,
@@ -3818,6 +3828,8 @@ impl gpui::AssetSource for Assets {
             // Agents sidebar: New group.
             "icons/folder-plus.svg" => include_bytes!("../assets/icons/folder-plus.svg"),
             "icons/git-branch.svg" => include_bytes!("../assets/icons/git-branch.svg"),
+            // Agents sidebar: a worktree whose pull request is merged.
+            "icons/git-merge.svg" => include_bytes!("../assets/icons/git-merge.svg"),
             "icons/history.svg" => include_bytes!("../assets/icons/history.svg"),
             "icons/layers.svg" => include_bytes!("../assets/icons/layers.svg"),
             #[cfg(feature = "terminal")]
@@ -8963,6 +8975,136 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A worktree whose pull request is merged is safe to close once nothing of it is left:
+    /// its commits are in the merge (git still counts them unpushed — the merge deleted the
+    /// remote branch) and its one untracked file is main's own copy, so its × removes it
+    /// unasked. A commit made after the merge is leftover work: its × asks.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_merged_worktree_is_safe_to_close_unless_work_is_left(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("merged");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "task"],
+        );
+        let wt = wt.canonicalize().unwrap();
+        // The remote mainline has a generated file the branch forked before.
+        std::fs::write(dir.join("gen.md"), "generated\n").unwrap();
+        git(&dir, &["add", "gen.md"]);
+        git(&dir, &["commit", "-qm", "gen"]);
+        git(&dir, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let commit = |file: &str| {
+            std::fs::write(wt.join(file), "work\n").unwrap();
+            git(&wt, &["add", file]);
+            git(&wt, &["commit", "-qm", file]);
+        };
+        commit("pr.txt");
+        let head = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&wt)
+            .output()
+            .unwrap();
+        let merged_at = String::from_utf8(head.stdout).unwrap().trim().to_string();
+        commit("later.txt");
+        // The dev server writes the same generated file here, untracked.
+        std::fs::write(wt.join("gen.md"), "generated\n").unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents.branches.insert(wt.clone(), "task".into());
+                let heads = [("task".to_string(), merged_at.clone())].into();
+                k.agents
+                    .merged
+                    .insert(dir.clone(), (std::time::Instant::now(), heads));
+                let (_, g) = agents::read_git(&wt, Some(&merged_at)).unwrap();
+                let left = agents::WtGit {
+                    ahead: 1,
+                    same: 1,
+                    ..agents::WtGit::default()
+                };
+                assert_eq!(g, left, "only the commit made since the merge is left");
+                k.agents.git.insert(wt.clone(), g);
+                k.agents_confirm_remove(dir.clone(), wt.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(k.remove_wt_win.is_some(), "leftover work: asks");
+                k.agents.removing = None;
+                k.close_modal_window(ModalKind::RemoveWorktree, cx);
+            })
+            .unwrap();
+        // Without that commit, everything here is in the merge.
+        git(&wt, &["reset", "-q", "--hard", "HEAD~1"]);
+        handle
+            .update(cx, |k, _w, cx| {
+                let (_, g) = agents::read_git(&wt, Some(&merged_at)).unwrap();
+                let done = agents::WtGit {
+                    landed: true,
+                    same: 1,
+                    ..agents::WtGit::default()
+                };
+                assert_eq!(g, done);
+                k.agents.git.insert(wt.clone(), g);
+                k.agents_confirm_remove(dir.clone(), wt.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!wt.exists(), "safe to close: removed without asking");
+    }
+
+    /// Once its PR is merged, a worktree whose agent sits at its prompt is finished — without
+    /// waiting out the quiet spell the cleanup needs before judging the tab (opening the
+    /// worktree resumes its session, which restarts that spell).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_ticks_a_merged_worktree_whose_agent_is_at_its_prompt(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("task");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "task"],
+        );
+        git(&dir, &["update-ref", "refs/remotes/origin/task", "HEAD"]);
+        let wt = wt.canonicalize().unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents_new_tab(wt.clone(), true, None, cx);
+                k.agents_select(dir.clone(), cx);
+                k.agents.git.insert(wt.clone(), agents::WtGit::default());
+                k.agents.branches.insert(wt.clone(), "task".into());
+                // Just resumed: at its prompt, too fresh for the cleanup to judge.
+                let t = &mut k.agents.tabs.get_mut(&wt).unwrap().tabs[0];
+                t.unseen = false;
+                t.shown = agents::AgentState::Idle;
+                t.last_active = std::time::Instant::now();
+                let mut found = agents::SweepFound::default();
+                found.at_prompt.push(((wt.clone(), t.spawned_at), false));
+                // Its PR is merged (the git refresh learned where).
+                let heads = [("task".to_string(), "abc123".to_string())].into();
+                k.agents
+                    .merged
+                    .insert(dir.clone(), (std::time::Instant::now(), heads));
+                k.agents_apply_sweep(found, true, cx);
+                assert!(k.agents.tabs[&wt].tabs[0].verdict.is_none(), "not judged");
+                assert!(
+                    k.agents_finished_worktrees().contains(&wt),
+                    "merged: the Clean Up window ticks it"
+                );
+            })
+            .unwrap();
+    }
+
     /// A pinned worktree is left alone by the cleanup: a tab there the rules would close
     /// stays open, unmarked — until it's unpinned.
     #[cfg(feature = "terminal")]
@@ -9101,6 +9243,17 @@ mod gpui_smoke_tests {
                     "the row stays"
                 );
                 assert!(!offered(k), "nothing open: nothing to close");
+                // Opening the row again doesn't bring back what you closed.
+                k.agents_select(dir.clone(), cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                assert!(!k.agents.tabs.contains_key(&dir), "closed stays closed");
+                // Until you start one there: from then on it opens as any row does.
+                k.agents_new_tab(dir.clone(), false, None, cx);
+                assert!(!k.agents.closed.contains(&dir));
             })
             .unwrap();
     }
