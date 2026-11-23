@@ -2033,8 +2033,8 @@ impl Kyde {
     }
 
     /// End every session in worktree `wt` — its agents and shells — asking first while an
-    /// agent there isn't done. The row stays (a checkout's ×, any row's menu): nothing runs
-    /// for it until it's opened again, which resumes its latest Claude Code session.
+    /// agent there isn't done. The row stays (a checkout's ×, any row's menu), with nothing
+    /// running for it until you start a tab there (`agents_close_by_hand`).
     pub(crate) fn agents_close_sessions(&mut self, wt: &Path, cx: &mut Context<Self>) {
         #[cfg(feature = "terminal")]
         if let Some(g) = self.agents.tabs.get(wt) {
@@ -2409,14 +2409,10 @@ impl Kyde {
     }
 
     /// Bring a worktree's tabs up as it's opened: the tabs it had at the last quit (agent tabs
-    /// resume their Claude Code sessions), else one fresh agent tab. No-op if it has tabs.
+    /// resume their Claude Code sessions), else one fresh agent tab. No-op if it has tabs —
+    /// or you closed them (`agents_close_by_hand`): what you closed doesn't come back by itself.
     fn agents_open_tabs(&mut self, wt: PathBuf, cx: &mut Context<Self>) {
-        if self
-            .agents
-            .tabs
-            .get(&wt)
-            .is_some_and(|g| !g.tabs.is_empty())
-        {
+        if self.agents_has_tabs(&wt) || self.agents.closed.contains(&wt) {
             return;
         }
         // A project's own checkout first catches up with the latest main.
@@ -2799,7 +2795,7 @@ impl Kyde {
                     };
                     // Its shell exited: nothing left to lose. Its own menu's Close asks.
                     if v.read(cx).exited {
-                        this.agents_close_tab(&key, i, cx);
+                        this.agents_close_by_hand(&key, i, cx);
                     } else {
                         let id = this.agents.tabs[&key].tabs[i].id.clone();
                         this.agents_ask_close(vec![id], cx);
@@ -2809,6 +2805,7 @@ impl Kyde {
         })
         .detach();
         self.agents.restored.insert(wt.clone());
+        self.agents.closed.remove(&wt);
         let group = self.agents.tabs.entry(wt).or_insert_with(|| AgentTabs {
             tabs: Vec::new(),
             active: 0,
@@ -2935,8 +2932,18 @@ impl Kyde {
                 Some((wt.clone(), i))
             });
             if let Some((wt, i)) = at {
-                self.agents_close_tab(&wt, i, cx);
+                self.agents_close_by_hand(&wt, i, cx);
             }
+        }
+    }
+
+    /// `agents_close_tab` for a tab you closed yourself (not the cleanup): once nothing is
+    /// left open in its worktree, the row stays empty when it's opened — its pane offers to
+    /// start an agent — instead of resuming the session you just closed.
+    fn agents_close_by_hand(&mut self, wt: &Path, idx: usize, cx: &mut Context<Self>) {
+        self.agents_close_tab(wt, idx, cx);
+        if !self.agents_has_tabs(wt) && self.agents.cfg.space_of(wt).is_some() {
+            self.agents.closed.insert(wt.to_path_buf());
         }
     }
 
@@ -3696,6 +3703,7 @@ impl Kyde {
             }
         }
         self.agents.restored.insert(to.clone());
+        self.agents.closed.remove(&to);
         let g = self
             .agents
             .tabs
