@@ -37,12 +37,13 @@ impl Kyde {
         t.actions.clear();
         let (id, session) = (t.id.clone(), t.session.clone());
         let tail = t.view.read(cx).tail_text(40);
+        let pr_head = self.agents_pr_head(&wt).map(String::from);
         cx.spawn(async move |this, cx| {
             let picked = cx
                 .background_executor()
                 .spawn(async move {
-                    let options =
-                        crate::agents::quick_actions(&crate::agents::read_action_facts(&wt));
+                    let facts = crate::agents::read_action_facts(&wt, pr_head.as_deref());
+                    let options = crate::agents::quick_actions(&facts);
                     if options.is_empty() {
                         return options;
                     }

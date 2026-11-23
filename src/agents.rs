@@ -988,11 +988,12 @@ pub(crate) struct ActionFacts {
     pub release: Option<(u64, String)>,
 }
 
-/// Read [`ActionFacts`] for worktree `wt`. Runs git and `gh` (network): call it off the UI
-/// thread. Without `gh` (or GitHub) only the git-side actions apply.
-pub(crate) fn read_action_facts(wt: &std::path::Path) -> ActionFacts {
+/// Read [`ActionFacts`] for worktree `wt`; `pr_head` as for [`read_git`] (a merged branch has
+/// nothing left to open a PR for). Runs git and `gh` (network): call it off the UI thread.
+/// Without `gh` (or GitHub) only the git-side actions apply.
+pub(crate) fn read_action_facts(wt: &std::path::Path, pr_head: Option<&str>) -> ActionFacts {
     use kyde_git::github;
-    let (branch, git) = read_git(wt).unwrap_or_default();
+    let (branch, git) = read_git(wt, pr_head).unwrap_or_default();
     let prs = github::prs(wt, github::PrFilter::All, "").unwrap_or_default();
     let ours = |head: &str| branch.as_deref() == Some(head);
     ActionFacts {
@@ -2562,7 +2563,7 @@ mod tests {
         let git = |changed, ahead| WtGit {
             changed,
             ahead,
-            landed: false,
+            ..WtGit::default()
         };
         let release = Some((230, "chore(main): release 2.21.0".to_string()));
         assert!(
