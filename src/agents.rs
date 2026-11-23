@@ -781,8 +781,9 @@ pub(crate) fn left_background(was: bool, r: &HookReport) -> bool {
 /// isn't still running (`live`: the hosts that are — those are reattached), but for agent tabs
 /// with no conversation to resume. One that never got a prompt has no transcript, and
 /// `--resume` on it fails. An agent tab resumes the session its hook last reported (else the
-/// saved one); a shell tab starts afresh. The gone tabs' state files are deleted. File IO:
-/// call it off the UI thread.
+/// saved one); a shell tab starts afresh. One whose agent moved to another project (`ky
+/// agent move`) stays gone: its session goes on there. The gone tabs' state files are
+/// deleted. File IO: call it off the UI thread.
 pub(crate) fn tabs_to_reopen(
     saved: Vec<kyde_config::agents::SavedTab>,
     live: &std::collections::HashSet<String>,
@@ -791,16 +792,26 @@ pub(crate) fn tabs_to_reopen(
         .into_iter()
         .filter(|t| t.id.as_ref().is_none_or(|id| !live.contains(id)))
         .filter_map(|mut t| {
+            let moved = t.id.as_deref().is_some_and(|id| moved_path(id).exists());
             let last = t.id.take().and_then(|id| {
                 let last = std::fs::read_to_string(state_path(&id))
                     .ok()
                     .and_then(|s| last_session(&s));
-                for f in [state_path(&id), brief_path(&id), write_path(&id)] {
+                for f in [
+                    state_path(&id),
+                    brief_path(&id),
+                    write_path(&id),
+                    move_path(&id),
+                    moved_path(&id),
+                ] {
                     let _ = std::fs::remove_file(f);
                 }
                 let _ = std::fs::remove_dir_all(sub_dir(&id));
                 last
             });
+            if moved {
+                return None;
+            }
             if !t.agent {
                 return Some(t);
             }
@@ -813,7 +824,7 @@ pub(crate) fn tabs_to_reopen(
 }
 
 /// The session a tab's last hook event (any kind) came from, and its transcript.
-fn last_session(json: &str) -> Option<(String, std::path::PathBuf)> {
+pub(crate) fn last_session(json: &str) -> Option<(String, std::path::PathBuf)> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
     let s = |k: &str| Some(v.get(k)?.as_str()?).filter(|x| !x.is_empty());
     Some((s("session_id")?.to_string(), s("transcript_path")?.into()))
@@ -1996,6 +2007,67 @@ pub(crate) fn brief_path(id: &str) -> std::path::PathBuf {
     kyde_config::agents::agents_dir().join(format!("{id}.state.brief"))
 }
 
+/// Tab `id`'s move to another project, waiting for its agent's turn to end (`ky agent move`
+/// writes it, the agent's host carries it out — `agent_host::MoveRequest`).
+pub(crate) fn move_path(id: &str) -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join(format!("{id}.move"))
+}
+
+/// What tab `id`'s host leaves once it has moved the agent (`agent_host::Moved`): the agent
+/// now carrying its session, for Kyde to put in its place.
+pub(crate) fn moved_path(id: &str) -> std::path::PathBuf {
+    kyde_config::agents::agents_dir().join(format!("{id}.moved"))
+}
+
+/// Move Claude Code session file `transcript` (`<id>.jsonl`, with the `<id>/` folder of its
+/// subagents' and tool output beside it) into project folder `dest`, so the session belongs
+/// to that folder's project: `--resume` there finds it, and Kyde reads it as that worktree's
+/// (see [`session_worktree`]). Nothing is overwritten. File IO.
+pub(crate) fn move_transcript(
+    transcript: &std::path::Path,
+    dest: &std::path::Path,
+) -> std::io::Result<()> {
+    let (Some(dir), Some(name), Some(stem)) = (
+        transcript.parent(),
+        transcript.file_name(),
+        transcript.file_stem(),
+    ) else {
+        return Err(std::io::Error::other("not a session file"));
+    };
+    if dir == dest {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dest)?;
+    for (from, to) in [
+        (transcript.to_path_buf(), dest.join(name)),
+        (dir.join(stem), dest.join(stem)),
+    ] {
+        if from.exists() && !to.exists() {
+            std::fs::rename(from, to)?;
+        }
+    }
+    Ok(())
+}
+
+/// The prompt a session moved to another project resumes on (`ky agent move`): where it is
+/// now, then `task` (what it said it would do there), else to carry on.
+pub(crate) fn moved_prompt(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    task: Option<&str>,
+) -> String {
+    let task = task
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Carry on with the task here.");
+    format!(
+        "Kyde has moved this session from {} to {}, as you asked: that's your working \
+         directory now. {task}",
+        from.display(),
+        to.display()
+    )
+}
+
 /// What's already going on in a worktree when a new agent tab opens there.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Busy {
@@ -2014,20 +2086,24 @@ pub(crate) struct Busy {
 
 /// Every tab's note ends with this: only `EnterWorktree` moves the session to another
 /// worktree (and the tab with it, see [`moved_worktree`]); a shell `cd` leaves both behind.
-/// `EnterWorktree` refuses another repository's worktrees, so work in another project is
-/// handed to a new agent there (`ky agent new`, which Kyde adopts as a tab of that project) —
-/// not done by path from a tab Kyde can't move. A session that has already entered a worktree
-/// is refused too — a new one by `name`, and by `path` any outside `.claude/worktrees/`
-/// (Kyde's own are in `~/.kyde/worktrees/`) — until it steps back out with `ExitWorktree`.
+/// `EnterWorktree` refuses another repository's worktrees, so a session goes to another
+/// project with `ky agent move` (Kyde resumes it in a tab there), or hands that project a
+/// separate task with `ky agent new` — never works on it by path from a tab Kyde can't move.
+/// A session that has already entered a worktree is refused too — a new one by `name`, and
+/// by `path` any outside `.claude/worktrees/` (Kyde's own are in `~/.kyde/worktrees/`) —
+/// until it steps back out with `ExitWorktree`.
 const MOVE_HOW: &str = "To work in another worktree of this repository, call EnterWorktree — \
      `name` for a new one, `path` for one that exists (e.g. made with `git worktree add`) — so \
      this session moves there and Kyde moves this tab with it. If it refuses because this \
      session is already in a worktree it entered, call ExitWorktree with `action: \"keep\"` \
      (that worktree and its work stay as they are), then EnterWorktree again. A `cd` in the \
-     shell leaves both behind. EnterWorktree refuses another repository's worktrees: for work \
-     in another project, start an agent there with `\"$KYDE_BIN\" agent new <folder> --prompt \
-     \"<the task>\"` (Kyde opens it as a tab of that project) and tell the user, instead of \
-     doing it from here.";
+     shell leaves both behind. EnterWorktree refuses another repository's worktrees. To take \
+     this session to another project, run `\"$KYDE_BIN\" agent move <folder> --prompt \"<what \
+     you'll do there>\"` and end your turn: Kyde resumes this conversation in a tab of that \
+     project (this tab closes), where you can call EnterWorktree. To hand that project a \
+     separate task while you stay here, run `\"$KYDE_BIN\" agent new <folder> --prompt \"<the \
+     task>\"` (Kyde opens it as a tab there) and tell the user. Never work on another project \
+     by path from here.";
 
 /// The note a new agent tab's first prompt carries (see [`brief_path`]): always how to move
 /// to another worktree ([`MOVE_HOW`]); and when its worktree is busy (changes, unpushed
@@ -2099,6 +2175,36 @@ pub(crate) fn seeded_brief(
     wt: &std::path::Path,
 ) -> Option<String> {
     (cfg.claude_hooks && !cfg.is_scratch(wt)).then(|| task_brief(&Busy::default(), cfg.new_task))
+}
+
+/// The note for an agent moved to worktree `wt` (`ky agent move`): what's there already, as
+/// git tells it (see [`task_brief`]) — a project's own checkout is often the user's, at work
+/// on something else, so the moved task gets a worktree of its own. `None` as for
+/// [`seeded_brief`]. Runs git: call it off the UI thread.
+pub(crate) fn moved_brief(
+    cfg: &kyde_config::agents::AgentsCfg,
+    wt: &std::path::Path,
+) -> Option<String> {
+    if !cfg.claude_hooks || cfg.is_scratch(wt) {
+        return None;
+    }
+    let busy = read_git(wt, None).map_or_else(Busy::default, |(branch, g)| {
+        let own = cfg.spaces.iter().any(|s| s.path == wt);
+        let mainline = || kyde_git::Repo::discover(wt).ok()?.remote_default();
+        let off_main = own
+            && mainline().is_some_and(|remote| {
+                let local = remote.split_once('/').map_or(remote.as_str(), |(_, b)| b);
+                branch.as_deref() != Some(local)
+            });
+        Busy {
+            branch,
+            changed: g.changed,
+            ahead: g.ahead,
+            off_main,
+            ..Busy::default()
+        }
+    });
+    Some(task_brief(&busy, cfg.new_task))
 }
 
 /// The worktree a Claude Code session is in, canonical: the one holding `cwd`, when the
@@ -2359,6 +2465,9 @@ mod tests {
         };
         report("reopen-done", "its-latest", &transcript);
         report("reopen-blank", "blank", &dir.join("never-written.jsonl"));
+        // Its agent moved to another project (`ky agent move`), where its session goes on.
+        report("reopen-moved", "moved-on", &transcript);
+        std::fs::write(moved_path("reopen-moved"), "{}").unwrap();
         let tab = |id: &str, agent, session: Option<&str>, name: Option<&str>| SavedTab {
             agent,
             session: session.map(Into::into),
@@ -2371,6 +2480,7 @@ mod tests {
             tab("reopen-done", true, Some("first"), Some("Fix login")),
             tab("reopen-blank", true, Some("blank"), None),
             tab("reopen-shell", false, None, None),
+            tab("reopen-moved", true, Some("moved-on"), None),
         ];
         let live = std::collections::HashSet::from(["reopen-live".to_string()]);
         assert_eq!(
@@ -2388,6 +2498,37 @@ mod tests {
             ]
         );
         assert!(!state_path("reopen-done").exists(), "a gone tab's state");
+        assert!(
+            !moved_path("reopen-moved").exists(),
+            "a moved tab's word of it"
+        );
+    }
+
+    /// `ky agent move` takes the session's file and its folder to the new project's, where
+    /// `--resume` finds it — and never overwrites one there.
+    #[test]
+    fn a_moved_session_file_goes_to_the_new_projects_folder() {
+        let root =
+            std::env::temp_dir().join(format!("kyde-move-transcript-{}", std::process::id()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(old.join("s1").join("subagents")).unwrap();
+        std::fs::write(old.join("s1.jsonl"), "conversation").unwrap();
+        std::fs::write(old.join("s1").join("subagents").join("a.jsonl"), "sub").unwrap();
+        move_transcript(&old.join("s1.jsonl"), &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("s1.jsonl")).unwrap(),
+            "conversation"
+        );
+        assert!(new.join("s1").join("subagents").join("a.jsonl").exists());
+        assert!(!old.join("s1.jsonl").exists() && !old.join("s1").exists());
+        std::fs::write(old.join("s2.jsonl"), "older").unwrap();
+        std::fs::write(new.join("s2.jsonl"), "newer").unwrap();
+        move_transcript(&old.join("s2.jsonl"), &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("s2.jsonl")).unwrap(),
+            "newer"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2722,7 +2863,9 @@ mod tests {
         // the tab in its old one.
         let only_how = task_brief(&free, NewTask::Move);
         assert!(only_how.contains("`path` for one that exists") && !only_how.contains("old work"));
-        // Another project's worktree is out of EnterWorktree's reach: hand the task off.
+        // Another project's worktree is out of EnterWorktree's reach: the session moves there
+        // through Kyde, or hands it a task.
+        assert!(only_how.contains("\"$KYDE_BIN\" agent move <folder> --prompt"));
         assert!(only_how.contains("\"$KYDE_BIN\" agent new <folder> --prompt"));
         // A session already in a worktree it entered has to step out before the next one.
         assert!(only_how.contains("ExitWorktree with `action: \"keep\"`"));

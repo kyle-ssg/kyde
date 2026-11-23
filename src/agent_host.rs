@@ -27,8 +27,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 /// Bumped when the wire format changes (a host from an older Kyde says so in `HELLO`).
-/// 2: a host answers `RELEASE`.
-pub(crate) const VERSION: u32 = 2;
+/// 2: a host answers `RELEASE`. 3: a host carries out `ky agent move` (`MoveRequest`).
+pub(crate) const VERSION: u32 = 3;
 /// Output a host keeps for a reattaching viewer.
 const RING_CAP: usize = 4 * 1024 * 1024;
 /// What a Claude Code session exports to the commands it runs. An agent host started from
@@ -111,6 +111,69 @@ pub(crate) struct HostInfo {
     pub agent: bool,
     /// Unix seconds.
     pub started: u64,
+}
+
+/// `ky agent move`: the agent goes on in another project once its turn is over — its host
+/// moves the session's transcript to that project's folder (`agents::move_transcript`), starts
+/// `spec` there (which resumes it), and tells Kyde (`Moved`). Waits in `agents::move_path`.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub(crate) struct MoveRequest {
+    /// The host to start, resuming the session (its `cwd` is where it's going).
+    pub spec: HostSpec,
+    /// The session's file, moved along.
+    pub transcript: Option<PathBuf>,
+    /// The note for its first prompt there (`agents::moved_brief`).
+    pub brief: Option<String>,
+    /// The project (a space's own folder) it's going to: `spec.cwd` joins it when Kyde doesn't
+    /// list it yet.
+    pub space: PathBuf,
+}
+
+/// What a moving agent's host leaves in `agents::moved_path`: the agent that carries the
+/// session on (up a few seconds later, once this one has exited), for Kyde to put in its
+/// tab's place.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub(crate) struct Moved {
+    pub id: String,
+    pub to: PathBuf,
+    pub space: PathBuf,
+}
+
+/// Where agent `id` went, if it moved (and forget it: it's read once). File IO.
+pub(crate) fn take_moved(id: &str) -> Option<Moved> {
+    let path = crate::agents::moved_path(id);
+    let moved = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let _ = std::fs::remove_file(path);
+    moved
+}
+
+/// What a new hook report means for a move requested at `asked` (`MoveRequest`).
+#[derive(Debug, PartialEq, Eq)]
+enum MoveDue {
+    /// The turn it was asked in is over: go.
+    Go,
+    /// Called off: you typed a new prompt since (Esc ended that turn without a `Stop`), or
+    /// the agent exited.
+    Drop,
+    Wait,
+}
+
+fn move_due(
+    asked: std::time::SystemTime,
+    at: std::time::SystemTime,
+    r: &crate::agents::HookReport,
+) -> MoveDue {
+    use crate::agents::Hook;
+    if at <= asked {
+        return MoveDue::Wait;
+    }
+    match (&r.hook, r.woken) {
+        (Hook::Done, _) => MoveDue::Go,
+        (Hook::Ended, _) | (_, Some(false)) => MoveDue::Drop,
+        _ => MoveDue::Wait,
+    }
 }
 
 /// The first frame a viewer gets.
@@ -401,6 +464,8 @@ struct Shared {
     closed_cv: Condvar,
     /// Held while a `KILL` ends the agent, so the host stays up until that's done.
     ending: Mutex<()>,
+    /// A move whose time has come (`watch`), carried out once the agent has exited.
+    moving: Mutex<Option<MoveRequest>>,
 }
 
 impl Shared {
@@ -435,9 +500,39 @@ impl Shared {
         // Something from outside the tree still holds the terminal open: go anyway. Exiting
         // drops the PTY, which hangs up whatever is left on it.
         if !self.wait_closed(Duration::from_secs(1)) {
+            self.hand_off();
             self.unregister();
             std::process::exit(0);
         }
+    }
+
+    /// Carry out a move whose time has come, once the agent has exited (its transcript is
+    /// complete): the transcript goes to the new project's folder, and a host there resumes
+    /// the session.
+    fn hand_off(&self) {
+        let Some(req) = lock(&self.moving).take() else {
+            return;
+        };
+        let dest = crate::agents::claude_project_dir(&req.spec.cwd);
+        if let (Some(t), Some(dest)) = (&req.transcript, dest) {
+            // Left behind it still resumes, from the project it started in.
+            if let Err(e) = crate::agents::move_transcript(t, &dest) {
+                eprintln!("kyde agent host: moving {}: {e}", t.display());
+            }
+        }
+        if let Some(brief) = &req.brief {
+            let _ = std::fs::write(crate::agents::brief_path(&req.spec.id), brief);
+        }
+        let mut spec = req.spec;
+        (spec.cols, spec.rows) = *lock(&self.size);
+        if let Err(e) = spawn(&spec) {
+            eprintln!("kyde agent host: starting the moved agent: {e}");
+            // It didn't go: its tab reopens on the session, wherever that is now.
+            let _ = std::fs::remove_file(crate::agents::moved_path(&self.id));
+            return;
+        }
+        // Before this one unregisters, so a Kyde that sees this tab close finds that one up.
+        wait_registered(&spec.id);
     }
 
     /// Somebody is there (or the agent is at work): the unwatched clock starts over. `false`
@@ -550,6 +645,10 @@ fn watch(shared: &Shared) {
                 .ok()
                 .and_then(|s| crate::agents::parse_hook(&s));
             if let Some(r) = new {
+                if moves_now(shared, at, &r) {
+                    shared.end();
+                    return;
+                }
                 let mut report = lock(&shared.report);
                 let was = report.as_ref().is_some_and(|r| r.background);
                 *report = Some(Report {
@@ -568,6 +667,43 @@ fn watch(shared: &Shared) {
         if unattended.is_some_and(|d| d >= crate::agents::UNWATCHED_GRACE) && shared.abandon() {
             shared.end();
             return;
+        }
+    }
+}
+
+/// A move the agent asked for (`ky agent move`) and hook report `r` (written `at`) says is
+/// due: taken up — Kyde told where the agent is going, ahead of its tab closing (it may
+/// close the moment this one is abandoned) — and the agent abandoned for ending: `true`
+/// then. One called off is forgotten.
+fn moves_now(shared: &Shared, at: std::time::SystemTime, r: &crate::agents::HookReport) -> bool {
+    let path = crate::agents::move_path(&shared.id);
+    let Ok(asked) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
+        return false;
+    };
+    match move_due(asked, at, r) {
+        MoveDue::Wait => false,
+        MoveDue::Drop => {
+            let _ = std::fs::remove_file(&path);
+            false
+        }
+        MoveDue::Go => {
+            let req = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<MoveRequest>(&s).ok());
+            let _ = std::fs::remove_file(&path);
+            let Some(req) = req else {
+                return false;
+            };
+            let moved = Moved {
+                id: req.spec.id.clone(),
+                to: req.spec.cwd.clone(),
+                space: req.space.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&moved) {
+                let _ = std::fs::write(crate::agents::moved_path(&shared.id), json);
+            }
+            *lock(&shared.moving) = Some(req);
+            shared.abandon()
         }
     }
 }
@@ -757,6 +893,7 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
         closed: Mutex::new(false),
         closed_cv: Condvar::new(),
         ending: Mutex::new(()),
+        moving: Mutex::new(None),
     });
     let info = HostInfo {
         version: VERSION,
@@ -803,7 +940,9 @@ fn run(spec: &str, fd: &str) -> io::Result<()> {
     *lock(&shared.closed) = true;
     shared.closed_cv.notify_all();
     drop(lock(&shared.ending));
-    // Then unregister and go (dropping the PTY hangs up anything left in it).
+    // A move under way goes on elsewhere; then unregister and go (dropping the PTY hangs up
+    // anything left in it).
+    shared.hand_off();
     shared.unregister();
     Ok(())
 }
@@ -943,6 +1082,38 @@ fn serve(mut stream: UnixStream, shared: &Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A move goes once the turn it was asked in is over, and not before; a prompt you typed
+    /// since (an Esc'd turn reports no `Stop`) calls it off.
+    #[test]
+    fn a_move_waits_for_the_turn_to_end() {
+        use crate::agents::{parse_hook, HookReport};
+        let event = |name: &str, extra: serde_json::Value| -> HookReport {
+            let mut v = serde_json::json!({ "hook_event_name": name, "session_id": "s" });
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            parse_hook(&v.to_string()).unwrap()
+        };
+        let asked = std::time::SystemTime::now();
+        let later = asked + Duration::from_secs(1);
+        let stop = event("Stop", serde_json::json!({}));
+        let tool = event("PostToolUse", serde_json::json!({ "tool_name": "Bash" }));
+        let typed = event("UserPromptSubmit", serde_json::json!({ "prompt": "wait" }));
+        let woken = event(
+            "UserPromptSubmit",
+            serde_json::json!({ "prompt": "<task-notification>done</task-notification>" }),
+        );
+        assert_eq!(
+            move_due(asked, asked, &stop),
+            MoveDue::Wait,
+            "a stop from before"
+        );
+        assert_eq!(move_due(asked, later, &tool), MoveDue::Wait);
+        assert_eq!(move_due(asked, later, &woken), MoveDue::Wait);
+        assert_eq!(move_due(asked, later, &stop), MoveDue::Go);
+        assert_eq!(move_due(asked, later, &typed), MoveDue::Drop);
+    }
 
     #[test]
     fn frames_survive_being_split_and_joined() {

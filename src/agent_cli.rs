@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 /// The subcommands — `ky agent <one of these>` is the CLI; anything else after `agent` is a
 /// folder to open, as before.
-pub(crate) const COMMANDS: [&str; 9] = [
-    "list", "read", "send", "prompt", "keys", "wait", "new", "kill", "help",
+pub(crate) const COMMANDS: [&str; 10] = [
+    "list", "read", "send", "prompt", "keys", "wait", "new", "move", "kill", "help",
 ];
 
 const HELP: &str = "\
@@ -36,6 +36,12 @@ Run these as \"$KYDE_BIN\" agent … (or `ky agent …` if Kyde's shell command 
   ky agent new [<folder>] [--prompt <text>] [--shell]
                                          start an agent there (default: here) — it shows up
                                          in Kyde when the folder is one of its worktrees
+  ky agent move <folder> [--prompt <text>]
+                                         move yourself (this tab's agent) to the worktree
+                                         <folder> is in, of a project Kyde has: once you
+                                         end this turn, Kyde resumes this conversation in
+                                         a tab there on <text> (what you'll do next) and
+                                         closes this one
   ky agent kill <id>                     end it (its tab closes)
 
 With Kyde closed, an agent runs only while it has work to finish: once it's done (or if it
@@ -69,7 +75,8 @@ fn run_inner(args: &[String]) -> Res {
         "send" => type_text(rest, false),
         "keys" => keys(rest),
         "wait" => wait(rest),
-        "new" => new(rest),
+        "new" if !asks_help(rest, &["--shell"])? => new(rest),
+        "move" if !asks_help(rest, &[])? => move_to(rest),
         "kill" => {
             let id = resolve(rest.first())?;
             host::send(&id, host::KILL, &[]).map_err(|e| e.to_string())?;
@@ -80,6 +87,26 @@ fn run_inner(args: &[String]) -> Res {
             Ok(0)
         }
     }
+}
+
+/// Whether `rest` asks for the help (`--help` / `-h`) — checked before a command that starts
+/// something, which takes `--prompt <text>` and `switches`: any other flag is an error, never
+/// a reason to go ahead (`agent new --help` once started an agent).
+fn asks_help(rest: &[String], switches: &[&str]) -> Result<bool, String> {
+    let mut args = rest.iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--help" | "-h" => return Ok(true),
+            "--prompt" => {
+                args.next();
+            }
+            f if f.starts_with('-') && !switches.contains(&f) => {
+                return Err(format!("unknown option {f} (see `ky agent help`)"));
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 /// An agent's id from a full id or a unique prefix.
@@ -375,6 +402,105 @@ fn new_spec(
     })
 }
 
+/// `ky agent move`: queue this tab's agent's move (its host carries it out once its turn is
+/// over — `agent_host::MoveRequest`).
+fn move_to(rest: &[String]) -> Res {
+    let id = std::env::var("KYDE_AGENT_ID")
+        .map_err(|_| "run it from an agent's tab in Kyde: it moves that agent".to_string())?;
+    let host = host::live_hosts()
+        .into_iter()
+        .find(|h| h.id == id)
+        .ok_or_else(|| format!("agent {id} isn't running in an agent host"))?;
+    if host.version < 3 {
+        return Err("this tab's agent host is from an older Kyde: reopen the tab first".into());
+    }
+    let cfg = kyde_config::agents::AgentsCfg::load();
+    let from = folder_of(&cfg, &id, &host.cwd);
+    let session = std::fs::read_to_string(crate::agents::state_path(&id))
+        .ok()
+        .and_then(|s| crate::agents::last_session(&s))
+        .ok_or("no Claude Code session to move yet (its hook hasn't reported one)")?;
+    let req = move_request(rest, &cfg, &from, session)?;
+    let to = req.spec.cwd.clone();
+    let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+    std::fs::write(crate::agents::move_path(&id), json).map_err(|e| e.to_string())?;
+    // If it moves on from the project's own checkout, Claude Code's worktree there mustn't
+    // make that checkout read as dirty.
+    crate::agents::exclude_claude_worktrees(&to);
+    println!(
+        "Moving to {} once this turn is over. End your turn now, saying in a line where \
+         you're going: Kyde then resumes this conversation there (agent {}) and closes this \
+         tab.",
+        to.display(),
+        req.spec.id
+    );
+    Ok(0)
+}
+
+/// The move `ky agent move <rest>` asks for, of an agent in worktree `from` on Claude Code
+/// session `(id, transcript)`: to the worktree `<folder>` is in, of a project Kyde has (or
+/// its tab would have nowhere to go), resuming the session on `--prompt`. Runs git.
+fn move_request(
+    rest: &[String],
+    cfg: &kyde_config::agents::AgentsCfg,
+    from: &Path,
+    (session, transcript): (String, PathBuf),
+) -> Result<host::MoveRequest, String> {
+    let folder = rest
+        .first()
+        .filter(|a| !a.starts_with('-'))
+        .ok_or("where to? `ky agent move <folder>`")?;
+    let repo = kyde_git::Repo::discover(folder)
+        .map_err(|_| format!("{folder} isn't in a git repository"))?;
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let to = canon(repo.root());
+    if to == canon(from) {
+        return Err(format!("this agent is in {} already", to.display()));
+    }
+    let spaces = || cfg.spaces.iter().filter(|s| !s.scratch);
+    let common = |p: &Path| Some(canon(&kyde_git::Repo::discover(p).ok()?.common_dir().ok()?));
+    let space = spaces()
+        .find(|s| canon(&s.path) == to || s.worktrees.iter().any(|w| canon(w) == to))
+        .or_else(|| {
+            let ours = common(&to)?;
+            spaces().find(|s| common(&s.path).as_ref() == Some(&ours))
+        })
+        .ok_or_else(|| {
+            format!(
+                "Kyde has no project at {}: ask the user to add it in Kyde first",
+                to.display()
+            )
+        })?;
+    // As Kyde spells it, so its tab lands in that row.
+    let to = std::iter::once(&space.path)
+        .chain(&space.worktrees)
+        .find(|w| canon(w) == to)
+        .cloned()
+        .unwrap_or(to);
+    let prompt = crate::agents::moved_prompt(from, &to, flag(rest, "--prompt").as_deref());
+    let start = format!(
+        "{} --resume {}",
+        cfg.default_command(),
+        crate::agents::shell_quote(&session)
+    );
+    let id = crate::agents::tab_id();
+    Ok(host::MoveRequest {
+        spec: host::HostSpec {
+            id: id.clone(),
+            cwd: to.clone(),
+            shell: crate::terminal::default_shell(),
+            env: crate::agents::tab_env(&id),
+            line: Some(crate::agents::seeded_line(&start, &prompt)),
+            cols: 120,
+            rows: 32,
+            agent: true,
+        },
+        transcript: Some(transcript),
+        brief: crate::agents::moved_brief(cfg, &to),
+        space: space.path.clone(),
+    })
+}
+
 /// The value after `name` (`--lines 40`).
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter()
@@ -413,6 +539,58 @@ mod tests {
         assert!(note.contains("EnterWorktree"), "{note}");
         let shell = new_spec(&args(&["--shell"]), &cfg).unwrap();
         assert!(!crate::agents::brief_path(&shell.id).exists());
+    }
+
+    /// `new` (and `move`) never go ahead on a flag they don't know: `--help` asks for the
+    /// help, anything else is an error. A `--prompt`'s text is text.
+    #[test]
+    fn only_known_flags_start_an_agent() {
+        let args = |a: &[&str]| -> Vec<String> { a.iter().map(|s| (*s).to_string()).collect() };
+        assert_eq!(asks_help(&args(&["--help"]), &["--shell"]), Ok(true));
+        assert_eq!(asks_help(&args(&["/r", "-h"]), &["--shell"]), Ok(true));
+        assert!(asks_help(&args(&["/r", "--name", "x"]), &["--shell"]).is_err());
+        assert_eq!(
+            asks_help(
+                &args(&["/r", "--prompt", "--help", "--shell"]),
+                &["--shell"]
+            ),
+            Ok(false)
+        );
+    }
+
+    /// `move` takes an agent to the worktree its folder is in, of a project Kyde has, resuming
+    /// its session there; a folder of a project Kyde doesn't have is refused.
+    #[test]
+    fn a_move_goes_to_a_project_kyde_has() {
+        crate::gpui_smoke_tests::isolate_history();
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("kyde-cli-move-{}", std::process::id()));
+        let (known, other) = (root.join("known"), root.join("other"));
+        for repo in [&known, &other] {
+            std::fs::create_dir_all(repo.join("sub")).unwrap();
+            let ok = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repo)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        }
+        let mut cfg = kyde_config::agents::AgentsCfg::default();
+        cfg.spaces.push(kyde_config::agents::Space {
+            path: known.clone(),
+            ..Default::default()
+        });
+        let session = || ("sess-1".to_string(), PathBuf::from("/p/sess-1.jsonl"));
+        let to = |dir: &Path| vec![dir.join("sub").to_string_lossy().into_owned()];
+        let req = move_request(&to(&known), &cfg, Path::new("/elsewhere"), session()).unwrap();
+        assert_eq!((&req.spec.cwd, &req.space), (&known, &known));
+        let line = req.spec.line.unwrap();
+        assert!(line.contains("claude --resume 'sess-1'"), "{line}");
+        assert!(move_request(&to(&other), &cfg, Path::new("/elsewhere"), session()).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// `list` shows an agent where its Kyde tab followed it, not the folder it started in.
