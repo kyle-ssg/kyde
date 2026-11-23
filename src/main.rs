@@ -8939,6 +8939,54 @@ mod gpui_smoke_tests {
         assert!(!wt.exists(), "safe to close: removed without asking");
     }
 
+    /// Once its PR is merged, a worktree whose agent sits at its prompt is finished — without
+    /// waiting out the quiet spell the cleanup needs before judging the tab (opening the
+    /// worktree resumes its session, which restarts that spell).
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_ticks_a_merged_worktree_whose_agent_is_at_its_prompt(
+        cx: &mut TestAppContext,
+    ) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("task");
+        git(
+            &dir,
+            &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "task"],
+        );
+        git(&dir, &["update-ref", "refs/remotes/origin/task", "HEAD"]);
+        let wt = wt.canonicalize().unwrap();
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents_new_tab(wt.clone(), true, None, cx);
+                k.agents_select(dir.clone(), cx);
+                k.agents.git.insert(wt.clone(), agents::WtGit::default());
+                k.agents.branches.insert(wt.clone(), "task".into());
+                // Just resumed: at its prompt, too fresh for the cleanup to judge.
+                let t = &mut k.agents.tabs.get_mut(&wt).unwrap().tabs[0];
+                t.unseen = false;
+                t.shown = agents::AgentState::Idle;
+                t.last_active = std::time::Instant::now();
+                let mut found = agents::SweepFound::default();
+                found.at_prompt.push(((wt.clone(), t.spawned_at), false));
+                // Its PR is merged (the git refresh learned where).
+                let heads = [("task".to_string(), "abc123".to_string())].into();
+                k.agents
+                    .merged
+                    .insert(dir.clone(), (std::time::Instant::now(), heads));
+                k.agents_apply_sweep(found, true, cx);
+                assert!(k.agents.tabs[&wt].tabs[0].verdict.is_none(), "not judged");
+                assert!(
+                    k.agents_finished_worktrees().contains(&wt),
+                    "merged: the Clean Up window ticks it"
+                );
+            })
+            .unwrap();
+    }
+
     /// A pinned worktree is left alone by the cleanup: a tab there the rules would close
     /// stays open, unmarked — until it's unpinned.
     #[cfg(feature = "terminal")]
