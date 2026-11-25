@@ -3233,9 +3233,10 @@ impl Kyde {
         (g.active < g.tabs.len()).then_some((wt, g.active))
     }
 
-    /// A tab printed something: it's working, and — if you weren't looking — unseen.
-    /// Repaints only when its dot changes (agents stream output many times a second).
-    fn agents_on_output(
+    /// A tab printed something: it's working, no longer finished, and — if you weren't
+    /// looking — unseen. Repaints only when its dot or ✓ changes (agents stream output many
+    /// times a second).
+    pub(crate) fn agents_on_output(
         &mut self,
         wt: &Path,
         v: &Entity<terminal::TerminalView>,
@@ -3256,8 +3257,10 @@ impl Kyde {
         // Only output after you've prompted it is news: an auto-started agent's banner or a
         // resumed session's replay printing off screen isn't.
         tab.unseen |= !on_screen && tab.prompted;
+        // The cleanup judged it while it was quiet: its ✓ doesn't outlast that.
+        let unmarked = tab.verdict.take().is_some();
         let state = AgentState::of_tab(&tab_signals(tab, cx), now);
-        if state != tab.shown {
+        if state != tab.shown || unmarked {
             tab.shown = state;
             cx.notify();
         }
@@ -4334,8 +4337,9 @@ impl Kyde {
     /// The cleanup pass — every minute, and on demand from the Clean Up window. It gathers
     /// each tab's facts off the UI thread (is its agent still running, is its branch's PR
     /// merged, is its worktree clean, and — for quiet agent tabs not judged since their last
-    /// output — a quick AI "is this done?"), then marks finished tabs and, in Auto mode,
-    /// closes them. `manual` = from the Clean Up window: never auto-closes, it pre-ticks.
+    /// output — a quick AI "is this done?"), then marks finished tabs — the one on screen
+    /// too — and, in Auto mode, closes the ones you aren't looking at. `manual` = from the
+    /// Clean Up window: never auto-closes, it pre-ticks.
     pub(crate) fn agents_sweep(&mut self, manual: bool, cx: &mut Context<Self>) {
         let mode = self.agents.cfg.cleanup_mode;
         if self.agents.sweeping || (mode == CleanupMode::Off && !manual) {
@@ -4343,22 +4347,20 @@ impl Kyde {
         }
         let rules = self.agents.cfg.cleanup;
         let now = Instant::now();
-        let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         // Per tab: who it is, its shell — and, for quiet agent tabs the AI hasn't judged
-        // since their last output, the question to ask (a few per pass).
+        // since their last output (the one on screen too), the question to ask (a few per
+        // pass).
         let mut probes: Vec<Probe> = Vec::new();
         let mut budget = MAX_AI_CHECKS;
         for (wt, g) in &self.agents.tabs {
             let pinned = self.agents.cfg.pinned.contains(wt);
-            for (i, t) in g.tabs.iter().enumerate() {
-                let on_screen = visible.as_ref().is_some_and(|(w, vi)| w == wt && *vi == i);
+            for t in &g.tabs {
                 let ask = rules.ai_done
                     && !pinned
                     && budget > 0
                     && t.agent
-                    && !on_screen
                     && !t.unseen
-                    && now.saturating_duration_since(t.last_active) >= rules.quiet()
+                    && t.quiet_for(now) >= rules.quiet()
                     && t.ai.as_ref().is_none_or(|a| a.after != t.last_output);
                 let question = ask.then(|| {
                     budget -= 1;
@@ -4426,8 +4428,9 @@ impl Kyde {
     }
 
     /// Decide with what the probe found: mark each tab's `verdict`, and — in Auto mode, not
-    /// from the Clean Up window — close the finished ones; from the Clean Up window, tick the
-    /// ones this pass found finished. Returns how many it closed.
+    /// from the Clean Up window — close the finished ones (`agents::auto_closes`: not the one
+    /// on screen); from the Clean Up window, tick the ones this pass found finished. Returns
+    /// how many it closed.
     pub(crate) fn agents_apply_sweep(
         &mut self,
         found: crate::agents::SweepFound,
@@ -4462,7 +4465,7 @@ impl Kyde {
             .collect();
         let visible = self.agents_visible_tab().map(|(w, i)| (w.to_path_buf(), i));
         let (rules, hours) = (self.agents.cfg.cleanup, self.agents.cfg.idle_hours);
-        let mut finished: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        let mut closing: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         let mut newly: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
         for (wt, g) in &mut self.agents.tabs {
             let pinned = self.agents.cfg.pinned.contains(wt);
@@ -4470,6 +4473,7 @@ impl Kyde {
                 let facts = crate::agents::TabFacts {
                     on_screen: visible.as_ref().is_some_and(|(w, vi)| w == wt && *vi == i),
                     unseen: t.unseen,
+                    quiet: t.quiet_for(now),
                     idle: now.saturating_duration_since(t.last_active),
                     at_prompt: at_prompt
                         .get(&(wt.clone(), t.spawned_at))
@@ -4489,7 +4493,9 @@ impl Kyde {
                     None
                 };
                 if t.verdict.is_some() {
-                    finished.push((wt.clone(), t.spawned_at));
+                    if crate::agents::auto_closes(&facts, rules) {
+                        closing.push((wt.clone(), t.spawned_at));
+                    }
                     if !was {
                         newly.push((wt.clone(), t.spawned_at));
                     }
@@ -4511,7 +4517,7 @@ impl Kyde {
         }
         let mut closed = 0;
         if !manual && self.agents.cfg.cleanup_mode == CleanupMode::Auto {
-            for (wt, spawned) in finished {
+            for (wt, spawned) in closing {
                 if let Some(i) = self
                     .agents
                     .tabs

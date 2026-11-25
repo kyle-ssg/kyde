@@ -1889,7 +1889,8 @@ struct AgentTab {
     held: Option<PathBuf>,
     /// Last output, for the working dot.
     last_output: Option<std::time::Instant>,
-    /// Last output OR last time on screen — what the idle cleanup measures.
+    /// Last output OR last time on screen — what the cleanup's idle rule measures, and how
+    /// long ago you left a tab Auto mode would close.
     last_active: std::time::Instant,
     /// Produced output while off screen (the "done, look at me" dot).
     unseen: bool,
@@ -1926,6 +1927,16 @@ struct AgentTab {
     verdict: Option<String>,
     /// The last AI "is it done?" check: the output it had seen, and its answer.
     ai: Option<AiCheck>,
+}
+
+#[cfg(feature = "terminal")]
+impl AgentTab {
+    /// How long since it last printed anything (since it was last active, for one that never
+    /// has) — the quiet spell the cleanup waits out before judging it. Unlike `last_active`,
+    /// looking at the tab doesn't restart it.
+    fn quiet_for(&self, now: std::time::Instant) -> std::time::Duration {
+        now.saturating_duration_since(self.last_output.unwrap_or(self.last_active))
+    }
 }
 
 /// One tab's hook files, read off the UI thread where they changed (`agents_poll_hooks`).
@@ -8632,7 +8643,7 @@ mod gpui_smoke_tests {
 
     /// Agents view end-to-end: adding a space opens its default worktree (the folder itself)
     /// with a first agent tab; the cleanup closes an off-screen tab whose agent has quit —
-    /// never the one on screen. Real PTYs.
+    /// never the one on screen, which it marks finished all the same. Real PTYs.
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn agents_space_opens_tab_and_cleanup_spares_visible(cx: &mut TestAppContext) {
@@ -8667,6 +8678,7 @@ mod gpui_smoke_tests {
                 let mut found = agents::SweepFound::default();
                 for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
                     t.unseen = false;
+                    t.last_output = Some(hour_ago);
                     t.last_active = hour_ago;
                     found.at_prompt.push(((dir.clone(), t.spawned_at), true));
                 }
@@ -8675,6 +8687,11 @@ mod gpui_smoke_tests {
                 let g = &k.agents.tabs[&dir];
                 assert_eq!(g.tabs.len(), 1);
                 assert!(!g.tabs[0].agent, "the visible shell tab survived");
+                assert!(g.tabs[0].verdict.is_some(), "marked finished, though");
+                // …until it prints again.
+                let view = g.tabs[0].view.clone();
+                k.agents_on_output(&dir, &view, cx);
+                assert!(k.agents.tabs[&dir].tabs[0].verdict.is_none());
             })
             .unwrap();
     }
@@ -8875,8 +8892,9 @@ mod gpui_smoke_tests {
         assert!(!wt.exists(), "and so does its empty folder");
     }
 
-    /// The Clean Up window's pass ticks a tab it finds finished — in the main checkout too,
-    /// which has no worktree to remove — without closing it; confirming the window closes it.
+    /// The Clean Up window's pass ticks the tabs it finds finished — in the main checkout too,
+    /// which has no worktree to remove, and the one on screen — without closing them;
+    /// confirming the window closes them.
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn agents_cleanup_window_closes_finished_tabs(cx: &mut TestAppContext) {
@@ -8903,6 +8921,7 @@ mod gpui_smoke_tests {
                 let mut found = agents::SweepFound::default();
                 for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
                     t.unseen = false;
+                    t.last_output = Some(hour_ago);
                     t.last_active = hour_ago;
                     found.at_prompt.push(((dir.clone(), t.spawned_at), true));
                 }
@@ -8911,16 +8930,11 @@ mod gpui_smoke_tests {
                     0,
                     "the window never auto-closes"
                 );
-                let quit = k.agents.tabs[&dir].tabs[0].spawned_at;
-                assert_eq!(
-                    k.agents.cleanup_tabs,
-                    std::collections::HashSet::from([(dir.clone(), quit)]),
-                    "only the off-screen tab is ticked"
-                );
+                assert_eq!(k.agents.tabs[&dir].tabs.len(), 2);
+                assert_eq!(k.agents.cleanup_tabs.len(), 2, "both ticked");
                 k.agents_clean_up_checked(cx);
-                let g = &k.agents.tabs[&dir];
-                assert_eq!(g.tabs.len(), 1);
-                assert!(!g.tabs[0].agent, "the visible shell tab survived");
+                let left = k.agents.tabs.get(&dir).map_or(0, |g| g.tabs.len());
+                assert_eq!(left, 0, "confirmed: both closed");
             })
             .unwrap();
     }
@@ -8967,6 +8981,7 @@ mod gpui_smoke_tests {
                 t.last_active = std::time::Instant::now()
                     .checked_sub(std::time::Duration::from_hours(1))
                     .unwrap();
+                t.last_output = Some(t.last_active);
                 found.at_prompt.push(((wt.clone(), t.spawned_at), true));
                 assert!(!k.agents.cleanup_checked.contains(&wt));
                 k.agents_apply_sweep(found, true, cx);
@@ -9135,6 +9150,7 @@ mod gpui_smoke_tests {
                     let mut found = agents::SweepFound::default();
                     for t in &mut k.agents.tabs.get_mut(&dir).unwrap().tabs {
                         t.unseen = false;
+                        t.last_output = Some(hour_ago);
                         t.last_active = hour_ago;
                         found.at_prompt.push(((dir.clone(), t.spawned_at), true));
                     }

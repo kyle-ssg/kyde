@@ -833,10 +833,12 @@ pub(crate) fn last_session(json: &str) -> Option<(String, std::path::PathBuf)> {
 /// What the cleanup knows about one tab when it decides.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct TabFacts {
-    /// It's the tab on screen (never closed).
+    /// It's the tab on screen (marked like any other, never closed for you).
     pub on_screen: bool,
     /// It finished while you were away and you haven't looked yet (kept until you do).
     pub unseen: bool,
+    /// Since its last output.
+    pub quiet: Duration,
     /// Since its last output or last time on screen.
     pub idle: Duration,
     /// Nothing runs in its shell — the agent quit (or a shell sits at its prompt).
@@ -852,13 +854,14 @@ pub(crate) struct TabFacts {
 }
 
 /// Why `f`'s tab may be closed under `rules` (`None` = keep it). Every rule waits for the tab
-/// to be quiet for `rules.quiet()` first; the tab on screen and unseen output are always kept.
+/// to print nothing for `rules.quiet()` first, and unseen output is always kept. The tab on
+/// screen is judged like any other — whether it then closes by itself is [`auto_closes`].
 pub(crate) fn closable(
     f: &TabFacts,
     rules: kyde_config::agents::CleanupRules,
     idle_hours: u32,
 ) -> Option<String> {
-    if f.on_screen || f.unseen || f.idle < rules.quiet() {
+    if f.unseen || f.quiet < rules.quiet() {
         return None;
     }
     if rules.agent_quit && f.at_prompt {
@@ -878,6 +881,12 @@ pub(crate) fn closable(
         return Some(format!("idle {idle_hours}h+"));
     }
     None
+}
+
+/// Whether Auto mode closes a tab [`closable`] found finished: never the one on screen, nor
+/// one you were looking at less than `rules.quiet()` ago.
+pub(crate) fn auto_closes(f: &TabFacts, rules: kyde_config::agents::CleanupRules) -> bool {
+    !f.on_screen && f.idle >= rules.quiet()
 }
 
 /// One tab's AI check: (worktree, spawn time), its last output when asked, `Some(why)` if done.
@@ -3240,6 +3249,7 @@ mod tests {
     fn cleanup_rules_close_finished_tabs_but_keep_visible_and_unseen() {
         let rules = kyde_config::agents::CleanupRules::default();
         let quiet = TabFacts {
+            quiet: Duration::from_hours(1),
             idle: Duration::from_hours(1),
             ..TabFacts::default()
         };
@@ -3251,23 +3261,34 @@ mod tests {
             closable(&quit, rules, 24).as_deref(),
             Some("the agent has quit")
         );
-        // Never the tab on screen, never output you haven't seen, never while still busy.
+        // Never output you haven't seen, never while still busy.
         for keep in [
-            TabFacts {
-                on_screen: true,
-                ..quit.clone()
-            },
             TabFacts {
                 unseen: true,
                 ..quit.clone()
             },
             TabFacts {
-                idle: Duration::from_secs(5),
+                quiet: Duration::from_secs(5),
                 ..quit.clone()
             },
         ] {
             assert_eq!(closable(&keep, rules, 24), None);
         }
+        // The tab on screen is marked finished too (looking at it restarts `idle`, not
+        // `quiet`) — it just isn't closed for you, nor is one you've only just left.
+        let watched = TabFacts {
+            on_screen: true,
+            idle: Duration::ZERO,
+            ..quit.clone()
+        };
+        assert!(closable(&watched, rules, 24).is_some());
+        assert!(!auto_closes(&watched, rules));
+        let just_left = TabFacts {
+            on_screen: false,
+            ..watched
+        };
+        assert!(!auto_closes(&just_left, rules));
+        assert!(auto_closes(&quit, rules));
         let unused = TabFacts {
             unused: true,
             ..quiet.clone()
