@@ -8074,6 +8074,8 @@ impl Kyde {
     /// A worktree's line as its sidebar row draws it: the status dot, a branch glyph on the
     /// project's own checkout, `title`, then what needs saying — "needs input" / "done", how
     /// long ago it was active, its branch's CI, its git badges (each per the row settings).
+    /// A checkout with nothing open or at work in it is only a place to start one: just its
+    /// dot, glyph and title.
     /// `ns` + `id` keep the badges' element ids unique where it's drawn; given `cx`, a click
     /// on the CI icon opens its run.
     pub(crate) fn agents_wt_line(
@@ -8112,20 +8114,24 @@ impl Kyde {
                     .text_color(t.line_number)
                     .child(SharedString::from(short_age(at.elapsed())))
             });
-        let ci = fields
-            .ci
+        let empty = cfg!(feature = "terminal")
+            && is_default
+            && state == AgentState::None
+            && !self.agents_has_tabs(wt);
+        let ci = (fields.ci && !empty)
             .then(|| {
                 self.agents_row_ci((SharedString::from(format!("{ns}-ci")), id), space, wt, cx)
             })
-            .flatten();
-        let badges = fields
-            .git
+            .flatten()
+            .map(|d| d.debug_selector(|| format!("{ns}-ci-{}", leaf_name(wt))));
+        let badges = (fields.git && !empty)
             .then(|| {
                 // A project's own checkout isn't closed: only linked worktrees get the mark.
                 let merged = !is_default && self.agents_pr_head(wt).is_some();
                 git_badges((ns, id), self.agents.git.get(wt), merged)
             })
-            .flatten();
+            .flatten()
+            .map(|d| d.debug_selector(|| format!("{ns}-{}", leaf_name(wt))));
         // One line: dot, title, then what needs saying (status, activity, CI, git).
         title_line()
             .child(status_dot(state))

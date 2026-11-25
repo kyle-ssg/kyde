@@ -8284,6 +8284,75 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A project's checkout with no session in it is only a place to start one: its row drops
+    /// the CI icon and git badges that a linked worktree's row still shows.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_checkout_row_without_a_session_is_empty(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = PathBuf::from(format!("{}-wt", dir.display()));
+        let _ = std::fs::remove_dir_all(&wt);
+        git(
+            &dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wt-branch",
+                wt.to_str().unwrap(),
+            ],
+        );
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.setup_done = true;
+                k.agents.cfg.command = "true".into();
+                k.agents.cfg.spaces = vec![kyde_config::agents::Space {
+                    path: dir.clone(),
+                    worktrees: vec![wt.clone()],
+                    ..Default::default()
+                }];
+                k.switch_mode(Mode::Agents, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+        handle
+            .update(cx, |k, _w, cx| {
+                let branch = k.agents.branches.get(&dir).cloned().expect("branch read");
+                let run = |id: u64, branch: &str| {
+                    format!(
+                        r#"{{"databaseId":{id},"number":{id},"workflowName":"ci",
+                            "headBranch":"{branch}","status":"completed",
+                            "conclusion":"failure"}}"#
+                    )
+                };
+                let json = format!("[{},{}]", run(1, &branch), run(2, "wt-branch"));
+                let runs = kyde_git::github::parse_runs(&json).unwrap();
+                // Seeded, so nothing asks GitHub.
+                k.agents
+                    .gh_fetched
+                    .insert(SideTab::Ci, std::time::Instant::now());
+                k.agents.ci.runs.insert(dir.clone(), GhList::Ready(runs));
+                for p in [&dir, &wt] {
+                    k.agents.git.insert(p.clone(), agents::WtGit::default());
+                }
+                cx.notify();
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(handle.into(), cx);
+        vcx.run_until_parked();
+        let mut shown = |what: &str, p: &std::path::Path| {
+            let leaf = p.file_name().unwrap().to_string_lossy();
+            let sel: &'static str = Box::leak(format!("agents-wt-git-{what}{leaf}").into());
+            vcx.debug_bounds(sel).is_some()
+        };
+        assert!(shown("ci-", &wt), "the worktree's CI icon");
+        assert!(shown("", &wt), "the worktree's git badges");
+        assert!(!shown("ci-", &dir), "no CI icon on the empty checkout");
+        assert!(!shown("", &dir), "no git badges on the empty checkout");
+        let _ = std::fs::remove_dir_all(&wt);
+    }
+
     /// The CI tab: a failed run that a newer run of its workflow + branch superseded offers
     /// no retry — only the way to the latest (an old deploy must not be re-run over a new one).
     #[cfg(feature = "terminal")]
