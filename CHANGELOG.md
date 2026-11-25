@@ -45,6 +45,15 @@ See [RELEASING.md](RELEASING.md) for how releases are cut.
 * use the system command shell when opening the embedded terminal on Windows
 * **linux:** the AppImage starts on glibc 2.35 and newer (Ubuntu 22.04, Debian 12, Linux Mint 21), not only on 2.39+
 
+## [2.21.1](https://github.com/kyle-ssg/kyde/compare/kyde-v2.21.0...kyde-v2.21.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* **agents:** a checkout row with no session in it shows only its name ([#250](https://github.com/kyle-ssg/kyde/issues/250)) ([d0122cd](https://github.com/kyle-ssg/kyde/commit/d0122cdf08c61f8b5b3f1e62bfd85b72d72e03d6))
+* **agents:** AI checks no longer read Claude's suggested prompt as yours ([#247](https://github.com/kyle-ssg/kyde/issues/247)) ([a8e4e8b](https://github.com/kyle-ssg/kyde/commit/a8e4e8bad3730e5e7c8cd5aead7cf0b29f064e69))
+* **agents:** mark the tab on screen as finished too ([#249](https://github.com/kyle-ssg/kyde/issues/249)) ([8042e78](https://github.com/kyle-ssg/kyde/commit/8042e781024b35317bd7809045129912dde066fd))
+
 ## [2.21.0](https://github.com/kyle-ssg/kyde/compare/kyde-v2.20.0...kyde-v2.21.0) (2026-11-23)
 
 
