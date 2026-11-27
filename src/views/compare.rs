@@ -26,14 +26,14 @@ impl Kyde {
     /// absolute = scratch, else through the repo / project root).
     fn read_compare_side(&self, rel: &PathBuf) -> String {
         if rel.is_absolute() {
-            return std::fs::read_to_string(rel).unwrap_or_default();
+            return git::read_file_text(rel).unwrap_or_default();
         }
         if let Some(repo) = self.repo() {
             return repo.working_content(rel).ok().unwrap_or_default();
         }
         self.repo_root
             .as_ref()
-            .and_then(|root| std::fs::read_to_string(root.join(rel)).ok())
+            .and_then(|root| git::read_file_text(root.join(rel)).ok())
             .unwrap_or_default()
     }
 

@@ -704,11 +704,11 @@ impl Kyde {
             // from disk. Repo-relative files go through the repo's working tree when this is
             // a git repo, else straight from disk under the project root (non-git Browse).
             let content = if rel.is_absolute() {
-                std::fs::read_to_string(&rel).unwrap_or_default()
+                git::read_file_text(&rel).unwrap_or_default()
             } else if let Some(repo) = self.repo() {
                 repo.working_content(&rel).ok().unwrap_or_default()
             } else if let Some(root) = self.repo_root.as_ref() {
-                std::fs::read_to_string(root.join(&rel)).unwrap_or_default()
+                git::read_file_text(root.join(&rel)).unwrap_or_default()
             } else {
                 String::new()
             };
@@ -820,7 +820,7 @@ impl Kyde {
             .repo_root
             .as_ref()
             .map_or_else(|| rel.clone(), |r| r.join(&rel));
-        let Ok(bytes) = std::fs::read(&abs) else {
+        let Ok(bytes) = git::read_file(&abs) else {
             self.font_preview = None;
             return;
         };
@@ -1109,7 +1109,7 @@ impl Kyde {
                             (Some(r), false) => r.join(&target),
                             (None, false) => continue,
                         };
-                        let Ok(text) = std::fs::read_to_string(&abs) else {
+                        let Ok(text) = git::read_file_text(&abs) else {
                             continue;
                         };
                         // Index under the TARGET file's own language (same
