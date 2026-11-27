@@ -286,6 +286,27 @@ pub(crate) fn sub_worktree(
         .or_else(|| worktree_of(sub.cwd.as_deref()?))
 }
 
+/// Every worktree a background agent's work reaches (canonical, sorted): the one it runs in,
+/// the one it last wrote to, and each one its tool calls named (`touched`) — not only the
+/// one it's shown in ([`sub_worktree`]). One that works in a worktree by path while most of
+/// what it reads is elsewhere still needs that folder: none of these is safe to remove while
+/// it's at work. Stats a few folders per path: call it off the UI thread.
+pub(crate) fn sub_uses(
+    sub: &SubReport,
+    wrote: Option<&WriteReport>,
+    touched: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    let paths: std::collections::BTreeSet<&std::path::Path> = touched
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .chain(wrote.map(|w| w.file.as_path()))
+        .chain(sub.cwd.as_deref())
+        .collect();
+    let uses: std::collections::BTreeSet<std::path::PathBuf> =
+        paths.into_iter().filter_map(worktree_of).collect();
+    uses.into_iter().collect()
+}
+
 /// One step of a background agent's work, as its transcript records it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Step {
@@ -438,6 +459,9 @@ pub(crate) struct SubAgent {
     pub id: String,
     /// Where it's at work (canonical), see [`sub_worktree`].
     pub worktree: Option<std::path::PathBuf>,
+    /// Every worktree its work reaches, see [`sub_uses`].
+    #[serde(default)]
+    pub uses: Vec<std::path::PathBuf>,
     /// What it was asked to do (the Agent call's description), else its type.
     pub what: String,
     /// Its work so far, paths shown relative to its worktree.
@@ -566,6 +590,7 @@ pub(crate) fn read_subs(
                 .map(|t| parse_feed(&read_end(t, FEED_BYTES, true)))
                 .unwrap_or_default();
             let worktree = sub_worktree(&sub, wrote.as_ref(), &feed.touched);
+            let uses = sub_uses(&sub, wrote.as_ref(), &feed.touched);
             // Paths inside its worktree read relative to it.
             let prefix = worktree.as_ref().map(|w| format!("{}/", w.display()));
             let rel = |x: String| match &prefix {
@@ -597,6 +622,7 @@ pub(crate) fn read_subs(
                     .unwrap_or_else(|| sub.kind.clone()),
                 id: sub.id,
                 worktree,
+                uses,
                 steps,
                 at,
             };
@@ -782,35 +808,49 @@ pub(crate) fn left_background(was: bool, r: &HookReport) -> bool {
 /// with no conversation to resume. One that never got a prompt has no transcript, and
 /// `--resume` on it fails. An agent tab resumes the session its hook last reported (else the
 /// saved one); a shell tab starts afresh. One whose agent moved to another project (`ky
-/// agent move`) stays gone: its session goes on there. The gone tabs' state files are
-/// deleted. File IO: call it off the UI thread.
+/// agent move`) stays gone: its session goes on there. One restarted where it was (`ky agent
+/// restart`, in `wt`) while Kyde was away is gone too while the agent that took over is
+/// running (`live`: it's reattached) — else it reopens on the session that one carried on.
+/// The gone tabs' state files are deleted. File IO: call it off the UI thread.
 pub(crate) fn tabs_to_reopen(
+    wt: &std::path::Path,
     saved: Vec<kyde_config::agents::SavedTab>,
     live: &std::collections::HashSet<String>,
 ) -> Vec<kyde_config::agents::SavedTab> {
+    // A gone agent's last session, its state files deleted.
+    let forget = |id: &str| {
+        let last = std::fs::read_to_string(state_path(id))
+            .ok()
+            .and_then(|s| last_session(&s));
+        for f in [
+            state_path(id),
+            brief_path(id),
+            write_path(id),
+            move_path(id),
+            moved_path(id),
+        ] {
+            let _ = std::fs::remove_file(f);
+        }
+        let _ = std::fs::remove_dir_all(sub_dir(id));
+        last
+    };
     saved
         .into_iter()
         .filter(|t| t.id.as_ref().is_none_or(|id| !live.contains(id)))
         .filter_map(|mut t| {
             let moved = t.id.as_deref().is_some_and(|id| moved_path(id).exists());
-            let last = t.id.take().and_then(|id| {
-                let last = std::fs::read_to_string(state_path(&id))
-                    .ok()
-                    .and_then(|s| last_session(&s));
-                for f in [
-                    state_path(&id),
-                    brief_path(&id),
-                    write_path(&id),
-                    move_path(&id),
-                    moved_path(&id),
-                ] {
-                    let _ = std::fs::remove_file(f);
-                }
-                let _ = std::fs::remove_dir_all(sub_dir(&id));
-                last
+            // The agent that took over after a restart here (what `agent_host::Moved` says).
+            let heir = t.id.as_deref().and_then(|id| {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(moved_path(id)).ok()?).ok()?;
+                let to = std::path::Path::new(v.get("to")?.as_str()?);
+                (to == wt).then_some(v.get("id")?.as_str()?.to_string())
             });
-            if moved {
-                return None;
+            let mut last = t.id.take().and_then(|id| forget(&id));
+            match heir {
+                Some(heir) if !live.contains(&heir) => last = forget(&heir).or(last),
+                _ if moved => return None,
+                _ => {}
             }
             if !t.agent {
                 return Some(t);
@@ -2077,6 +2117,19 @@ pub(crate) fn moved_prompt(
     )
 }
 
+/// The prompt a restarted session resumes on (`ky agent restart`): that it's a fresh process
+/// on the same conversation, then `task` (what it said it would do next), else to carry on.
+pub(crate) fn restarted_prompt(task: Option<&str>) -> String {
+    let task = task
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Carry on where you left off.");
+    format!(
+        "Kyde has restarted this session: a fresh process on the same conversation, in the \
+         same folder, with its settings, MCP servers and tools loaded anew. {task}"
+    )
+}
+
 /// What's already going on in a worktree when a new agent tab opens there.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Busy {
@@ -2112,7 +2165,10 @@ const MOVE_HOW: &str = "To work in another worktree of this repository, call Ent
      project (this tab closes), where you can call EnterWorktree. To hand that project a \
      separate task while you stay here, run `\"$KYDE_BIN\" agent new <folder> --prompt \"<the \
      task>\"` (Kyde opens it as a tab there) and tell the user. Never work on another project \
-     by path from here.";
+     by path from here. To restart this session where it is — a fresh process on this \
+     conversation, which loads new settings, MCP servers or a Claude Code update — run \
+     `\"$KYDE_BIN\" agent restart --prompt \"<what you'll do next>\"` and end your turn: Kyde \
+     resumes it in this tab's place (`agent restart <id>` restarts another agent).";
 
 /// The note a new agent tab's first prompt carries (see [`brief_path`]): always how to move
 /// to another worktree ([`MOVE_HOW`]); and when its worktree is busy (changes, unpushed
@@ -2477,6 +2533,12 @@ mod tests {
         // Its agent moved to another project (`ky agent move`), where its session goes on.
         report("reopen-moved", "moved-on", &transcript);
         std::fs::write(moved_path("reopen-moved"), "{}").unwrap();
+        // Restarted where it was (`ky agent restart`) by an agent that has ended since.
+        let wt = std::path::Path::new("/r/task");
+        report("reopen-restarted", "before", &transcript);
+        report("reopen-heir", "carried-on", &transcript);
+        let heir = serde_json::json!({ "id": "reopen-heir", "to": wt, "space": "/r" });
+        std::fs::write(moved_path("reopen-restarted"), heir.to_string()).unwrap();
         let tab = |id: &str, agent, session: Option<&str>, name: Option<&str>| SavedTab {
             agent,
             session: session.map(Into::into),
@@ -2490,10 +2552,11 @@ mod tests {
             tab("reopen-blank", true, Some("blank"), None),
             tab("reopen-shell", false, None, None),
             tab("reopen-moved", true, Some("moved-on"), None),
+            tab("reopen-restarted", true, Some("before"), None),
         ];
         let live = std::collections::HashSet::from(["reopen-live".to_string()]);
         assert_eq!(
-            tabs_to_reopen(saved, &live),
+            tabs_to_reopen(wt, saved, &live),
             vec![
                 // Its name, and the session it last reported.
                 SavedTab {
@@ -2504,6 +2567,12 @@ mod tests {
                     ..Default::default()
                 },
                 SavedTab::default(),
+                // The session its restart carried on.
+                SavedTab {
+                    agent: true,
+                    session: Some("carried-on".into()),
+                    ..Default::default()
+                },
             ]
         );
         assert!(!state_path("reopen-done").exists(), "a gone tab's state");
@@ -3099,6 +3168,11 @@ mod tests {
             sub_worktree(&checkout, None, &feed.touched),
             Some(own.clone())
         );
+        // It needs both folders while it's at work: the one it runs in, too.
+        assert_eq!(
+            sub_uses(&checkout, None, &feed.touched),
+            [repo.canonicalize().unwrap(), own.clone()]
+        );
         // Its edit there says so too — and isn't the tab's.
         let edit = event(
             &repo,
@@ -3128,6 +3202,7 @@ mod tests {
         let helper = |id: &str, w: &std::path::Path, s: u64| SubAgent {
             id: id.into(),
             worktree: Some(w.to_path_buf()),
+            uses: Vec::new(),
             what: String::new(),
             steps: Vec::new(),
             at: std::time::UNIX_EPOCH + Duration::from_secs(s),

@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 /// The subcommands — `ky agent <one of these>` is the CLI; anything else after `agent` is a
 /// folder to open, as before.
-pub(crate) const COMMANDS: [&str; 10] = [
-    "list", "read", "send", "prompt", "keys", "wait", "new", "move", "kill", "help",
+pub(crate) const COMMANDS: [&str; 11] = [
+    "list", "read", "send", "prompt", "keys", "wait", "new", "move", "restart", "kill", "help",
 ];
 
 const HELP: &str = "\
@@ -42,6 +42,15 @@ Run these as \"$KYDE_BIN\" agent … (or `ky agent …` if Kyde's shell command 
                                          end this turn, Kyde resumes this conversation in
                                          a tab there on <text> (what you'll do next) and
                                          closes this one
+  ky agent restart [<id>] [--prompt <text>]
+                                         restart an agent (default: yourself) as a fresh
+                                         process on the same conversation, in its tab — to
+                                         load new settings, MCP servers or a Claude Code
+                                         update. Yourself: end this turn, and you resume on
+                                         <text> (what you'll do next). Another agent: at
+                                         once if it's between turns, else when its turn is
+                                         over; it waits for its next prompt unless you
+                                         give <text>
   ky agent kill <id>                     end it (its tab closes)
 
 With Kyde closed, an agent runs only while it has work to finish: once it's done (or if it
@@ -77,6 +86,7 @@ fn run_inner(args: &[String]) -> Res {
         "wait" => wait(rest),
         "new" if !asks_help(rest, &["--shell"])? => new(rest),
         "move" if !asks_help(rest, &[])? => move_to(rest),
+        "restart" if !asks_help(rest, &[])? => restart(rest),
         "kill" => {
             let id = resolve(rest.first())?;
             host::send(&id, host::KILL, &[]).map_err(|e| e.to_string())?;
@@ -498,7 +508,111 @@ fn move_request(
         transcript: Some(transcript),
         brief: crate::agents::moved_brief(cfg, &to),
         space: space.path.clone(),
+        idle_ok: false,
     })
+}
+
+/// `ky agent restart`: queue a restart of this tab's agent, or of `<id>`'s.
+fn restart(rest: &[String]) -> Res {
+    let me = std::env::var("KYDE_AGENT_ID").ok();
+    let id = match rest.first().filter(|a| !a.starts_with('-')) {
+        Some(_) => resolve(rest.first())?,
+        None => me.clone().ok_or(
+            "which agent? Give an id from `ky agent list` — or run it from an agent's tab \
+             in Kyde, to restart that agent",
+        )?,
+    };
+    let own = me.as_deref() == Some(id.as_str());
+    let at = queue_restart(&id, flag(rest, "--prompt").as_deref(), own)?;
+    if own {
+        println!(
+            "Restarting once this turn is over. End your turn now, saying in a line that \
+             you're restarting: Kyde then resumes this conversation as a fresh process, in \
+             this tab's place."
+        );
+    } else {
+        println!(
+            "Restarting agent {id} in {}: now if it's between turns, else once its turn is \
+             over.",
+            at.display()
+        );
+    }
+    Ok(0)
+}
+
+/// Queue a restart of agent `id` (its host carries it out — `agent_host::MoveRequest`): a
+/// fresh process resumes its Claude Code session in the folder it's in, on `prompt` — once
+/// its turn is over, or at once if it's between turns. `own` = the agent asked for it itself.
+/// Returns the folder. File IO: call it off the UI thread.
+pub(crate) fn queue_restart(id: &str, prompt: Option<&str>, own: bool) -> Result<PathBuf, String> {
+    let host = host::live_hosts()
+        .into_iter()
+        .find(|h| h.id == id)
+        .ok_or_else(|| format!("agent {id} isn't running in an agent host"))?;
+    if !host.agent {
+        return Err("that tab is a plain shell: it has no agent to restart".into());
+    }
+    // Waiting out its own turn is as old as `move`; going while it's between turns is new.
+    if host.version < if own { 3 } else { host::VERSION } {
+        return Err("this tab's agent host is from an older Kyde: reopen the tab first".into());
+    }
+    let cfg = kyde_config::agents::AgentsCfg::load();
+    let at = folder_of(&cfg, id, &host.cwd);
+    let session = std::fs::read_to_string(crate::agents::state_path(id))
+        .ok()
+        .and_then(|s| crate::agents::last_session(&s))
+        // One that never got a prompt has no transcript: `--resume` on it fails.
+        .filter(|(_, transcript)| transcript.exists())
+        .ok_or("no Claude Code conversation to resume yet (it hasn't had a prompt)")?;
+    let req = restart_request(&cfg, &at, session, prompt, own);
+    let json = serde_json::to_string(&req).map_err(|e| e.to_string())?;
+    std::fs::write(crate::agents::move_path(id), json).map_err(|e| e.to_string())?;
+    Ok(at)
+}
+
+/// The restart of an agent in folder `at` on Claude Code session `(id, transcript)`: a move
+/// to where it is already. Its own restart is mid-task, so it resumes on `prompt` — else to
+/// carry on; one restarted from outside just waits for its next prompt, unless handed one.
+fn restart_request(
+    cfg: &kyde_config::agents::AgentsCfg,
+    at: &Path,
+    (session, transcript): (String, PathBuf),
+    prompt: Option<&str>,
+    own: bool,
+) -> host::MoveRequest {
+    let start = format!(
+        "{} --resume {}",
+        cfg.default_command(),
+        crate::agents::shell_quote(&session)
+    );
+    let prompt = prompt.map(str::trim).filter(|p| !p.is_empty());
+    let line = if own || prompt.is_some() {
+        crate::agents::seeded_line(&start, &crate::agents::restarted_prompt(prompt))
+    } else {
+        start
+    };
+    let id = crate::agents::tab_id();
+    host::MoveRequest {
+        spec: host::HostSpec {
+            id: id.clone(),
+            cwd: at.to_path_buf(),
+            shell: crate::terminal::default_shell(),
+            env: crate::agents::tab_env(&id),
+            line: Some(line),
+            cols: 120,
+            rows: 32,
+            agent: true,
+        },
+        transcript: Some(transcript),
+        // It has heard Kyde's note already, earlier in this conversation.
+        brief: None,
+        space: cfg
+            .space_of(at)
+            .map_or_else(|| at.to_path_buf(), |s| s.path.clone()),
+        // Asked mid-turn (the agent's own), its latest report says it's at work: it waits
+        // for that turn to end either way.
+        idle_ok: true,
+    }
 }
 
 /// The value after `name` (`--lines 40`).
@@ -591,6 +705,23 @@ mod tests {
         assert!(line.contains("claude --resume 'sess-1'"), "{line}");
         assert!(move_request(&to(&other), &cfg, Path::new("/elsewhere"), session()).is_err());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A restart (#252) resumes the session in the folder it's in, without waiting for a
+    /// turn when there's none. Its own, mid-task, carries on with what it said was next;
+    /// one asked from outside just waits for its next prompt.
+    #[test]
+    fn a_restart_resumes_the_session_where_it_is() {
+        let cfg = kyde_config::agents::AgentsCfg::default();
+        let at = Path::new("/r/.kyde/worktrees/r/task");
+        let session = || ("sess-1".to_string(), PathBuf::from("/p/sess-1.jsonl"));
+        let own = restart_request(&cfg, at, session(), Some("check the new tools"), true);
+        assert_eq!((own.spec.cwd.as_path(), own.idle_ok), (at, true));
+        let line = own.spec.line.unwrap();
+        assert!(line.contains("claude --resume 'sess-1'"), "{line}");
+        assert!(line.contains("check the new tools"), "{line}");
+        let other = restart_request(&cfg, at, session(), None, false);
+        assert_eq!(other.spec.line.as_deref(), Some("claude --resume 'sess-1'"));
     }
 
     /// `list` shows an agent where its Kyde tab followed it, not the folder it started in.

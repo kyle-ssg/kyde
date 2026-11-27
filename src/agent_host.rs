@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the wire format changes (a host from an older Kyde says so in `HELLO`).
 /// 2: a host answers `RELEASE`. 3: a host carries out `ky agent move` (`MoveRequest`).
-pub(crate) const VERSION: u32 = 3;
+/// 4: a host restarts an agent that's between turns without waiting for a turn to end
+/// (`MoveRequest::idle_ok` — `ky agent restart <id>`).
+pub(crate) const VERSION: u32 = 4;
 /// Output a host keeps for a reattaching viewer.
 const RING_CAP: usize = 4 * 1024 * 1024;
 /// What a Claude Code session exports to the commands it runs. An agent host started from
@@ -116,6 +118,7 @@ pub(crate) struct HostInfo {
 /// `ky agent move`: the agent goes on in another project once its turn is over — its host
 /// moves the session's transcript to that project's folder (`agents::move_transcript`), starts
 /// `spec` there (which resumes it), and tells Kyde (`Moved`). Waits in `agents::move_path`.
+/// `ky agent restart` is the same hand-over, to a fresh process in the folder it's in already.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub(crate) struct MoveRequest {
     /// The host to start, resuming the session (its `cwd` is where it's going).
@@ -127,6 +130,10 @@ pub(crate) struct MoveRequest {
     /// The project (a space's own folder) it's going to: `spec.cwd` joins it when Kyde doesn't
     /// list it yet.
     pub space: PathBuf,
+    /// A restart (`ky agent restart`, a tab's Restart Session), which may be asked of an
+    /// agent between turns: it goes at once then — there's no turn to wait out.
+    #[serde(default)]
+    pub idle_ok: bool,
 }
 
 /// What a moving agent's host leaves in `agents::moved_path`: the agent that carries the
@@ -149,10 +156,11 @@ pub(crate) fn take_moved(id: &str) -> Option<Moved> {
     moved
 }
 
-/// What a new hook report means for a move requested at `asked` (`MoveRequest`).
+/// What the agent's latest hook report means for a move requested at `asked`
+/// (`MoveRequest`).
 #[derive(Debug, PartialEq, Eq)]
 enum MoveDue {
-    /// The turn it was asked in is over: go.
+    /// The turn it was asked in is over (or, `idle_ok`, it was between turns): go.
     Go,
     /// Called off: you typed a new prompt since (Esc ended that turn without a `Stop`), or
     /// the agent exited.
@@ -164,10 +172,19 @@ fn move_due(
     asked: std::time::SystemTime,
     at: std::time::SystemTime,
     r: &crate::agents::HookReport,
+    idle_ok: bool,
 ) -> MoveDue {
     use crate::agents::Hook;
     if at <= asked {
-        return MoveDue::Wait;
+        // Nothing since it was asked. Between turns already, with nothing of its last turn
+        // still running in the background: no turn end to wait for.
+        let idle = matches!(r.hook, Hook::Ready | Hook::Done | Hook::Ended)
+            && !crate::agents::left_background(false, r);
+        return if idle_ok && idle {
+            MoveDue::Go
+        } else {
+            MoveDue::Wait
+        };
     }
     match (&r.hook, r.woken) {
         (Hook::Done, _) => MoveDue::Go,
@@ -635,6 +652,8 @@ fn newest_in(dir: &std::path::Path) -> std::time::SystemTime {
 fn watch(shared: &Shared) {
     let state = crate::agents::state_path(&shared.id);
     let mut read = None;
+    // The latest report that says something of its state, and when it was written.
+    let mut latest: Option<(std::time::SystemTime, crate::agents::HookReport)> = None;
     while !shared.wait_closed(WATCH_EVERY) {
         // Kept across reads: an event that says nothing of its state (a notification)
         // overwrites the file too.
@@ -645,18 +664,25 @@ fn watch(shared: &Shared) {
                 .ok()
                 .and_then(|s| crate::agents::parse_hook(&s));
             if let Some(r) = new {
-                if moves_now(shared, at, &r) {
-                    shared.end();
-                    return;
-                }
                 let mut report = lock(&shared.report);
                 let was = report.as_ref().is_some_and(|r| r.background);
                 *report = Some(Report {
                     background: crate::agents::left_background(was, &r),
-                    hook: r.hook,
+                    hook: r.hook.clone(),
                     at,
                 });
+                drop(report);
+                latest = Some((at, r));
             }
+        }
+        // Every pass, not only on a new report: a restart asked of an agent between turns
+        // has no report to wait for.
+        if latest
+            .as_ref()
+            .is_some_and(|(at, r)| moves_now(shared, *at, r))
+        {
+            shared.end();
+            return;
         }
         let watched = shared.watchers.load(Ordering::Relaxed) > 0;
         if watched || shared.has_work() {
@@ -680,16 +706,16 @@ fn moves_now(shared: &Shared, at: std::time::SystemTime, r: &crate::agents::Hook
     let Ok(asked) = std::fs::metadata(&path).and_then(|m| m.modified()) else {
         return false;
     };
-    match move_due(asked, at, r) {
+    let req = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<MoveRequest>(&s).ok());
+    match move_due(asked, at, r, req.as_ref().is_some_and(|q| q.idle_ok)) {
         MoveDue::Wait => false,
         MoveDue::Drop => {
             let _ = std::fs::remove_file(&path);
             false
         }
         MoveDue::Go => {
-            let req = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<MoveRequest>(&s).ok());
             let _ = std::fs::remove_file(&path);
             let Some(req) = req else {
                 return false;
@@ -1105,14 +1131,23 @@ mod tests {
             serde_json::json!({ "prompt": "<task-notification>done</task-notification>" }),
         );
         assert_eq!(
-            move_due(asked, asked, &stop),
+            move_due(asked, asked, &stop, false),
             MoveDue::Wait,
             "a stop from before"
         );
-        assert_eq!(move_due(asked, later, &tool), MoveDue::Wait);
-        assert_eq!(move_due(asked, later, &woken), MoveDue::Wait);
-        assert_eq!(move_due(asked, later, &stop), MoveDue::Go);
-        assert_eq!(move_due(asked, later, &typed), MoveDue::Drop);
+        assert_eq!(move_due(asked, later, &tool, false), MoveDue::Wait);
+        assert_eq!(move_due(asked, later, &woken, false), MoveDue::Wait);
+        assert_eq!(move_due(asked, later, &stop, false), MoveDue::Go);
+        assert_eq!(move_due(asked, later, &typed, false), MoveDue::Drop);
+        // A restart asked from outside (#252): an agent between turns goes at once; one at
+        // work, or with background agents still running, when its turn is over.
+        assert_eq!(move_due(asked, asked, &stop, true), MoveDue::Go);
+        assert_eq!(move_due(asked, asked, &tool, true), MoveDue::Wait);
+        let busy = event(
+            "Stop",
+            serde_json::json!({ "background_tasks": [{ "id": "a1" }] }),
+        );
+        assert_eq!(move_due(asked, asked, &busy, true), MoveDue::Wait);
     }
 
     #[test]
