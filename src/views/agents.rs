@@ -4675,7 +4675,8 @@ impl Kyde {
     /// or a background agent that needs the folder ([`Self::agents_sub_needs`]) keeps it —
     /// wherever that one is shown. Once its work is merged, a tab sitting
     /// at its prompt has nothing left to do: it doesn't wait out the quiet spell the cleanup
-    /// needs before judging (reopening the worktree resumes its session, which restarts it).
+    /// needs before judging (reopening the worktree resumes its session, which restarts it),
+    /// nor for you to look at what it last said — the row already reads safe to close.
     fn agents_wt_busy(&self, wt: &Path) -> Option<&'static str> {
         let tabs = self
             .agents
@@ -4689,7 +4690,7 @@ impl Kyde {
                 AgentState::Working => true,
                 // Closing it would end its background agents too.
                 _ if !t.subs.is_empty() => true,
-                AgentState::Idle | AgentState::None if merged => false,
+                AgentState::Unseen | AgentState::Idle | AgentState::None if merged => false,
                 _ => t.verdict.is_none(),
             })
             .map(|t| t.shown)
