@@ -250,7 +250,10 @@ impl Kyde {
                             ((), (), std::collections::HashSet::<String>::new());
                         let saved: Vec<_> = saved
                             .into_iter()
-                            .map(|(wt, tabs)| (wt, crate::agents::tabs_to_reopen(tabs, &ids)))
+                            .map(|(wt, tabs)| {
+                                let tabs = crate::agents::tabs_to_reopen(&wt, tabs, &ids);
+                                (wt, tabs)
+                            })
                             .collect();
                         (live, released, saved)
                     })
@@ -1856,7 +1859,13 @@ impl Kyde {
         }
         #[cfg(feature = "terminal")]
         if let Some(why) = self.agents_wt_busy(&wt) {
-            lines.push((format!("{why} — removing closes its tabs."), true));
+            // A background agent may be all that's there: no tab of its own to close.
+            let cost = if self.agents_has_tabs(&wt) {
+                " — removing closes its tabs"
+            } else {
+                ""
+            };
+            lines.push((format!("{why}{cost}."), true));
         }
         if let Some(b) = &branch {
             lines.push((format!("The branch {b} is kept."), false));
@@ -2804,16 +2813,15 @@ impl Kyde {
                     };
                     // Its shell exited: nothing left to lose. Its own menu's Close asks.
                     if v.read(cx).exited {
-                        let tab = &this.agents.tabs[&key].tabs[i];
-                        let (id, name) = (tab.id.clone(), tab.name.clone());
-                        let on_screen = this
-                            .agents_visible_tab()
-                            .is_some_and(|(w, at)| w == key && at == i);
+                        // A host's agent may be going on in another host (`ky agent move`,
+                        // `ky agent restart`): that one takes this tab's place first.
+                        #[cfg(unix)]
+                        if v.read(cx).hosted() {
+                            let id = this.agents.tabs[&key].tabs[i].id.clone();
+                            this.agents_host_exited(id, cx);
+                            return;
+                        }
                         this.agents_close_by_hand(&key, i, cx);
-                        #[cfg(all(feature = "terminal", unix))]
-                        this.agents_follow_move(id, name, on_screen, cx);
-                        #[cfg(not(all(feature = "terminal", unix)))]
-                        let _ = (id, name, on_screen);
                     } else {
                         let id = this.agents.tabs[&key].tabs[i].id.clone();
                         this.agents_ask_close(vec![id], cx);
@@ -3094,8 +3102,41 @@ impl Kyde {
                 this.agents_start_rename(target, window, cx);
             }
         }));
+        // A fresh process on the same conversation (new settings, MCP servers, a Claude Code
+        // update): an agent host hands its session over, so only agents running in one.
+        #[cfg(unix)]
+        if g.tabs[at].agent && crate::agents::hosted() {
+            let restart = id.to_string();
+            out.push(MenuEntry::item("Restart Session", move |this, _w, cx| {
+                this.agents_restart_tab(restart.clone(), cx);
+            }));
+        }
         out.push(self.agents_pin_entry(&wt, true));
         out
+    }
+
+    /// Restart tab `id`'s agent (its menu's Restart Session): a fresh process resumes its
+    /// conversation in the tab's place — at once if it's between turns, else once its turn is
+    /// over. What `ky agent restart <id>` does (`agent_cli::queue_restart`).
+    #[cfg(unix)]
+    fn agents_restart_tab(&mut self, id: String, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let asked = cx
+                .background_executor()
+                .spawn(async move { crate::agent_cli::queue_restart(&id, None, false) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.agents.note = Some(match asked {
+                    Ok(_) => {
+                        "Restarting the session — once its turn is over, if it's at work".into()
+                    }
+                    Err(e) => format!("Couldn't restart the session: {e}"),
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Whether stopped background agent `d`'s work sits in a pinned worktree (the cleanup
@@ -3824,57 +3865,98 @@ impl Kyde {
         cx.notify();
     }
 
-    /// Tab `id` closed because its agent moved to another project (`ky agent move`): put the
-    /// agent carrying its session on there in its place, once it's up — under the tab's name,
-    /// joining that project's worktrees if Kyde doesn't list it yet, and shown if the tab was
-    /// on screen. Nothing for a tab that just ended.
+    /// Tab `id`'s agent host has ended. Its agent may be going on in another host — moved to
+    /// another project (`ky agent move`), or restarted where it was (`ky agent restart`): once
+    /// that one is up it takes this tab's place ([`Self::agents_adopt_moved`]), and only then
+    /// does the tab close — a restart never leaves its row without a tab (a scratch row goes
+    /// with its last one). A tab that just ended closes.
     #[cfg(all(feature = "terminal", unix))]
-    fn agents_follow_move(
-        &mut self,
-        id: String,
-        name: Option<String>,
-        on_screen: bool,
-        cx: &mut Context<Self>,
-    ) {
+    fn agents_host_exited(&mut self, id: String, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let bg = cx.background_executor().clone();
-            let Some(moved) = bg
-                .spawn(async move { crate::agent_host::take_moved(&id) })
-                .await
-            else {
-                return;
-            };
-            // It starts once the old agent has exited: a few seconds at most.
-            for _ in 0..80 {
-                let want = moved.id.clone();
-                let up = bg
-                    .spawn(
-                        async move { crate::agent_host::live_hosts().iter().any(|h| h.id == want) },
-                    )
-                    .await;
-                if up {
-                    this.update(cx, |this, cx| {
-                        this.agents_adopt_moved(moved, name, on_screen, cx);
-                    })
-                    .ok();
-                    return;
+            let gone = id.clone();
+            let mut moved = bg
+                .spawn(async move { crate::agent_host::take_moved(&gone) })
+                .await;
+            // It's up before the old host says it's gone — else within a few seconds.
+            if let Some(want) = moved.as_ref().map(|m| m.id.clone()) {
+                let mut up = false;
+                for _ in 0..80 {
+                    let want = want.clone();
+                    up = bg
+                        .spawn(async move {
+                            crate::agent_host::live_hosts().iter().any(|h| h.id == want)
+                        })
+                        .await;
+                    if up {
+                        break;
+                    }
+                    bg.timer(Duration::from_millis(250)).await;
                 }
-                bg.timer(Duration::from_millis(250)).await;
+                if !up {
+                    moved = None;
+                }
             }
+            this.update(cx, |this, cx| this.agents_hand_over(moved, &id, cx))
+                .ok();
         })
         .detach();
     }
 
-    /// The tab for `moved`, an agent that has come from another project's tab (named `name`,
-    /// shown when `on_screen`) — see [`Self::agents_follow_move`].
+    /// Close tab `old`, whose agent host has ended — after `moved`, the agent now carrying
+    /// its session (if one does), has taken its place.
+    #[cfg(all(feature = "terminal", unix))]
+    pub(crate) fn agents_hand_over(
+        &mut self,
+        moved: Option<crate::agent_host::Moved>,
+        old: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(moved) = moved {
+            self.agents_adopt_moved(moved, old, cx);
+        }
+        let at = self.agents.tabs.iter().find_map(|(wt, g)| {
+            let i = g.tabs.iter().position(|t| t.id == old)?;
+            Some((wt.clone(), i))
+        });
+        if let Some((wt, i)) = at {
+            self.agents_close_by_hand(&wt, i, cx);
+        }
+    }
+
+    /// The tab for `moved`, the agent now carrying the session of tab `old` (still open, about
+    /// to close — see [`Self::agents_host_exited`]): under that tab's name, joining its
+    /// project's worktrees if Kyde doesn't list it yet, and shown if that tab was on screen.
+    /// Restarted in the same worktree, it takes that tab's place in the strip.
     #[cfg(all(feature = "terminal", unix))]
     fn agents_adopt_moved(
         &mut self,
         moved: crate::agent_host::Moved,
-        name: Option<String>,
-        on_screen: bool,
+        old: &str,
         cx: &mut Context<Self>,
     ) {
+        let pos = |g: &AgentTabs, id: &str| g.tabs.iter().position(|t| t.id == id);
+        let (name, teleported) = self
+            .agents
+            .tabs
+            .values()
+            .find_map(|g| {
+                let t = &g.tabs[pos(g, old)?];
+                Some((t.name.clone(), t.teleported))
+            })
+            .unwrap_or_default();
+        let on_screen = self
+            .agents_visible_tab()
+            .and_then(|(w, i)| self.agents.tabs.get(w)?.tabs.get(i))
+            .is_some_and(|t| t.id == old);
+        // The tab shown in the strip it joins: unless that's the one it replaces, it stays.
+        let shown = self
+            .agents
+            .tabs
+            .get(&moved.to)
+            .and_then(|g| g.tabs.get(g.active))
+            .map(|t| t.id.clone())
+            .filter(|id| id != old);
         let open = self.agents.tabs.iter().find_map(|(wt, g)| {
             let i = g.tabs.iter().position(|t| t.id == moved.id)?;
             Some((wt.clone(), i))
@@ -3883,8 +3965,11 @@ impl Kyde {
             // The host scan found it first.
             if let Some(g) = self.agents.tabs.get_mut(&wt) {
                 g.active = i;
-                if let Some(t) = g.tabs.get_mut(i).filter(|_| name.is_some()) {
-                    t.name = name;
+                if let Some(t) = g.tabs.get_mut(i) {
+                    t.teleported = teleported;
+                    if name.is_some() {
+                        t.name = name;
+                    }
                 }
             }
             wt
@@ -3903,6 +3988,7 @@ impl Kyde {
             let saved = kyde_config::agents::SavedTab {
                 agent: true,
                 name,
+                teleported,
                 ..Default::default()
             };
             if !self.agents_attach_tab(moved.to.clone(), &saved, &moved.id, cx) {
@@ -3910,7 +3996,17 @@ impl Kyde {
             }
             moved.to
         };
-        if on_screen {
+        // A restart: it takes its old tab's place in the strip, and the tab that was shown
+        // there stays shown.
+        if let Some(g) = self.agents.tabs.get_mut(&wt) {
+            if let (Some(new), Some(_)) = (pos(g, &moved.id), pos(g, old)) {
+                let tab = g.tabs.remove(new);
+                let at = pos(g, old).unwrap_or(g.tabs.len());
+                g.tabs.insert(at, tab);
+                g.active = shown.and_then(|id| pos(g, &id)).unwrap_or(at);
+            }
+        }
+        if on_screen && self.agents.selected.as_deref() != Some(wt.as_path()) {
             self.agents_select(wt, cx);
         }
         self.agents_save(cx);
@@ -4576,7 +4672,8 @@ impl Kyde {
     /// Why worktree `wt` isn't finished on its agents' side (`None` = it is): removing it
     /// closes its tabs, ending their agents — so a tab at work, or one the cleanup hasn't found
     /// finished (still on its task between turns: an open PR, a CI watch, your next prompt),
-    /// or a background agent at work there keeps it. Once its work is merged, a tab sitting
+    /// or a background agent that needs the folder ([`Self::agents_sub_needs`]) keeps it —
+    /// wherever that one is shown. Once its work is merged, a tab sitting
     /// at its prompt has nothing left to do: it doesn't wait out the quiet spell the cleanup
     /// needs before judging (reopening the worktree resumes its session, which restarts it),
     /// nor for you to look at what it last said — the row already reads safe to close.
@@ -4587,21 +4684,37 @@ impl Kyde {
             .get(wt)
             .map_or(&[][..], |g| g.tabs.as_slice());
         let merged = self.agents_wt_merged(wt);
-        tabs.iter()
+        let own = tabs
+            .iter()
             .filter(|t| match t.shown {
                 AgentState::Working => true,
+                // Closing it would end its background agents too.
+                _ if !t.subs.is_empty() => true,
                 AgentState::Unseen | AgentState::Idle | AgentState::None if merged => false,
                 _ => t.verdict.is_none(),
             })
             .map(|t| t.shown)
-            .chain(self.agents_subs_in(wt).next().map(|_| AgentState::Working))
-            .max()
-            .map(|s| match s {
-                AgentState::Blocked => "Its agent is waiting on you",
-                AgentState::Working => "Its agent is working",
-                AgentState::Unseen => "Its agent is done — you haven't looked yet",
-                AgentState::Idle | AgentState::None => "Its agent isn't finished",
-            })
+            .max();
+        match own {
+            Some(AgentState::Blocked) => Some("Its agent is waiting on you"),
+            Some(AgentState::Working) => Some("Its agent is working"),
+            _ if self.agents_sub_needs(wt) => Some("A background agent is at work in it"),
+            Some(AgentState::Unseen) => Some("Its agent is done — you haven't looked yet"),
+            Some(AgentState::Idle | AgentState::None) => Some("Its agent isn't finished"),
+            None => None,
+        }
+    }
+
+    /// Whether a background agent at work — started from a tab anywhere — needs worktree
+    /// `wt`: it's shown there, or its work reaches it (`agents::sub_uses`: it runs there, or
+    /// reads or writes there by path). Removing the folder would pull it from under the agent.
+    fn agents_sub_needs(&self, wt: &Path) -> bool {
+        self.agents
+            .tabs
+            .values()
+            .flat_map(|g| &g.tabs)
+            .flat_map(|t| &t.subs)
+            .any(|s| s.worktree.as_deref() == Some(wt) || s.uses.iter().any(|u| u == wt))
     }
 
     /// One worktree's line in the Clean Up window: what removing it costs, whether it's safe

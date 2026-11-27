@@ -4620,6 +4620,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     t.subs = vec![crate::agents::SubAgent {
                         id: "a1".into(),
                         worktree: Some(there.clone()),
+                        uses: Vec::new(),
                         what: "Add a whole-word toggle to find".into(),
                         steps: vec![
                             Step::Said(
@@ -4638,6 +4639,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     let finished = crate::agents::SubAgent {
                         id: "a0".into(),
                         worktree: Some(there.clone()),
+                        uses: Vec::new(),
                         what: "Map the find bar's key handling".into(),
                         steps: vec![Step::Said("The find bar's keys live in find.rs.".into())],
                         at: std::time::SystemTime::now(),
@@ -9059,6 +9061,78 @@ mod gpui_smoke_tests {
             .unwrap();
     }
 
+    /// A worktree a background agent's work reaches isn't finished while that agent is at
+    /// work (#251) — though the agent is shown in another worktree and no tab is open in
+    /// this one: the Clean Up window doesn't tick it.
+    #[cfg(feature = "terminal")]
+    #[gpui::test]
+    fn agents_cleanup_keeps_a_worktree_a_background_agent_uses(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        let wt = dir.with_extension("task");
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                k.agents.cfg.spaces[0].worktrees.push(wt.clone());
+                k.agents_new_tab(dir.clone(), true, None, cx);
+                // Nothing uncommitted, nothing to push, no tab of its own: finished.
+                k.agents.git.insert(wt.clone(), agents::WtGit::default());
+                assert!(k.agents_finished_worktrees().contains(&wt));
+                // The checkout's tab sends an agent that reads there by path.
+                k.agents.tabs.get_mut(&dir).unwrap().tabs[0].subs = vec![agents::SubAgent {
+                    id: "a1".into(),
+                    worktree: Some(dir.clone()),
+                    uses: vec![dir.clone(), wt.clone()],
+                    what: "Research".into(),
+                    steps: Vec::new(),
+                    at: std::time::SystemTime::now(),
+                }];
+                assert!(!k.agents_finished_worktrees().contains(&wt));
+            })
+            .unwrap();
+    }
+
+    /// A restarted agent (`ky agent restart`, #252) takes its old tab's place in the strip:
+    /// same spot, same name, and shown if that tab was.
+    #[cfg(all(feature = "terminal", unix))]
+    #[gpui::test]
+    fn agents_restarted_tab_takes_its_old_tabs_place(cx: &mut TestAppContext) {
+        let (handle, dir) = boot(cx);
+        handle
+            .update(cx, |k, _w, cx| {
+                k.agents.cfg.command = "true".into(); // never launch a real agent in tests
+                k.switch_mode(Mode::Agents, cx);
+                k.agents_add_space(dir.clone(), cx);
+                for _ in 0..3 {
+                    k.agents_new_tab(dir.clone(), true, None, cx);
+                }
+                let g = k.agents.tabs.get_mut(&dir).unwrap();
+                let ids: Vec<String> = g.tabs.iter().map(|t| t.id.clone()).collect();
+                // The first tab, on screen, restarts. The last one plays the agent that took
+                // over (as the host scan adopts it: at the end of the strip).
+                let (old, heir) = (ids[0].clone(), ids[ids.len() - 1].clone());
+                g.tabs[0].name = Some("Fix login".into());
+                g.active = 0;
+                let moved = agent_host::Moved {
+                    id: heir.clone(),
+                    to: dir.clone(),
+                    space: dir.clone(),
+                };
+                k.agents_hand_over(Some(moved), &old, cx);
+                let g = &k.agents.tabs[&dir];
+                let now: Vec<&String> = g.tabs.iter().map(|t| &t.id).collect();
+                let mut want: Vec<&String> = ids[..ids.len() - 1].iter().collect();
+                want[0] = &heir;
+                assert_eq!(now, want);
+                assert_eq!(
+                    (g.active, g.tabs[0].name.as_deref()),
+                    (0, Some("Fix login"))
+                );
+            })
+            .unwrap();
+    }
+
     /// A worktree whose pull request is merged is safe to close once nothing of it is left:
     /// its commits are in the merge (git still counts them unpushed — the merge deleted the
     /// remote branch) and its one untracked file is main's own copy, so its × removes it
@@ -9517,6 +9591,7 @@ mod gpui_smoke_tests {
                     sub: agents::SubAgent {
                         id: id.into(),
                         worktree: Some(dir.clone()),
+                        uses: Vec::new(),
                         what: "Review the diff".into(),
                         steps: Vec::new(),
                         at,

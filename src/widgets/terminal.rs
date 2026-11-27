@@ -679,6 +679,19 @@ impl TerminalView {
         self.pid.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Whether it shows an agent host's terminal (which outlives this view) rather than a PTY
+    /// of its own.
+    pub fn hosted(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self.backend, Backend::Host { .. })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
     /// End a hosted terminal's agent for good (closing its tab). A local terminal ends when
     /// the view drops.
     pub fn kill_host(&self, id: &str) {
