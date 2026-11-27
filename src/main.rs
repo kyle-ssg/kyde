@@ -9143,7 +9143,8 @@ mod gpui_smoke_tests {
 
     /// Once its PR is merged, a worktree whose agent sits at its prompt is finished — without
     /// waiting out the quiet spell the cleanup needs before judging the tab (opening the
-    /// worktree resumes its session, which restarts that spell).
+    /// worktree resumes its session, which restarts that spell), and without you having
+    /// looked at what it last said.
     #[cfg(feature = "terminal")]
     #[gpui::test]
     fn agents_cleanup_ticks_a_merged_worktree_whose_agent_is_at_its_prompt(
@@ -9184,6 +9185,14 @@ mod gpui_smoke_tests {
                 assert!(
                     k.agents_finished_worktrees().contains(&wt),
                     "merged: the Clean Up window ticks it"
+                );
+                // It finished while you were away and you haven't opened it: still ticked.
+                let t = &mut k.agents.tabs.get_mut(&wt).unwrap().tabs[0];
+                t.unseen = true;
+                t.shown = agents::AgentState::Unseen;
+                assert!(
+                    k.agents_finished_worktrees().contains(&wt),
+                    "merged and done, not looked at: the Clean Up window ticks it"
                 );
             })
             .unwrap();
