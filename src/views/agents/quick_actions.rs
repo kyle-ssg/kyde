@@ -120,7 +120,9 @@ impl Kyde {
     }
 
     /// Hand quick action `action` to tab `id`'s Claude Code — or, when it can't take a command
-    /// right now, say why, standing on the button at `at`.
+    /// right now, say why, standing on the button at `at`. Its prompt is typed and sent, so
+    /// first its Claude Code must still hold the terminal (`agents::holds_terminal`, read off
+    /// the UI thread): a shell left at its prompt would run the text as a command.
     fn agents_send_action(
         &mut self,
         wt: &Path,
@@ -129,24 +131,54 @@ impl Kyde {
         at: gpui::Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        let at = gpui::point(at.x + px(12.0), at.y - px(12.0));
         if let Some(why) = self.agents_send_blocker(wt, id, cx) {
-            let at = gpui::point(at.x + px(12.0), at.y - px(12.0));
             self.open_menu(at, MenuTarget::AgentWhy(why), cx);
             return;
         }
-        let Some(t) = self
+        let Some(pid) = self
             .agents
             .tabs
-            .get_mut(wt)
-            .and_then(|g| g.tabs.iter_mut().find(|t| t.id == id))
+            .get(wt)
+            .and_then(|g| g.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.view.read(cx).shell_pid())
         else {
             return;
         };
-        // On its way: the next turn's end picks again.
-        t.actions.clear();
-        t.view
-            .update(cx, |v, cx| v.submit_prompt(&action.prompt, true, cx));
-        self.agents.focus_pending = true;
-        cx.notify();
+        let (wt, id, action) = (wt.to_path_buf(), id.to_string(), action.clone());
+        cx.spawn(async move |this, cx| {
+            let held = cx
+                .background_executor()
+                .spawn(async move { crate::agents::holds_terminal(pid) })
+                .await;
+            this.update(cx, |this, cx| {
+                let why = if held {
+                    this.agents_send_blocker(&wt, &id, cx)
+                } else {
+                    Some("Claude isn't running in this tab")
+                };
+                if let Some(why) = why {
+                    this.open_menu(at, MenuTarget::AgentWhy(why), cx);
+                    return;
+                }
+                let tab = this
+                    .agents
+                    .tabs
+                    .get_mut(&wt)
+                    .and_then(|g| g.tabs.iter_mut().find(|t| t.id == id));
+                // Still on offer: a second click while this one was checked sends nothing.
+                let Some(t) = tab.filter(|t| t.actions.contains(&action)) else {
+                    return;
+                };
+                // On its way: the next turn's end picks again.
+                t.actions.clear();
+                t.view
+                    .update(cx, |v, cx| v.submit_prompt(&action.prompt, true, cx));
+                this.agents.focus_pending = true;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 }
