@@ -999,11 +999,20 @@ pub(crate) fn ai_says_done(prompt: &str) -> Option<String> {
 
 /// A small model's (`claude -p --model haiku`) reply to `prompt`; `None` when `claude` can't
 /// run. Spawns it (a few seconds): call it off the UI thread.
+///
+/// `prompt` carries text nobody vetted (a terminal's last lines, a review comment that became
+/// a prompt), so the model only answers: it gets no tools and no MCP servers — your own
+/// `claude` settings may allow `gh` or `git` without asking, and text in a terminal could
+/// otherwise talk it into running them. A `claude` too old for these flags gives no reply.
 fn ask_small_model(prompt: &str) -> Option<String> {
     let out = std::process::Command::new(claude_bin())
-        // Outside any project, so no CLAUDE.md / settings are loaded for the question.
+        // Outside any project — and only your own settings count: the temp dir is shared on
+        // Linux, where a `.claude/settings.json` somebody else left in it would run its hooks.
         .current_dir(std::env::temp_dir())
-        .args(["-p", "--model", "haiku", prompt])
+        // `--tools` takes a list: a flag after it, never the prompt.
+        .args(["-p", "--model", "haiku"])
+        .args(["--tools", "", "--strict-mcp-config"])
+        .args(["--setting-sources", "user", prompt])
         .output()
         .ok()?;
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
