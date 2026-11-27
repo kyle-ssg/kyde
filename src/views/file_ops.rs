@@ -45,18 +45,32 @@ pub(crate) fn remap_under(
 
 /// Recursively copy `src` → `dst` (a single file, or a whole directory tree). Parents of
 /// `dst` are created as needed. Used by paste/duplicate (issue #67).
+///
+/// A symlink is copied as the link it is, never followed (as Finder and `cp -R` do): a
+/// folder that links to `~/.ssh` would otherwise be copied out whole, and one that links
+/// back into itself would never end. Anything that's neither a file, a folder nor a link (a
+/// pipe, a device) is left out — reading one never finishes.
 fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
-    if src.is_dir() {
+    let kind = std::fs::symlink_metadata(src)?.file_type();
+    if kind.is_dir() {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
             copy_tree(&entry.path(), &dst.join(entry.file_name()))?;
         }
-    } else {
-        if let Some(parent) = dst.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        return Ok(());
+    }
+    if !kind.is_file() && !kind.is_symlink() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if kind.is_file() {
         std::fs::copy(src, dst)?;
+    } else {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
     }
     Ok(())
 }
@@ -1038,5 +1052,33 @@ impl Kyde {
             Err(e) => self.fail("Creating scratch file", e),
         }
         cx.notify();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    /// A copied folder keeps its symlinks as links: one pointing out of it doesn't bring
+    /// what it points at along, and one pointing back into it doesn't recurse forever.
+    #[test]
+    fn copying_a_folder_never_follows_its_symlinks() {
+        let root = std::env::temp_dir().join(format!("kyde-copy-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (secret, src, dst) = (root.join("secret"), root.join("src"), root.join("dst"));
+        std::fs::create_dir_all(&secret).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(secret.join("id_rsa"), "private").unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(&secret, src.join("out")).unwrap();
+        std::os::unix::fs::symlink(&src, src.join("loop")).unwrap();
+
+        super::copy_tree(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "a");
+        for (link, target) in [("out", &secret), ("loop", &src)] {
+            let copied = dst.join(link);
+            assert!(std::fs::symlink_metadata(&copied).unwrap().is_symlink());
+            assert_eq!(&std::fs::read_link(&copied).unwrap(), target);
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }
