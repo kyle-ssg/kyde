@@ -115,11 +115,28 @@ fn socket_path_in(dir: &Path, profile: &str) -> PathBuf {
 /// should exit without opening a window); `false` = nothing listening, so we're the instance.
 /// A stale socket (owner died) is removed here so the [`listen`] that follows can bind.
 pub(crate) fn try_send(req: &Request) -> bool {
-    send_to(&socket_path(), req)
+    send_to(&socket_path(), req, me())
 }
 
-/// [`try_send`] against an explicit socket path (the seam the tests drive).
-fn send_to(sock: &Path, req: &Request) -> bool {
+/// This process's user.
+fn me() -> u32 {
+    // SAFETY: `geteuid` takes nothing, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// [`try_send`] against an explicit socket path, as user `uid` (the seam the tests drive).
+///
+/// A socket somebody else owns is never talked to: without a per-user runtime dir the socket
+/// sits in a shared `/tmp`, where another account can make ours first (its name is no
+/// secret) and would be handed every project path we launch with. Nor is it ours to remove:
+/// this launch then runs as an instance of its own.
+fn send_to(sock: &Path, req: &Request, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // The entry itself, not what a symlink left there points at.
+    match std::fs::symlink_metadata(sock) {
+        Ok(m) if m.uid() == uid => {}
+        _ => return false,
+    }
     if let Ok(mut stream) = UnixStream::connect(sock) {
         // A running instance answered; if the write fails it's mid-shutdown — report
         // undelivered so we take over rather than exiting silently.
@@ -152,14 +169,20 @@ pub(crate) fn listen(
 ) -> Option<(Guard, std::thread::JoinHandle<()>)> {
     let path = socket_path();
     let listener = UnixListener::bind(&path).ok()?;
+    // Ours alone to connect to, wherever it had to go.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
     let handle = std::thread::Builder::new()
         .name("kyde-instance".into())
         .spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { continue };
                 let mut buf = String::new();
-                // Bound the read: a peer that never closes must not wedge the thread, and a
-                // launch payload is one short line.
+                // Bound the read: a peer that never closes (or never writes) must not wedge
+                // the thread, and a launch payload is one short line.
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                 if Read::by_ref(&mut stream)
                     .take(4096)
                     .read_to_string(&mut buf)
@@ -265,7 +288,7 @@ mod tests {
 
         // Nothing listening yet: a stale file is cleaned up, delivery fails.
         std::fs::write(&sock, b"stale").expect("write stale socket");
-        assert!(!send_to(&sock, &Request::Activate));
+        assert!(!send_to(&sock, &Request::Activate, me()));
         assert!(!sock.exists(), "stale socket removed so we can bind");
 
         let listener = UnixListener::bind(&sock).expect("bind");
@@ -281,7 +304,11 @@ mod tests {
         });
 
         let want = Request::Open(PathBuf::from("/Users/x/proj"));
-        assert!(send_to(&sock, &want), "listener accepts the launch");
+        // A socket another user owns (they made ours first, in a shared /tmp) is told
+        // nothing, and left where it is.
+        assert!(!send_to(&sock, &want, me() + 1));
+        assert!(sock.exists() && rx.try_recv().is_err());
+        assert!(send_to(&sock, &want, me()), "listener accepts the launch");
         let got = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("request forwarded");
