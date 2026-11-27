@@ -957,6 +957,51 @@ pub(crate) fn shell_is_idle(pid: u32) -> bool {
         .is_ok_and(|o| o.stdout.iter().all(u8::is_ascii_whitespace))
 }
 
+/// Shells, by name: one of these in a tab's foreground is a prompt waiting for a command.
+const SHELLS: [&str; 12] = [
+    "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "pwsh", "elvish", "xonsh",
+];
+
+/// One `ps -o pid=,pgid=,tpgid=,comm=` line: process, its group, the group in its terminal's
+/// foreground, and its command (macOS gives a full path, which may hold spaces).
+fn ps_row(line: &str) -> Option<(i64, i64, i64, &str)> {
+    let mut rest = line;
+    let mut num = || {
+        let (n, after) = rest.trim_start().split_once(char::is_whitespace)?;
+        rest = after;
+        n.parse::<i64>().ok()
+    };
+    let (pid, group, front) = (num()?, num()?, num()?);
+    Some((pid, group, front, rest.trim()))
+}
+
+/// Whether a program holds the terminal of shell `pid`, going by `ps` (lines as [`ps_row`]
+/// reads them): the terminal's foreground process group has something in it that isn't a
+/// shell. A shell at its prompt is its own terminal's foreground — and so is a shell started
+/// inside it — so text typed there would run as a command.
+pub(crate) fn program_in_front(ps: &str, pid: u32) -> bool {
+    let rows: Vec<_> = ps.lines().filter_map(ps_row).collect();
+    let Some(front) = rows.iter().find(|r| r.0 == i64::from(pid)).map(|r| r.2) else {
+        return false;
+    };
+    let is_shell = |comm: &str| {
+        let name = comm.rsplit('/').next().unwrap_or(comm);
+        SHELLS.contains(&name.trim_start_matches('-'))
+    };
+    front > 0 && rows.iter().any(|r| r.1 == front && !is_shell(r.3))
+}
+
+/// Whether a program (an agent) holds the terminal of shell `pid`, not a shell at its prompt:
+/// only then may Kyde type a prompt there and press Enter ([`program_in_front`]). `false`
+/// when it can't be told. Spawns `ps`: call it off the UI thread.
+pub(crate) fn holds_terminal(pid: u32) -> bool {
+    pid != 0
+        && std::process::Command::new("ps")
+            .args(["-A", "-o", "pid=,pgid=,tpgid=,comm="])
+            .output()
+            .is_ok_and(|o| program_in_front(&String::from_utf8_lossy(&o.stdout), pid))
+}
+
 /// The `claude` CLI: the usual install spots first (a GUI-launched app has a bare `PATH`),
 /// else `claude` on `PATH`.
 fn claude_bin() -> std::path::PathBuf {
@@ -2437,6 +2482,26 @@ mod tests {
 
     /// Closing asks while the agent is at work or waiting on you — also when it last said so
     /// and went quiet (interrupted) — not once its turn is finished or before its first.
+    /// A prompt is typed (and sent) only where a program holds the terminal: with Claude Code
+    /// gone — or a second shell started — whatever is typed would run as a command.
+    #[test]
+    fn a_prompt_is_typed_only_where_a_program_holds_the_terminal() {
+        let claude = "  10   10   20 -zsh\n  20   20   20 /Users/a b/.local/bin/claude\n";
+        assert!(program_in_front(claude, 10));
+        // A wrapper script that runs it: the shell running the script isn't a prompt.
+        assert!(program_in_front(
+            "10 10 20 -zsh\n20 20 20 sh\n21 20 20 node",
+            10
+        ));
+        // At its prompt (a prompt helper beside it changes nothing), or a shell inside it.
+        assert!(!program_in_front("10 10 10 -zsh\n11 11 10 gitstatusd", 10));
+        assert!(!program_in_front("10 10 30 -zsh\n30 30 30 /bin/bash", 10));
+        assert!(
+            !program_in_front("10 10 20 -zsh", 99),
+            "a shell that's gone"
+        );
+    }
+
     #[test]
     fn closing_asks_only_while_an_agent_is_not_done() {
         let blocked = Hook::Blocked("a question".into());

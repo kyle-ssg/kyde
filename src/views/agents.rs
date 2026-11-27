@@ -4214,8 +4214,8 @@ impl Kyde {
             }
             return;
         };
-        // Its shell still runs the agent (else zsh would run the pasted lines), and its state
-        // file still says it's free — both read off the UI thread.
+        // Its agent still holds the terminal (else a shell would run the pasted lines), and its
+        // state file still says it's free — both read off the UI thread.
         let (id, pid) = (tab.id.clone(), tab.view.read(cx).shell_pid());
         if let Some(fb) = self.agents.feedback.get_mut(wt) {
             fb.checking = true;
@@ -4226,7 +4226,7 @@ impl Kyde {
             let (alive, hook) = cx
                 .background_executor()
                 .spawn(async move {
-                    let alive = pid != 0 && !crate::agents::shell_is_idle(pid);
+                    let alive = crate::agents::holds_terminal(pid);
                     let hook = std::fs::read_to_string(state)
                         .ok()
                         .and_then(|s| crate::agents::parse_hook(&s))
