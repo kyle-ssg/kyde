@@ -69,6 +69,8 @@ impl HttpClient for UreqClient {
                         .into_reader()
                         .take(64 * 1024 * 1024)
                         .read_to_end(&mut body)?;
+                    // …and so a small one can't either, once decoded (see `safe_img`).
+                    super::safe_img::check(&body).map_err(|why| anyhow::anyhow!(why))?;
                     Ok((status, body))
                 })();
                 let _ = tx.send(result);

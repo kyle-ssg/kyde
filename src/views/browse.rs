@@ -62,7 +62,11 @@ impl Kyde {
                     .items_center()
                     .justify_center()
                     .p_4()
-                    .child(img(abs).max_w_full().max_h_full())
+                    .child(
+                        crate::widgets::safe_img::local(abs)
+                            .max_w_full()
+                            .max_h_full(),
+                    )
                     .into_any_element()
             } else if self
                 .browse
