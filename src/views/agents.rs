@@ -4578,7 +4578,8 @@ impl Kyde {
     /// finished (still on its task between turns: an open PR, a CI watch, your next prompt),
     /// or a background agent at work there keeps it. Once its work is merged, a tab sitting
     /// at its prompt has nothing left to do: it doesn't wait out the quiet spell the cleanup
-    /// needs before judging (reopening the worktree resumes its session, which restarts it).
+    /// needs before judging (reopening the worktree resumes its session, which restarts it),
+    /// nor for you to look at what it last said — the row already reads safe to close.
     fn agents_wt_busy(&self, wt: &Path) -> Option<&'static str> {
         let tabs = self
             .agents
@@ -4589,7 +4590,7 @@ impl Kyde {
         tabs.iter()
             .filter(|t| match t.shown {
                 AgentState::Working => true,
-                AgentState::Idle | AgentState::None if merged => false,
+                AgentState::Unseen | AgentState::Idle | AgentState::None if merged => false,
                 _ => t.verdict.is_none(),
             })
             .map(|t| t.shown)
