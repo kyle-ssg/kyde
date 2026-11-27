@@ -18,7 +18,6 @@ workflows:
         - 'actions/checkout@v7.0.1'
         - 'dtolnay/rust-toolchain@stable'
         - 'googleapis/release-please-action@v5.0.0'
-        - 'swatinem/rust-cache@v2.9.3'
 dependencies:
     'actions/checkout@v7.0.1':
         ref: 'v7.0.1'
