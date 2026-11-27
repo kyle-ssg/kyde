@@ -651,6 +651,33 @@ pub fn agents_dir() -> PathBuf {
     PathBuf::from(home).join(".kyde").join("agents")
 }
 
+/// Create [`agents_dir`] if it's missing, and keep it yours alone (`0700`, tightening one an
+/// older Kyde made): its sockets type into your agents' terminals, and its state files name
+/// your sessions and prompts. File IO.
+///
+/// # Errors
+/// When the folder can't be created or its permissions set.
+pub fn make_agents_dir() -> std::io::Result<PathBuf> {
+    let dir = agents_dir();
+    private_dir(&dir)?;
+    Ok(dir)
+}
+
+/// `dir` (created with its parents if missing) readable, writable and enterable by its owner
+/// only.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
 /// Scratch's folder, `~/.kyde/scratch` — beside [`agents_dir`] (so tests' throwaway
 /// `$KYDE_AGENTS_DIR` moves it too). Each scratch row is a folder in it.
 #[must_use]
@@ -675,6 +702,20 @@ pub fn worktree_path(space: &Path, name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The agents folder is its owner's alone — one an older Kyde left open to others too.
+    #[cfg(unix)]
+    #[test]
+    fn the_agents_folder_is_private_even_if_it_was_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("kyde-private-dir-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn partial_file_keeps_spaces_and_fills_defaults() {

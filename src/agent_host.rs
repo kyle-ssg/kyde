@@ -299,8 +299,7 @@ fn parse_resize(p: &[u8]) -> Option<WindowSize> {
 /// Start a host for `spec`, detached (it outlives Kyde). Kyde binds the socket and hands it
 /// over, so a client can connect the moment this returns.
 pub(crate) fn spawn(spec: &HostSpec) -> io::Result<()> {
-    let dir = kyde_config::agents::agents_dir();
-    std::fs::create_dir_all(&dir)?;
+    let dir = kyde_config::agents::make_agents_dir()?;
     let sock = sock_path(&spec.id);
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;

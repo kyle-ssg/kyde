@@ -504,7 +504,7 @@ impl Kyde {
             let r = cx
                 .background_executor()
                 .spawn(async move {
-                    let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+                    let _ = kyde_config::agents::make_agents_dir();
                     kyde_config::claude_hooks::apply(
                         &kyde_config::claude_hooks::settings_path(),
                         on,
@@ -2649,7 +2649,7 @@ impl Kyde {
         let id = crate::agents::tab_id();
         // The Claude Code hook (see `kyde_config::claude_hooks`) reports this tab's state into
         // its state file; agents can find themselves by id.
-        let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+        let _ = kyde_config::agents::make_agents_dir();
         if let Some(text) = brief {
             // Long before the first prompt is typed. If the agent moves out, Claude Code's
             // worktree mustn't make this checkout read as dirty.
@@ -3223,7 +3223,7 @@ impl Kyde {
             .spawn(async move {
                 let path = crate::agents::done_path();
                 let tmp = path.with_extension("json.tmp");
-                let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+                let _ = kyde_config::agents::make_agents_dir();
                 if std::fs::write(&tmp, json).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
                 }
