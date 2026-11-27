@@ -59,7 +59,7 @@ fn list_dir_files(root: &std::path::Path) -> Vec<PathBuf> {
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
-    if let Ok(gitignore) = std::fs::read_to_string(root.join(".gitignore")) {
+    if let Ok(gitignore) = git::read_file_text(root.join(".gitignore")) {
         for line in gitignore.lines() {
             let l = line.trim();
             // Skip comments, blanks, and glob patterns (we only match plain dir names).

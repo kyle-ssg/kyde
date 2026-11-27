@@ -425,7 +425,7 @@ impl Repo {
     /// (which, fed through the diff editor's autosave, would erase the file).
     pub fn working_content(&self, rel: &Path) -> Result<String> {
         let full = self.root.join(rel);
-        let bytes = std::fs::read(&full).map_err(io_err(format!("reading {full:?}")))?;
+        let bytes = read_file(&full).map_err(io_err(format!("reading {full:?}")))?;
         if bytes.contains(&0) {
             return Err(GitError::BinaryFile(rel.to_path_buf()));
         }
@@ -1275,6 +1275,35 @@ impl Repo {
     }
 }
 
+/// A project file's bytes — an error unless `path` is, or links to, a regular file.
+///
+/// A project is somebody else's folder as often as not, and a path in it can be a symlink to
+/// something that isn't a file: reading `/dev/zero` never ends (and takes all the memory
+/// there is), reading a pipe never starts. Whatever is read out of a project goes through
+/// here or [`read_file_text`], never straight through `std::fs::read`.
+///
+/// # Errors
+/// When `path` can't be read, or isn't a regular file.
+pub fn read_file(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    let path = path.as_ref();
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    std::fs::read(path)
+}
+
+/// [`read_file`], as text.
+///
+/// # Errors
+/// When `path` can't be read, isn't a regular file, or isn't UTF-8.
+pub fn read_file_text(path: impl AsRef<Path>) -> std::io::Result<String> {
+    String::from_utf8(read_file(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// The `git log --format` fields every log parses (`parse_log_fields`): \x1f (unit
 /// separator) between fields, one commit per line (%s/%D are single-line).
 const LOG_FIELDS: &str = "%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%D%x1f%P";
@@ -1634,6 +1663,24 @@ fn git_stdin(dir: &Path, args: &[&str], stdin: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A committed `notes.md -> /dev/zero` (or a link to a folder) is refused, not read
+    /// until the memory runs out; a link to a real file still reads.
+    #[cfg(unix)]
+    #[test]
+    fn only_regular_files_are_read() {
+        let dir = std::env::temp_dir().join(format!("kyde-read-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.md"), "hello").unwrap();
+        std::os::unix::fs::symlink("/dev/zero", dir.join("zero.md")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("folder.md")).unwrap();
+        std::os::unix::fs::symlink(dir.join("real.md"), dir.join("link.md")).unwrap();
+        assert!(read_file(dir.join("zero.md")).is_err());
+        assert!(read_file_text(dir.join("folder.md")).is_err());
+        assert_eq!(read_file_text(dir.join("link.md")).unwrap(), "hello");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn init_turns_a_plain_dir_into_a_repo() {

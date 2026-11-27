@@ -183,7 +183,7 @@ impl Kyde {
                 let now = lh_now_ms();
                 for (rel, abs) in abs {
                     // Unreadable (deleted mid-burst) or non-UTF-8 (binary) files are skipped.
-                    if let Ok(content) = std::fs::read_to_string(&abs) {
+                    if let Ok(content) = git::read_file_text(&abs) {
                         if let Ok(mut s) = store.lock() {
                             let _ = s.record(&rel, &content, EventKind::Change, None, now);
                         }
@@ -293,7 +293,7 @@ impl Kyde {
                 }
                 budget -= meta.len();
                 // Gone mid-scan or non-UTF-8 (binary) → nothing to snapshot.
-                let Ok(content) = std::fs::read_to_string(&abs) else {
+                let Ok(content) = git::read_file_text(&abs) else {
                     continue;
                 };
                 if let Ok(mut s) = store.lock() {
@@ -348,7 +348,7 @@ impl Kyde {
             .into_iter()
             .filter_map(|rel| {
                 let abs = self.lh_abs(&rel)?;
-                std::fs::read_to_string(abs).ok().map(|c| (rel, c))
+                git::read_file_text(abs).ok().map(|c| (rel, c))
             })
             .collect();
         if contents.is_empty() {
@@ -393,12 +393,12 @@ impl Kyde {
         if to_abs.is_dir() {
             for abs in lh_walk_files(&to_abs) {
                 if let (Ok(rest), Ok(content)) =
-                    (abs.strip_prefix(&to_abs), std::fs::read_to_string(&abs))
+                    (abs.strip_prefix(&to_abs), git::read_file_text(&abs))
                 {
                     pairs.push((from.join(rest), to.join(rest), content));
                 }
             }
-        } else if let Ok(content) = std::fs::read_to_string(&to_abs) {
+        } else if let Ok(content) = git::read_file_text(&to_abs) {
             pairs.push((from.to_path_buf(), to.to_path_buf(), content));
         }
         if pairs.is_empty() {
@@ -439,9 +439,7 @@ impl Kyde {
         let Some(store) = self.lh.store.clone() else {
             return;
         };
-        let content = self
-            .lh_abs(rel)
-            .and_then(|a| std::fs::read_to_string(a).ok());
+        let content = self.lh_abs(rel).and_then(|a| git::read_file_text(a).ok());
         let rel = rel.to_path_buf();
         cx.background_executor()
             .spawn(async move {
@@ -576,7 +574,7 @@ impl Kyde {
                 .flatten();
             let current = self
                 .lh_abs(f)
-                .and_then(|a| std::fs::read_to_string(a).ok())
+                .and_then(|a| git::read_file_text(a).ok())
                 .map(|c| kyde_local_history::content_hash(&c));
             match (base, current) {
                 (Some(b), Some(c)) => b != c,
@@ -668,9 +666,7 @@ impl Kyde {
         };
         // State at the selected point; no event → diff against empty (added-since).
         let snapshot = self.lh_selected_content().unwrap_or_default();
-        let current_opt = self
-            .lh_abs(&path)
-            .and_then(|a| std::fs::read_to_string(a).ok());
+        let current_opt = self.lh_abs(&path).and_then(|a| git::read_file_text(a).ok());
         // Remember existence for the header ("Deleted" beats an empty pane).
         self.lh.current_missing = current_opt.is_none();
         let current = current_opt.unwrap_or_default();
@@ -770,9 +766,7 @@ impl Kyde {
         let plan: Vec<(PathBuf, Restore)> = paths
             .into_iter()
             .filter_map(|p| {
-                let current = self
-                    .lh_abs(&p)
-                    .and_then(|a| std::fs::read_to_string(a).ok());
+                let current = self.lh_abs(&p).and_then(|a| git::read_file_text(a).ok());
                 if self.lh_existed_before(&p) {
                     // Had a prior content state → rewrite to it (if it differs).
                     let ev = self.lh_base_event_for(&p)?;
@@ -853,7 +847,7 @@ impl Kyde {
             let Some(abs) = self.lh_abs(rel) else {
                 continue;
             };
-            if let Ok(content) = std::fs::read_to_string(abs) {
+            if let Ok(content) = git::read_file_text(abs) {
                 let _ = s.record(
                     rel,
                     &content,

@@ -4299,7 +4299,7 @@ fn apply_shot(view: &mut Kyde, name: &str, window: &mut Window, cx: &mut Context
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-                    let current = std::fs::read_to_string(root.join(&rel)).unwrap_or_default();
+                    let current = git::read_file_text(root.join(&rel)).unwrap_or_default();
                     if let Ok(mut s) = store.lock() {
                         let _ = s.record(
                             &rel,
