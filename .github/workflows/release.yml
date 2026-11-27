@@ -99,10 +99,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Cache cargo + target
-        uses: Swatinem/rust-cache@v2.9.3
-        with:
-          key: ${{ matrix.target }}
+      # No build cache here, unlike build.yml: this job holds the signing certificate and
+      # publishes what users install, so it compiles from a clean checkout every time.
+      # A cache would carry whatever an earlier run left in `target/` into a signed build.
 
       # gpui's Linux backend (blade/Vulkan + wayland/x11/xkb + fontconfig) — same list as build.yml.
       - name: Install Linux deps
