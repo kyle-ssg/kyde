@@ -134,6 +134,9 @@ serde_json.workspace = true
 unicode-segmentation = "1"
 # Parse a .ttf/.otf's family name so opened font files preview in their own typeface.
 ttf-parser = "0.25"
+# An image's size, read from its header before gpui decodes it (src/widgets/safe_img.rs).
+# The same crate (and version) gpui decodes with, so nothing new is compiled in.
+image = { version = "0.25", default-features = false }
 # Remote (http/https) images in the Markdown preview — OFF by default. Pulls a
 # blocking HTTP+TLS stack (ureq → rustls), kept out of the default build to
 # protect the footprint (see CONTRIBUTING.md). Local-file images need neither.

@@ -262,7 +262,8 @@ impl MarkdownView {
         } else if let Some(dir) = &self.base_dir {
             let path = dir.join(src);
             if path.exists() {
-                return wrap().child(img(path).max_w_full()).into_any_element();
+                let image = super::safe_img::local(path);
+                return wrap().child(image.max_w_full()).into_any_element();
             }
         }
         // Couldn't load — show the alt text (or the src) as a dim placeholder.
