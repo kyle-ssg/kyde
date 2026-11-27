@@ -395,7 +395,7 @@ fn new_spec(
         .then(|| crate::agents::seeded_brief(cfg, &folder))
         .flatten();
     if let Some(note) = note {
-        let _ = std::fs::create_dir_all(kyde_config::agents::agents_dir());
+        let _ = kyde_config::agents::make_agents_dir();
         std::fs::write(crate::agents::brief_path(&id), note).map_err(|e| e.to_string())?;
         // If it moves out, Claude Code's worktree mustn't make this checkout read as dirty.
         crate::agents::exclude_claude_worktrees(&folder);
